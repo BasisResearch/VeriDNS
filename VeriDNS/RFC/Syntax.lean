@@ -1532,6 +1532,12 @@ private def enumDefBlock (typeName : String) (values : Array EnumValue) : String
   let ctorLines := values.map fun v => s!"  | {v.name} -- {v.code}"
   s!"```lean\ninductive {typeName} where\n{"\n".intercalate ctorLines.toList}\n```"
 
+/-- Pretty-print a field-type syntax for docstring embedding, dropping the
+    hygiene daggers (`✝`) ppTerm adds to quotation-built idents. -/
+private def ppFieldType (ty : TSyntax `term) : CommandElabM String := do
+  let fmt ← liftCoreM (ppTerm ty)
+  return String.ofList (fmt.pretty.toList.filter (· != '✝'))
+
 /-- Generate toCode, ofCode, value lemmas, and roundtrip theorem for an enum type. -/
 private def generateEnumFunctions (fullName : Name) (typeName : String)
     (values : Array EnumValue) : CommandElabM Unit := do
@@ -1618,8 +1624,8 @@ private def generateStructure (name : String) (docstring : String)
   -- visible, so show the fields before the RFC prose.
   let mut fieldLines : Array String := #[]
   for i in [:fields.size] do
-    let tyFmt ← liftCoreM (ppTerm fieldTypes[i]!)
-    fieldLines := fieldLines.push s!"  {fields[i]!.name.toLower} : {tyFmt.pretty}"
+    let tyStr ← ppFieldType fieldTypes[i]!
+    fieldLines := fieldLines.push s!"  {fields[i]!.name.toLower} : {tyStr}"
   let defBlock := s!"```lean\nstructure {name} where\n{"\n".intercalate fieldLines.toList}\n```"
   addDocStringCore fullName
     (if docstring.isEmpty then defBlock else s!"{defBlock}\n\n{docstring}")
@@ -2798,6 +2804,7 @@ private structure EntryField where
   typeStr : String     -- resolved Lean type, as source text
   optional : Bool      -- wrapped in Option (modal partiality)
   src : String         -- source sentence for the docstring
+  verb : String := ""  -- the introducing imperative's verb (operations reading)
   deriving Repr, Inhabited
 
 /-- Is this word an ALL-CAPS structure reference (e.g. "SLIST")? -/
@@ -2838,7 +2845,7 @@ private def deriveEntryStructure (prose : String) (env : Environment) (ns : Name
     if toks.isEmpty then continue
     -- Imperative passes (verb-first clause)
     if toks[0]!.pos == .verb then
-      if let some (.svo _ _ obj pps) := NLP.parseImperativeClause toks emptyNP then
+      if let some (.svo _ vp obj pps) := NLP.parseImperativeClause toks emptyNP then
         match target with
         | none =>
           -- 1: membership imperative
@@ -2848,14 +2855,14 @@ private def deriveEntryStructure (prose : String) (env : Environment) (ns : Name
               target := some pp.np.head
               let fname := stripPlural obj.head
               let (tstr, _) := resolveNPType obj.head obj.preAdjs obj.number env ns
-              fields := fields.push ⟨fname, tstr, false, s⟩
+              fields := fields.push ⟨fname, tstr, false, s, vp.verb⟩
         | some _ =>
           -- 2: possessive-anaphor imperative
           if obj.det == some "their" && obj.number == .plural then
             let fname := stripPlural obj.head
             unless fields.any (·.name == fname) do
               let (tstr, _) := resolveNPType obj.head obj.preAdjs obj.number env ns
-              fields := fields.push ⟨fname, tstr, false, s⟩
+              fields := fields.push ⟨fname, tstr, false, s, vp.verb⟩
     if target.isSome then
       -- 3: modal partiality over a known field's plural
       match NLP.parseClause toks with
@@ -2878,7 +2885,7 @@ private def deriveEntryStructure (prose : String) (env : Environment) (ns : Name
             if np.number == .plural && np.preAdjs.any (·.toLower == "previous") then
               let fname := stripPlural np.head ++ "Count"
               unless fields.any (·.name == fname) do
-                fields := fields.push ⟨fname, "Nat", false, s⟩
+                fields := fields.push ⟨fname, "Nat", false, s, ""⟩
   match target with
   | some t => if fields.isEmpty then none else some (t, fields)
   | none => none
@@ -2911,8 +2918,8 @@ private def generateEntryStructure (prose : String)
   -- into the generated type), then the derivation notes and field sources.
   let mut defLines : Array String := #[]
   for i in [:fieldNames.size] do
-    let tyFmt ← liftCoreM (ppTerm fieldTypes[i]!)
-    defLines := defLines.push s!"  {fieldNames[i]!.getId} : {tyFmt.pretty}"
+    let tyStr ← ppFieldType fieldTypes[i]!
+    defLines := defLines.push s!"  {fieldNames[i]!.getId} : {tyStr}"
   let defBlock := s!"```lean\nstructure {structShort} where\n{"\n".intercalate defLines.toList}\n```"
   let fieldLines := String.join (fields.toList.map fun f =>
     s!"- `{f.name}`{if f.optional then " (partial)" else ""}: \"{f.src}\"\n")
@@ -2928,6 +2935,95 @@ private def generateEntryStructure (prose : String)
   let mut srcs : Array (Name × String) := #[]
   if let some f0 := fields[0]? then
     srcs := srcs.push (fullName, f0.src)
+  -- Operations reading of the same imperatives: the construction class.
+  -- "Copy the names INTO SLIST" — copying into the structure is batch
+  -- construction from the copied things; "Set up THEIR addresses" extends
+  -- it with per-name addresses (the possessive anaphor pairs each address
+  -- with its name); "comparing the MATCH COUNT in SLIST with that computed
+  -- from SNAME and the NS RRs" gives the structure-level accessor and the
+  -- construction-time Nat argument; "If the search for NS RRs FAILS, then
+  -- the resolver initializes SLIST from ... SBELT" licenses the Bool
+  -- failure observable on the construction result. The class extends the
+  -- glossary-generated ⟨Target⟩Spec (same naming convention the anaphor
+  -- rules use), whose binder names are read from its Π-type.
+  let parentName := capitalize target.toLower ++ "Spec"
+  let parentFull := ns ++ Name.mkSimple parentName
+  if let some f0 := fields[0]? then
+    if (env.find? parentFull).isSome && !f0.verb.isEmpty then
+      let parentParams : Array String ← (do
+        let some pi := env.find? parentFull | pure #[]
+        liftTermElabM <| Lean.Meta.forallTelescope pi.type fun args _ => do
+          let mut names : Array String := #[]
+          for a in args do
+            names := names.push (← a.fvarId!.getUserName).toString
+          return names)
+      if h : parentParams.size > 0 then
+        let selfP := parentParams[0]
+        let clsShort := capitalize target.toLower ++ "From" ++
+          capitalize f0.name ++ "Spec"
+        if (env.find? (ns ++ Name.mkSimple clsShort)).isNone then
+          -- match-count accessor: ⟨premod⟩ "count" "in" ⟨TARGET⟩
+          let mcInfo? : Option (String × String) := Id.run do
+            for s in Property.splitSentences prose do
+              let toks := NLP.tagPOS (NLP.tokenize s)
+              for i in [:toks.size] do
+                if i + 3 < toks.size && toks[i+1]!.word.toLower == "count" &&
+                    toks[i+2]!.word.toLower == "in" &&
+                    toks[i+3]!.word == target &&
+                    toks[i]!.word.toList.all Char.isAlpha then
+                  return some (toks[i]!.word.toLower ++ "Count", s)
+            return none
+          -- failure observable: an "if"-guarded clause whose subject NP
+          -- ends right at the verb "fails", in a sentence naming the target
+          let failInfo? : Option (String × String) := Id.run do
+            for s in Property.splitSentences prose do
+              let toksL := NLP.tagPOS (NLP.tokenize s.toLower)
+              unless toksL.any (fun t => t.word == "if") &&
+                  toksL.any (fun t => t.word == target.toLower) do continue
+              for k in [:toksL.size] do
+                if stripVerbInflection toksL[k]!.word == "fail" then
+                  for j in [:k] do
+                    if let some (np, after) := NLP.parseNP toksL j then
+                      if after == k then
+                        return some (np.head ++ capitalize toksL[k]!.word, s)
+            return none
+          let pluralize (w : String) : String :=
+            if w.endsWith "s" || w.endsWith "x" || w.endsWith "z" ||
+                w.endsWith "ch" || w.endsWith "sh" then w ++ "es" else w ++ "s"
+          let camelVerb (v : String) : String :=
+            match v.toLower.splitOn " " with
+            | [] => v.toLower
+            | h :: t => h ++ String.join (t.map capitalize)
+          let mcArg := if mcInfo?.isSome then "Nat → " else ""
+          -- (name, signature, source) per method
+          let mut methods : Array (String × String × String) := #[]
+          methods := methods.push
+            (camelVerb f0.verb ++ capitalize (pluralize f0.name),
+             s!"Array {f0.typeStr} → {mcArg}{selfP}", f0.src)
+          if let some f1 := fields[1]? then
+            if !f1.verb.isEmpty then
+              methods := methods.push
+                (camelVerb f1.verb ++ capitalize (pluralize f1.name),
+                 s!"Array {f0.typeStr} → Array ({f0.typeStr} × {f1.typeStr}) → {mcArg}{selfP}",
+                 f1.src)
+          if let some (mcName, mcSrc) := mcInfo? then
+            methods := methods.push (mcName, s!"{selfP} → Nat", mcSrc)
+          if let some (fName, fSrc) := failInfo? then
+            methods := methods.push (fName, s!"{selfP} → Bool", fSrc)
+          let paramStr := " ".intercalate parentParams.toList
+          elabCommandStr
+            (s!"class {clsShort} ({paramStr} : Type) extends {parentName} {paramStr} where\n" ++
+             String.join (methods.toList.map fun (n, sig, _) => s!"  {n} : {sig}\n"))
+          let clsFull := ns ++ Name.mkSimple clsShort
+          let methodLines := String.join (methods.toList.map fun (n, _, src) =>
+            s!"- `{n}`: \"{src}\"\n")
+          addDocStringCore clsFull
+            (s!"Construction of {target} from the algorithm's imperatives, read " ++
+             s!"as operations (the entry structure reads the same sentences as " ++
+             s!"fields). Extends `{parentName}`.\n\n{methodLines}")
+          for (n, _, src) in methods do
+            addDocStringCore (clsFull ++ Name.mkSimple n) s!"\"{src}\""
+          srcs := srcs.push (clsFull, f0.src)
   return srcs
 
 /-- Search inductives in contextTypes for a constructor whose lowered name contains the candidate.
@@ -3442,7 +3538,19 @@ private def predNameOfClause (c : NLP.Clause) (isAction : Bool) : Option String 
     if isAction then
       sanitize (vp.verb ++ capitalize obj.head ++ ppPart)
     else
-      sanitize (subj.head ++ ppPart)
+      -- Subject postmodifier PPs are part of the named state of affairs
+      -- ("the search FOR NS RRS"), and so is an intransitive verb
+      -- ("... fails"): without them the name collapses to the bare head.
+      let subjPPPart := String.join (subj.postMods.filterMap (fun pm =>
+        match pm with
+        | NLP.PostMod.pp prep np =>
+          some (capitalize prep
+            ++ String.join (np.preAdjs.map capitalize).toList
+            ++ capitalize np.head)
+        | _ => none)).toList
+      let verbPart := if obj.head.isEmpty && !vp.isCopula
+        then capitalize vp.verb else ""
+      sanitize (subj.head ++ subjPPPart ++ ppPart ++ verbPart)
   | .svAdj subj _ comp pps =>
     sanitize (subj.head ++ capitalize comp.adj ++ String.join (pps.map renderPPName).toList)
   | .svPassive subj participle pps _ =>
@@ -3661,9 +3769,13 @@ private def buildDomainGuard (_typeName : String)
   | none, none => none
 
 /-- Derive a PropSpec from a ConditionalClause using grammatical pattern matching.
-    Returns none for unresolvable clauses. -/
+    Returns none for unresolvable clauses. The second component carries the
+    antecedent clause when it could NOT be resolved to a concrete guard: the
+    emitter must then abstract it as a predicate parameter rather than drop
+    it — an unconditional reading of a conditional sentence is false in
+    general (it produced the vacuous `algorithm_prop_0`). -/
 private def deriveAlgorithmProperty (cc : NLP.ConditionalClause) (env : Environment)
-    (ns : Name) (contextTypes : Array Name) : Option PropSpec :=
+    (ns : Name) (contextTypes : Array Name) : Option (PropSpec × Option NLP.Clause) :=
   match cc with
   | .conditional guard body =>
     -- Pattern 3: Conditional → implies
@@ -3674,17 +3786,19 @@ private def deriveAlgorithmProperty (cc : NLP.ConditionalClause) (env : Environm
       -- Both sides resolved: conditional property
       let typeName := extractTypeName gp |>.orElse fun _ => extractTypeName bp
       match typeName with
-      | some tn => some (.forallNamed tn (.implies gp bp))
-      | none => some (.implies gp bp)
+      | some tn => some (.forallNamed tn (.implies gp bp), none)
+      | none => some (.implies gp bp, none)
     | some gp, none =>
       -- Only guard resolved: the guard IS the interesting constraint
       -- e.g., "if TTL > 0, cache the data" → TTL > 0 is the property
-      some gp
+      some (gp, none)
     | none, some bp =>
-      -- Only body resolved: e.g., "if X fails, initializes SLIST from SBELT"
-      some bp
+      -- Only body resolved: e.g., "if X fails, initializes SLIST from
+      -- SBELT". The antecedent is preserved for predicate abstraction.
+      some (bp, some guard)
     | none, none => none
-  | .simple clause => deriveFromClause clause env ns contextTypes
+  | .simple clause =>
+    (deriveFromClause clause env ns contextTypes).map (·, none)
 where
   /-- Extract type name from a PropSpec that references a named type. -/
   extractTypeName : PropSpec → Option String
@@ -3989,13 +4103,15 @@ private def renderPropSpecStr (spec : PropSpec) (binderName : String) : Option S
   | .trivial => some "True"
   | _ => none
 
-/-- Render the forall preamble for a polymorphic type.
+/-- Render the type/instance binders of a polymorphic type as def-style
+    binder strings, plus the applied type.
     E.g., for `Resources : (S C NS RR : Type) → [SlistSpec S NS] → [CacheSpec C RR] → Type`
-    produces `∀ (S C NS RR : Type) [SlistSpec S NS] [CacheSpec C RR] (x : Resources S C NS RR), `
-    Walks the Expr, collecting binder names. Instance constraints are rendered
-    by substituting de Bruijn vars with the collected parameter names. -/
-private def renderPolymorphicPreamble (typeExpr : Expr) (typeFullName : String)
-    (binderName : String) : CommandElabM String := do
+    produces (`#["(S C NS RR : Type)", "[SlistSpec S NS]", "[CacheSpec C RR]"]`,
+    `"Resources S C NS RR"`). Walks the Expr, collecting binder names.
+    Instance constraints are rendered by substituting de Bruijn vars with the
+    collected parameter names. -/
+private def renderPolymorphicBinderParts (typeExpr : Expr) (typeFullName : String)
+    : CommandElabM (Array String × String) := do
   -- First pass: collect all parameter names and their binder info
   let mut paramNames : Array String := #[]
   let mut paramKinds : Array (Bool × String) := #[]  -- (isInst, rendered)
@@ -4032,7 +4148,7 @@ private def renderPolymorphicPreamble (typeExpr : Expr) (typeFullName : String)
       paramIdx := paramIdx + 1
       expr := body
     | _ => break
-  -- Build the preamble string
+  -- Build the binder parts
   let mut parts : Array String := #[]
   if !typeParams.isEmpty then
     let simpleTypeParams := typeParams.filter fun p => !p.startsWith "("
@@ -4043,10 +4159,8 @@ private def renderPolymorphicPreamble (typeExpr : Expr) (typeFullName : String)
       parts := parts.push p
   for inst in instParams do
     parts := parts.push inst
-  -- The binder for the struct instance
   let typeApp := s!"{typeFullName} {" ".intercalate typeParams.toList}"
-  parts := parts.push s!"({binderName} : {typeApp})"
-  return s!"∀ {" ".intercalate parts.toList}, "
+  return (parts, typeApp)
 where
   /-- Render an Expr to a string, substituting bvar indices with collected parameter names.
       `paramNames` is the full array of params in order; `depth` is the current binder depth
@@ -4076,6 +4190,15 @@ where
       else s!"#{idx}"
     | .sort _ => "Type"
     | _ => "_"
+
+/-- Render the forall preamble for a polymorphic type.
+    E.g., for `Resources : (S C NS RR : Type) → [SlistSpec S NS] → [CacheSpec C RR] → Type`
+    produces `∀ (S C NS RR : Type) [SlistSpec S NS] [CacheSpec C RR] (x : Resources S C NS RR), `. -/
+private def renderPolymorphicPreamble (typeExpr : Expr) (typeFullName : String)
+    (binderName : String) : CommandElabM String := do
+  let (parts, typeApp) ← renderPolymorphicBinderParts typeExpr typeFullName
+  let allParts := parts.push s!"({binderName} : {typeApp})"
+  return s!"∀ {" ".intercalate allParts.toList}, "
 
 /-- Interpret a PropSpec for algorithm-level properties.
     Returns an array of Lean term syntax for each generated prop. -/
@@ -5158,18 +5281,63 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
       let mut propSrcs : Array (Name × String) := obligationSrcs
       for (cc, src) in condClauses do
         let propSpec? := deriveAlgorithmProperty cc env ns contextTypes
-        if let some propSpec := propSpec? then
+        if let some (propSpec, guardClause?) := propSpec? then
           if isPurelyTrivial propSpec then continue
-          let propTerms ← interpretPropSpecForAlgorithm propSpec env ns #[]
-          if !propTerms.isEmpty then
-            for propTerm in propTerms do
-              let propName := mkIdent (Name.mkSimple s!"{structName.toLower}_prop_{propIdx}")
-              elabCommand (← `(def $propName : Prop := $propTerm))
-              let fullName := ns ++ Name.mkSimple s!"{structName.toLower}_prop_{propIdx}"
-              let fmt ← liftCoreM (ppTerm propTerm)
-              addDocStringCore fullName s!"Algorithm: prop {propIdx}\n```lean\n{fmt.pretty}\n```"
-              propSrcs := propSrcs.push (fullName, src)
-              propIdx := propIdx + 1
+          match guardClause? with
+          | some guardClause =>
+            -- The sentence was conditional but its antecedent did not
+            -- resolve to concrete fields. Emitting just the body would
+            -- assert it UNCONDITIONALLY — false in general, and only
+            -- provable after weakening to vacuity. Instead the antecedent
+            -- becomes an abstract predicate parameter over an abstract
+            -- state σ, and the body's struct is reached through a
+            -- projection (the post-state of the described action):
+            --   def P (σ : Type) ⟨type params⟩ (⟨guard⟩ : σ → Prop)
+            --       (⟨struct⟩After : σ → Struct ...) : Prop :=
+            --     ∀ st : σ, ⟨guard⟩ st → ⟨body over (⟨struct⟩After st)⟩
+            match predNameOfClause guardClause false, propSpec with
+            | some guardName, .forallNamed typeName innerBody =>
+              let typeFullName := ns ++ Name.mkSimple (capitalize' typeName)
+              match env.find? typeFullName with
+              | some ci =>
+                let projName := s!"{typeName.toLower}After"
+                match renderPropSpecStr innerBody s!"({projName} st)" with
+                | some bodyStr =>
+                  let (binderParts, typeApp) ←
+                    renderPolymorphicBinderParts ci.type typeFullName.toString
+                  let binderStr := if binderParts.isEmpty then ""
+                    else s!"{" ".intercalate binderParts.toList} "
+                  let propNameStr := s!"{structName.toLower}_prop_{propIdx}"
+                  let defStr :=
+                    s!"def {propNameStr} (σ : Type) {binderStr}" ++
+                    s!"({guardName} : σ → Prop) ({projName} : σ → {typeApp}) : Prop := " ++
+                    s!"∀ (st : σ), {guardName} st → {bodyStr}"
+                  elabCommandStr defStr
+                  let fullName := ns ++ Name.mkSimple propNameStr
+                  addDocStringCore fullName
+                    (s!"Algorithm: prop {propIdx} (conditional). The antecedent " ++
+                     s!"`{guardName}` is abstract — instantiate it with the " ++
+                     s!"implementation event for \"{src}\" and `{projName}` with " ++
+                     s!"the state the action produces.\n```lean\n{defStr}\n```")
+                  propSrcs := propSrcs.push (fullName, src)
+                  propIdx := propIdx + 1
+                | none =>
+                  logInfo s!"algorithm prop: conditional body not renderable for \"{src}\" — skipped"
+              | none =>
+                logInfo s!"algorithm prop: body type {typeName} not found for \"{src}\" — skipped"
+            | _, _ =>
+              logInfo s!"algorithm prop: conditional with unresolvable antecedent skipped for \"{src}\""
+          | none =>
+            let propTerms ← interpretPropSpecForAlgorithm propSpec env ns #[]
+            if !propTerms.isEmpty then
+              for propTerm in propTerms do
+                let propName := mkIdent (Name.mkSimple s!"{structName.toLower}_prop_{propIdx}")
+                elabCommand (← `(def $propName : Prop := $propTerm))
+                let fullName := ns ++ Name.mkSimple s!"{structName.toLower}_prop_{propIdx}"
+                let fmt ← liftCoreM (ppTerm propTerm)
+                addDocStringCore fullName s!"Algorithm: prop {propIdx}\n```lean\n{fmt.pretty}\n```"
+                propSrcs := propSrcs.push (fullName, src)
+                propIdx := propIdx + 1
       -- Entry-structure derivation: membership/possessive imperatives, modal
       -- partiality, and keep-track purposes describe the per-entry contents
       -- of an ALL-CAPS structure ("Copy the names into SLIST", "Set up their

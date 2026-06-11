@@ -262,18 +262,14 @@ than the average predicted value to allow for variance in response.
 -- NegativeAuthoritySpec (Spec/NegativeCache.lean); the RFC 2181 §5.4.1
 -- ranked store / answer-path lookup are generated in Spec/Credibility.lean.
 
--- Manual: batch SLIST creation from NS names. The licensing prose exists —
--- "Copy the names into SLIST" / "Set up their addresses using local data"
--- read as OPERATIONS (the same sentences the generator reads as per-entry
--- FIELDS for SlistEntry), and the §5.3.2 match-count copula for
--- matchCount/hasServers — but the imperative→constructor derivation is not
--- implemented yet; see the entry-structure rule in VeriDNS.RFC.Syntax for
--- where it would attach.
-class SlistFromNS (S NS : Type) extends SlistSpec S NS where
-  fromNsNames : Array ByteArray → Nat → S
-  fromNsWithGlue : Array ByteArray → Array (ByteArray × BitVec 32) → Nat → S
-  matchCount : S → Nat
-  hasServers : S → Bool
+-- SLIST construction is generated from the same §5.3.3 imperatives the
+-- entry structure reads as fields, here read as OPERATIONS: "Copy the
+-- names into SLIST" → SlistFromNameSpec.copyNames, "Set up their
+-- addresses" → setUpAddresses (the possessive anaphor pairs each address
+-- with its name), "the match count in SLIST ... computed from SNAME and
+-- the NS RRs" → matchCount + the construction-time Nat, and "If the
+-- search for NS RRs fails ..." → searchFails. See the entry-structure
+-- rule in VeriDNS.RFC.Syntax.
 
 -- Manual: wire-format plumbing, not RFC semantics. RRs cross the Spec/Impl
 -- boundary as canonical wire bytes; these accessors expose decode/encode

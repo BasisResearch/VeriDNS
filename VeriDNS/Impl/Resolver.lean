@@ -11,7 +11,7 @@ open VeriDNS.Spec
 open VeriDNS.Impl
 
 variable {S C NS RR : Type}
-    [SlistSpec S NS] [SlistFromNS S NS]
+    [SlistSpec S NS] [SlistFromNameSpec S NS]
     [CacheSpec C RR] [TrustworthinessSpec C RR] [NegativeAuthoritySpec C RR] [RRParse RR]
     [Inhabited S] [Inhabited C]
 
@@ -274,8 +274,8 @@ def stepFindServers (s : State S C NS RR) : StepResult S C NS RR :=
   let nsType : BitVec 16 := BitVec.ofNat 16 2
   let inClass : BitVec 16 := BitVec.ofNat 16 1
   let currentCloser (walkMc : Nat) : Bool :=
-    SlistFromNS.hasServers (NS := NS) s.resources.slist
-      && walkMc < SlistFromNS.matchCount (NS := NS) s.resources.slist
+    !SlistFromNameSpec.searchFails (NS := NS) s.resources.slist
+      && walkMc < SlistFromNameSpec.matchCount (NS := NS) s.resources.slist
   match walkNs s.resources.sname s.resources.cache nsType inClass s.now 128 with
   | some (nsNames, mc) =>
     if currentCloser mc then
@@ -295,7 +295,7 @@ def stepFindServers (s : State S C NS RR) : StepResult S C NS RR :=
               rd.data[3]!.toBitVec.setWidth 32
             some (nsName, addr)
           else none
-      let slist' : S := SlistFromNS.fromNsWithGlue (NS := NS) nsNames glue mc
+      let slist' : S := SlistFromNameSpec.setUpAddresses (NS := NS) nsNames glue mc
       .goto .sendQueries { s with resources := { s.resources with slist := slist' } }
   | none =>
     if currentCloser 0 then
@@ -399,7 +399,7 @@ def stepAnalyzeResponse (s : State S C NS RR) : StepResult S C NS RR :=
           let mc : Nat := delegationMatchCount (RR := RR) resp.authority s.resources.sname
           -- Extract glue A records from additional section and populate SLIST with addresses
           let glue := extractGlueRecords resp.additional
-          let slist' : S := SlistFromNS.fromNsWithGlue (NS := NS) nsNames glue mc
+          let slist' : S := SlistFromNameSpec.setUpAddresses (NS := NS) nsNames glue mc
           .goto .findServers { s with
             resources := { s.resources with slist := slist', cache := cache'' }
             lastResponse := none }

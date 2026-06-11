@@ -191,9 +191,9 @@ def delegationShapedB (resp : Format) : Bool :=
     zone) strictly exceeds the SLIST's. An SLIST with no servers compares
     closer trivially (there are no servers to be closer than). -/
 def delegationCloserB (slist : DnsSList) (sname : ByteArray) (resp : Format) : Bool :=
-  !SlistFromNS.hasServers (NS := SlistEntry) slist
+  SlistFromNameSpec.searchFails (NS := SlistEntry) slist
     || decide (Resolver.delegationMatchCount (RR := ResourceRecord)
-        resp.authority sname > SlistFromNS.matchCount (NS := SlistEntry) slist)
+        resp.authority sname > SlistFromNameSpec.matchCount (NS := SlistEntry) slist)
 
 /-- §5.3.3: "the resolver should check to see that the delegation is
     'closer' to the answer than the servers in SLIST are ... If not, the

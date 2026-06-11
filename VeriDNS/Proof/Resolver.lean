@@ -6,7 +6,7 @@ open VeriDNS.Spec
 open VeriDNS.Impl.Resolver
 
 variable {S C NS RR : Type}
-    [SlistSpec S NS] [SlistFromNS S NS]
+    [SlistSpec S NS] [SlistFromNameSpec S NS]
     [CacheSpec C RR] [TrustworthinessSpec C RR] [NegativeAuthoritySpec C RR] [RRParse RR]
     [Inhabited S] [Inhabited C]
 
@@ -34,14 +34,37 @@ theorem step_analyzeResponse_dispatch (s : State S C NS RR) (h : s.currentStep =
 -- SBELT fallback proof (algorithm_prop_0)
 -- ============================================================
 
-/-- When stepFindServers falls back to SBELT (walkNs returns none),
-    slist = sbelt. Weakened from unconditional to conditional. -/
-theorem stepFindServers_sbelt_fallback (s : State S C NS RR)
-    : match stepFindServers s with
-      | .goto _ s' => s'.resources.slist = s'.resources.sbelt ∨ True
-      | _ => True := by
-  unfold stepFindServers
-  split <;> simp
+/-- The §5.3.3 "search for NS RRs fails" event, as the implementation
+    observes it: the cache walk from SNAME toward the root finds no NS RRs,
+    and the current SLIST carries no closer knowledge for step 2 to
+    preserve (the keep-when-closer deviation documented on
+    `stepFindServers`). -/
+def nsSearchFails (s : State S C NS RR) : Prop :=
+  stepFindServers.walkNs (C := C) (RR := RR) s.resources.sname s.resources.cache
+      (BitVec.ofNat 16 2) (BitVec.ofNat 16 1) s.now 128 = none ∧
+  (!SlistFromNameSpec.searchFails (NS := NS) s.resources.slist
+      && decide (0 < SlistFromNameSpec.matchCount (NS := NS) s.resources.slist)) = false
+
+/-- The state step 2 transitions to (`step_seq_findServers`: it always
+    gotos). -/
+def findServersState (s : State S C NS RR) : State S C NS RR :=
+  match stepFindServers s with
+  | .goto _ s' => s'
+  | _ => s
+
+/-- Instantiation of the generated `algorithm_prop_0` ("If the search for NS
+    RRs fails, then the resolver initializes SLIST from the safety belt
+    SBELT"): whenever the NS-walk failure event holds, the state produced by
+    step 2 has SLIST = SBELT. -/
+theorem impl_algorithm_sbelt_fallback :
+    algorithm_prop_0 (State S C NS RR) S C NS RR
+      nsSearchFails
+      (fun s => (findServersState s).resources) := by
+  intro s hfail
+  obtain ⟨hwalk, hcloser⟩ := hfail
+  unfold findServersState stepFindServers
+  simp only [hwalk, hcloser]
+  rfl
 
 -- ============================================================
 -- ID match proof (algorithm_prop_1)
@@ -112,25 +135,71 @@ theorem stepAnalyzeResponse_preserves_id (s : State S C NS RR) (resp : Format)
   · trivial
 
 -- ============================================================
--- Fuel-bounded termination
+-- Loop soundness: pauses are genuine IO points, and every run
+-- walks the generated StepSpec relation
 -- ============================================================
 
-private def isResult {α : Type} : Except String α → Prop
-  | .ok _ => True
-  | .error _ => True
+/-- The only step that yields `needsIO` is step 3 (sendQueries) with no
+    response in hand — and it yields the state unchanged. -/
+theorem step_needsIO_inversion (s s' : State S C NS RR)
+    (h : step s = .needsIO s') :
+    s' = s ∧ s.currentStep = .sendQueries ∧ s.lastResponse = none := by
+  cases hcs : s.currentStep with
+  | checkAnswer =>
+    rw [step_checkAnswer_dispatch s hcs] at h
+    unfold stepCheckLocal at h
+    split at h <;> (try split at h) <;> (try split at h) <;>
+      first | injection h | (split at h <;> injection h)
+  | findServers =>
+    rw [step_findServers_dispatch s hcs] at h
+    unfold stepFindServers at h
+    dsimp only [] at h
+    split at h <;> (try split at h) <;> injection h
+  | sendQueries =>
+    rw [step_sendQueries_dispatch s hcs] at h
+    unfold stepSendQueries at h
+    split at h <;> rename_i hr
+    · injection h
+    · injection h with hs
+      exact ⟨hs.symm, rfl, hr⟩
+  | analyzeResponse =>
+    rw [step_analyzeResponse_dispatch s hcs] at h
+    unfold stepAnalyzeResponse at h
+    split at h
+    · injection h
+    · split at h
+      · injection h
+      · split at h
+        · injection h
+        · split at h
+          · split at h <;> (try split at h) <;> injection h
+          · split at h
+            · injection h
+            · split at h
+              · injection h
+              · split at h <;> injection h
 
-/-- The resolve loop always terminates: either produces Ok or Error. -/
-theorem resolve_loop_result (s : State S C NS RR) (fuel : Nat)
-    : isResult (resolve.loop s fuel) := by
+/-- A paused resolver run is a genuine IO yield: the loop pauses exactly at
+    step 3 with no response in hand. This is the contract the IO shim
+    relies on (`buildSubQuery` builds the outgoing query for the paused
+    SNAME; `resume` installs the response and continues at step 3). -/
+theorem resolve_loop_paused (fuel : Nat) (s s' : State S C NS RR)
+    (h : resolve.loop s fuel = .ok (.paused s')) :
+    s'.currentStep = .sendQueries ∧ s'.lastResponse = none := by
   induction fuel generalizing s with
-  | zero => exact trivial
+  | zero => exact absurd h (by simp [resolve.loop])
   | succ n ih =>
-    unfold resolve.loop
-    split
-    · exact trivial
-    · exact ih _
-    · exact trivial
-    · exact trivial
+    unfold resolve.loop at h
+    split at h <;> rename_i hstep
+    · exact absurd (Except.ok.inj h) (by simp)
+    · exact ih _ h
+    · rename_i s₀
+      obtain ⟨heq, hcs, hr⟩ := step_needsIO_inversion _ _ hstep
+      have hps := Except.ok.inj h
+      injection hps with hs
+      rw [← hs, heq]
+      exact ⟨hcs, hr⟩
+    · exact absurd h (by simp)
 
 -- ============================================================
 -- needsIO yield proofs
@@ -676,5 +745,54 @@ theorem impl_obligation_checkAnswer :
         simp
       rw [hla]
       exact ⟨_, rfl⟩
+
+-- ============================================================
+-- Loop trace soundness (uses step_implies_spec)
+-- ============================================================
+
+/-- Trace soundness for pauses: a paused run's current step is reachable
+    from the starting step through the generated step relation — the loop
+    never takes a transition the RFC algorithm does not allow. -/
+theorem resolve_loop_star (fuel : Nat) (s s' : State S C NS RR)
+    (h : resolve.loop s fuel = .ok (.paused s')) :
+    StepSpecStar s.currentStep s'.currentStep := by
+  induction fuel generalizing s with
+  | zero => exact absurd h (by simp [resolve.loop])
+  | succ n ih =>
+    unfold resolve.loop at h
+    split at h <;> rename_i hstep
+    · exact absurd (Except.ok.inj h) (by simp)
+    · rename_i nextStep s₀
+      exact .trans _ _ _ (step_implies_spec s nextStep s₀ hstep) (ih _ h)
+    · rename_i s₀
+      obtain ⟨heq, _, _⟩ := step_needsIO_inversion _ _ hstep
+      have hps := Except.ok.inj h
+      injection hps with hs
+      rw [← hs, heq]
+      exact .refl _
+    · exact absurd h (by simp)
+
+/-- Trace soundness for answers: every answer the loop returns is produced
+    by a single `.answer` step at a state whose step is StepSpec-reachable
+    from the starting step. -/
+theorem resolve_loop_done (fuel : Nat) (s : State S C NS RR) (r : Format)
+    (h : resolve.loop s fuel = .ok (.done r)) :
+    ∃ s₀ : State S C NS RR,
+      StepSpecStar s.currentStep s₀.currentStep ∧ step s₀ = .answer r := by
+  induction fuel generalizing s with
+  | zero => exact absurd h (by simp [resolve.loop])
+  | succ n ih =>
+    unfold resolve.loop at h
+    split at h <;> rename_i hstep
+    · rename_i resp
+      have hd : ResolveYield.done (S := S) (C := C) (NS := NS) (RR := RR) resp
+          = .done r := Except.ok.inj h
+      injection hd with hresp
+      exact ⟨s, .refl _, hresp ▸ hstep⟩
+    · rename_i nextStep s₀
+      obtain ⟨s₁, hstar, hans⟩ := ih _ h
+      exact ⟨s₁, .trans _ _ _ (step_implies_spec s nextStep s₀ hstep) hstar, hans⟩
+    · exact absurd (Except.ok.inj h) (by simp)
+    · exact absurd h (by simp)
 
 end VeriDNS.Proof.Resolver

@@ -47,14 +47,14 @@ def DnsSList.fromNsWithGlue (names : Array ByteArray)
     ⟨n, addr, 0⟩
   { servers := servers, zone := ByteArray.empty, matchCount := mc }
 
-instance : SlistFromNS DnsSList SlistEntry where
-  fromNsNames names mc :=
+instance : SlistFromNameSpec DnsSList SlistEntry where
+  copyNames names mc :=
     { servers := names.map fun n => ⟨n, none, 0⟩
       zone := ByteArray.empty
       matchCount := mc }
-  fromNsWithGlue names glue mc := DnsSList.fromNsWithGlue names glue mc
+  setUpAddresses names glue mc := DnsSList.fromNsWithGlue names glue mc
   matchCount s := s.matchCount
-  hasServers s := !s.servers.isEmpty
+  searchFails s := s.servers.isEmpty
 
 /-- Fold step for `bestWithAddress`: keep the less-queried addressed entry
     (ties keep the earlier one), pairing each entry with its OWN address. -/
