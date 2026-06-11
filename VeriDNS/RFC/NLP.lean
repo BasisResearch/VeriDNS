@@ -272,6 +272,8 @@ private def knownAdjs : Array String :=
     "great", "close", "large", "small", "short", "long", "high", "low",
     "valid", "bogus", "local", "aggressive", "paranoid", "desired",
     "unable", "able", "closer", "greater",
+    -- irregular comparatives
+    "better", "worse",
     -- superlative poles (ranking directives, RFC 2181 §5.4.1)
     "most", "least", "highest", "lowest", "greatest", "best", "worst",
     -- (in)sensitivity compounds and their stems (RFC 1035 §2.3.3/§3.1);

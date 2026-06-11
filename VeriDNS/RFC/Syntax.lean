@@ -110,7 +110,31 @@ private def wordToNum : String → Option Nat
   | "sixteen" => some 16
   | _ => none
 
-/-- Capitalize first character -/
+/-- Drop the last n characters from a string. -/
+private def dropLast (s : String) (n : Nat) : String :=
+  String.ofList (s.toList.take (s.length - n))
+
+/-- Strip English verb inflection: "answers" → "answer", "contains" → "contain", "shows" → "show". -/
+private def stripVerbInflection (verb : String) : String :=
+  let v := verb.toLower
+  if v.endsWith "es" && v.length > 3 then dropLast v 2
+  else if v.endsWith "s" && v.length > 2 then dropLast v 1
+  else v
+
+/-- Strip English plural: "servers" → "server", "entries" → "entry".
+    The "-es" suffix is only stripped after sibilant stems (-ss, -x, -z,
+    -ch, -sh), where English requires it ("addresses" → "address",
+    "matches" → "match"); elsewhere the plural is plain "-s" on an
+    e-final stem ("names" → "name", "values" → "value"). -/
+private def stripPlural (w : String) : String :=
+  let s := w.toLower
+  if s.endsWith "ies" && s.length > 3 then dropLast s 3 ++ "y"
+  else if (s.endsWith "sses" || s.endsWith "xes" || s.endsWith "zes" ||
+           s.endsWith "ches" || s.endsWith "shes") && s.length > 4 then
+    dropLast s 2
+  else if s.endsWith "s" && !s.endsWith "ss" && s.length > 2 then dropLast s 1
+  else s
+
 private def capitalize (s : String) : String :=
   match s.toList with
   | [] => ""
@@ -1159,9 +1183,50 @@ where
             return some n
     return none
 
+/-- Token-level guard segmentation for a sub-step description: the guard
+    clause is the token span after the (subordinating) "if" up to the
+    first comma; coordination splits it at conjunction tokens
+    (or-coordination checked first — the sub-step guards are flat
+    disjunctions). Returns (connective?, clause texts): the connective is
+    `some "or"`/`some "and"` when coordination was found, `none` for a
+    single clause. Clause texts are the non-punctuation token words
+    rejoined — the segmentation DECISIONS are grammatical; the string is
+    only transport to the per-clause resolvers (which re-tokenize). -/
+def segmentGuardClauses (desc : String)
+    : Option String × Array String := Id.run do
+  let toks := NLP.tagPOS (NLP.tokenize desc.toLower)
+  let mut start := 0
+  for i in [:toks.size] do
+    if start == 0 && toks[i]!.word == "if" then
+      start := i + 1
+  let mut stop := toks.size
+  for i in [start:toks.size] do
+    if stop == toks.size && toks[i]!.pos == .punct && toks[i]!.word == "," then
+      stop := i
+  let guard := toks.extract start stop
+  let render (ts : Array NLP.Token) : String :=
+    String.intercalate " " (ts.toList.filter (·.pos != .punct) |>.map (·.word))
+  let splitAt (w : String) : Option (Array String) := Id.run do
+    let mut parts : Array String := #[]
+    let mut cur : Array NLP.Token := #[]
+    let mut found := false
+    for t in guard do
+      if t.pos == .conj && t.word == w then
+        found := true
+        parts := parts.push (render cur)
+        cur := #[]
+      else
+        cur := cur.push t
+    parts := parts.push (render cur)
+    return if found then some parts else none
+  if let some parts := splitAt "or" then return (some "or", parts)
+  if let some parts := splitAt "and" then return (some "and", parts)
+  return (none, #[render guard])
+
 /-- Derive a constructor name from an algorithm step description via NLP.
-    For top-level: verb + first significant noun → camelCase.
-    For sub-steps: first distinctive noun after common prefix. -/
+    Top-level steps: verb + first significant noun → camelCase.
+    Sub-steps: from the guard's grammatical structure (see the
+    coordinate-naming comment in the body). -/
 def deriveConstructorName (desc : String) (isSubStep : Bool) : String := Id.run do
   -- Strip trailing punctuation from each word
   let stripPunct (w : String) : String :=
@@ -1169,16 +1234,45 @@ def deriveConstructorName (desc : String) (isSubStep : Bool) : String := Id.run 
     String.ofList chars.reverse
   let words := desc.toLower.splitOn " " |>.filter (!·.isEmpty) |>.map stripPunct
   if isSubStep then
-    -- Sub-step naming: look for distinctive keyword
-    let lower := desc.toLower
-    if hasSub lower "answers the question" || hasSub lower "name error" then
-      return "answerOrError"
-    if hasSub lower "better delegation" then
-      return "delegation"
-    if hasSub lower "cname" then
-      return "cnameRedirect"
-    if hasSub lower "servers failure" || hasSub lower "server failure" || hasSub lower "bizarre" then
-      return "serverFailure"
+    -- Sub-step naming from the guard's grammatical structure. Each guard
+    -- coordinate (segmented at conjunction tokens) contributes a name:
+    --  * its object NP — NOUN premodifiers are part of the kind and kept
+    --    ("a servers failure" → serverFailure), adjectival ones are not
+    --    ("a better delegation" → delegation);
+    --  * the verb stem instead, when the object is discourse-given (the
+    --    frame's standing participants: question/response/query —
+    --    "answers the question" → answer);
+    --  * nothing, when the coordinate has no finite verb (anaphoric
+    --    copular qualifiers — "that is not the answer itself") or its NP
+    --    is the "other ⟨X⟩" residual class.
+    -- Coordinate names join with the connective ("Or"/"And").
+    let (connective, clauses) := segmentGuardClauses desc
+    let givenNouns := #["question", "response", "query"]
+    let mut names : Array String := #[]
+    for clause in clauses do
+      let toks := NLP.tagPOS (NLP.tokenize clause)
+      let mut vi? : Option Nat := none
+      for i in [:toks.size] do
+        if vi?.isNone && toks[i]!.pos == .verb then vi? := some i
+      let some vi := vi? | continue
+      let some (np, after) := NLP.parseNP toks (vi + 1) (absorbPP := false)
+        | continue
+      if np.det == some "other" || np.preAdjs.contains "other" then continue
+      if np.head.isEmpty then continue
+      if givenNouns.contains np.head then
+        names := names.push (stripVerbInflection toks[vi]!.word)
+      else
+        let mut parts : Array String := #[]
+        for j in [vi + 1:after] do
+          let t := toks[j]!
+          if (t.pos == .noun || t.pos == .nounPlural) && t.word != np.head then
+            parts := parts.push (stripPlural t.word)
+        parts := parts.push (stripPlural np.head)
+        names := names.push (toCamelCase parts.toList)
+    if let some first := names[0]? then
+      let joiner := if connective == some "and" then "And" else "Or"
+      return first ++ String.join
+        ((names.toList.drop 1).map (fun n => joiner ++ capitalize n))
     -- Fallback: first noun-like word
     let skip := #["if", "the", "response", "contains", "shows", "a", "an"]
     for w in words do
@@ -2753,31 +2847,6 @@ private def walkFieldPath (env : Environment) (typeName : Name) (targetField : S
 -- NLP extensions for sub-step guard derivation
 -- ============================================================
 
-/-- Drop the last n characters from a string. -/
-private def dropLast (s : String) (n : Nat) : String :=
-  String.ofList (s.toList.take (s.length - n))
-
-/-- Strip English verb inflection: "answers" → "answer", "contains" → "contain", "shows" → "show". -/
-private def stripVerbInflection (verb : String) : String :=
-  let v := verb.toLower
-  if v.endsWith "es" && v.length > 3 then dropLast v 2
-  else if v.endsWith "s" && v.length > 2 then dropLast v 1
-  else v
-
-/-- Strip English plural: "servers" → "server", "entries" → "entry".
-    The "-es" suffix is only stripped after sibilant stems (-ss, -x, -z,
-    -ch, -sh), where English requires it ("addresses" → "address",
-    "matches" → "match"); elsewhere the plural is plain "-s" on an
-    e-final stem ("names" → "name", "values" → "value"). -/
-private def stripPlural (w : String) : String :=
-  let s := w.toLower
-  if s.endsWith "ies" && s.length > 3 then dropLast s 3 ++ "y"
-  else if (s.endsWith "sses" || s.endsWith "xes" || s.endsWith "zes" ||
-           s.endsWith "ches" || s.endsWith "shes") && s.length > 4 then
-    dropLast s 2
-  else if s.endsWith "s" && !s.endsWith "ss" && s.length > 2 then dropLast s 1
-  else s
-
 /-- e-final verb roots, whose past participle adds bare "-d"
     ("cached" → "cache"). Morphological lexicon for participle stemming. -/
 private def eFinalVerbRoots : Array String :=
@@ -3212,52 +3281,26 @@ private def deriveSubClauseGuard (text : String) (env : Environment) (ns : Name)
   return none
 
 /-- Derive a guard PropSpec from a sub-step description.
-    Handles " or " / " and " coordination by splitting and combining. -/
+    Coordination is segmented at conjunction tokens (`segmentGuardClauses`)
+    and combined with disj/conj. -/
 private def deriveSubStepGuard (subStep : AlgorithmStep) (env : Environment)
     (ns : Name) (contextTypes : Array Name) : Option PropSpec := Id.run do
-  let desc := subStep.description
-  -- Extract the guard text (after "if" and before the main verb clause)
-  let lower := desc.toLower
-  let guardText := if hasSub lower "if " then
-    let afterIf := (lower.splitOn "if ").getD 1 ""
-    -- Cut at first comma to isolate the conditional clause
-    let parts := afterIf.splitOn ","
-    parts[0]!
-  else lower
-
-  -- Check for " or " coordination
-  if hasSub guardText " or " then
-    let clauses := guardText.splitOn " or "
+  let (connective, clauses) := segmentGuardClauses subStep.description
+  match connective with
+  | some conn =>
     let mut resolved : Array PropSpec := #[]
     for clause in clauses do
-      let trimmed := trimStr clause
-      if let some prop := deriveSubClauseGuard trimmed env ns contextTypes then
-        resolved := resolved.push prop
-    if resolved.isEmpty then return none
-    if resolved.size == 1 then return some resolved[0]!
-    -- Combine with disj
-    let mut result := resolved[0]!
-    for i in [1:resolved.size] do
-      result := .disj result resolved[i]!
-    return some result
-
-  -- Check for " and " coordination (within guard)
-  if hasSub guardText " and " then
-    let clauses := guardText.splitOn " and "
-    let mut resolved : Array PropSpec := #[]
-    for clause in clauses do
-      let trimmed := trimStr clause
-      if let some prop := deriveSubClauseGuard trimmed env ns contextTypes then
+      if let some prop := deriveSubClauseGuard clause env ns contextTypes then
         resolved := resolved.push prop
     if resolved.isEmpty then return none
     if resolved.size == 1 then return some resolved[0]!
     let mut result := resolved[0]!
     for i in [1:resolved.size] do
-      result := .conj result resolved[i]!
+      result := if conn == "or" then .disj result resolved[i]!
+        else .conj result resolved[i]!
     return some result
-
-  -- No coordination — single clause
-  deriveSubClauseGuard guardText env ns contextTypes
+  | none =>
+    deriveSubClauseGuard (clauses.getD 0 "") env ns contextTypes
 
 /-- Render a PropSpec guard body to a string suitable for `def guard_X (resp : Format) : Prop := ...`.
     Uses `resp` as the binder name and resolves field paths through the struct hierarchy.
@@ -3445,34 +3488,29 @@ private def isOtherComplementClause (clause : String) (env : Environment)
     widen the region). -/
 private def deriveRefinedGuard (subStep : AlgorithmStep) (env : Environment)
     (contextTypes : Array Name) : Option (Array (Array RefinedConjunct)) := Id.run do
-  let desc := subStep.description
-  let lower := desc.toLower
-  let guardText := if hasSub lower "if " then
-    let afterIf := (lower.splitOn "if ").getD 1 ""
-    (afterIf.splitOn ",")[0]!
-  else lower
-  if hasSub guardText " or " then
-    let clauses := guardText.splitOn " or "
+  let (connective, clauses) := segmentGuardClauses subStep.description
+  match connective with
+  | some "or" =>
     let mut rows : Array (Array RefinedConjunct) := #[]
     for clause in clauses do
-      if let some c := deriveRefinedConjunct (trimStr clause) env contextTypes then
+      if let some c := deriveRefinedConjunct clause env contextTypes then
         rows := rows.push #[c]
       else if isOtherComplementClause clause env contextTypes then
         rows := rows.push #[.otherUnhandled]
     if rows.isEmpty then return none
     return some rows
-  if hasSub guardText " and " then
-    let clauses := guardText.splitOn " and "
+  | some _ =>
     let mut conjs : Array RefinedConjunct := #[]
     for clause in clauses do
-      match deriveRefinedConjunct (trimStr clause) env contextTypes with
+      match deriveRefinedConjunct clause env contextTypes with
       | some c => conjs := conjs.push c
       | none => return none  -- all-or-nothing for conjunctions
     if conjs.isEmpty then return none
     return some #[conjs]
-  match deriveRefinedConjunct guardText env contextTypes with
-  | some c => return some #[#[c]]
-  | none => return none
+  | none =>
+    match deriveRefinedConjunct (clauses.getD 0 "") env contextTypes with
+    | some c => return some #[#[c]]
+    | none => return none
 
 /-- Render a refined conjunct as a term, given the binder idents. -/
 private def renderRefinedConjunct (aqId hrId handledId respId : Ident)
@@ -3583,13 +3621,10 @@ private def generateStepRelation (sectionName : String)
         -- of the sibling sub-step guards (generated before this one, in
         -- sub-step order), e.g. "a servers failure or other bizarre
         -- contents" → ∨ (¬guard_answerOrError ∧ ¬guard_delegation ∧ ...).
-        let lowerDesc := s.description.toLower
-        let guardText := if hasSub lowerDesc "if " then
-          (((lowerDesc.splitOn "if ").getD 1 "").splitOn ",")[0]!
-          else lowerDesc
+        let (connective, guardClauses) := segmentGuardClauses s.description
         let complementOf : Array String :=
-          if hasSub guardText " or " &&
-              ((guardText.splitOn " or ").drop 1).any
+          if connective == some "or" &&
+              (guardClauses.toList.drop 1).any
                 (fun cl => isOtherComplementClause cl env contextTypes) then
             guardNames.map (fun (_, gn, _) => gn)
           else #[]
@@ -6488,18 +6523,27 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
     -- (RFC 1035 §7.3 TTL sanity). The sentence sanctions two behaviors;
     -- both are captured by one Option-valued process: a discarded response
     -- (none) is unconstrained, a kept response has every parsed RR's TTL
-    -- bounded by the duration. The or-arm is an imperative — parsed with
-    -- the same imperative-clause parser as the step-1 conditional — and the
-    -- duration is read from a numeral + time-unit noun pair.
-    if hasSub prose.toLower "either " && hasSub prose.toLower " or " then
-      let mut limitSentence? : Option String := none
-      for sentence in Property.splitSentences prose do
-        let lowerS := sentence.toLower
-        if hasSub lowerS "either " && hasSub lowerS " or " then
-          limitSentence? := some lowerS
-      if let some lowerS := limitSentence? then
-        let orArm := trimStr ((lowerS.splitOn " or ").getLastD "")
-        let armTokens := NLP.tagPOS (NLP.tokenize orArm)
+    -- bounded by the duration. The frame is token-level: the correlative
+    -- "either" followed by a coordinating "or"; the second arm is the
+    -- token slice after the LAST such "or", handed directly to the
+    -- imperative-clause parser. The duration is a numeral + time-unit
+    -- noun pair within the arm.
+    let mut limitArm? : Option (Array NLP.Token) := none
+    for sentence in Property.splitSentences prose do
+      let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+      let mut eitherIdx? : Option Nat := none
+      let mut lastOr? : Option Nat := none
+      for i in [:toks.size] do
+        if eitherIdx?.isNone && toks[i]!.word == "either" then
+          eitherIdx? := some i
+        else if eitherIdx?.isSome && toks[i]!.pos == .conj &&
+            toks[i]!.word == "or" then
+          lastOr? := some i
+      if limitArm?.isNone then
+        if let some oi := lastOr? then
+          limitArm? := some (toks.extract (oi + 1) toks.size)
+    if let some armTokens := limitArm? then
+      if !armTokens.isEmpty then
         let dummyNP : NLP.NounPhrase := ⟨none, #[], "", .unknown, #[]⟩
         if let some (.svo _ vp obj _) := NLP.parseImperativeClause armTokens dummyNP then
           -- duration: numeral followed by a time-unit noun
@@ -6564,7 +6608,9 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
                 addDocStringCore fullName
                   (s!"TTL sanity (bound: {secs} seconds): a processed response is either " ++
                    s!"discarded (none) or every RR it carries has TTL ≤ {secs}. " ++
-                   s!"Derived from \"{orArm}\" (either/or sentence).")
+                   s!"Derived from \"{String.intercalate " "
+                     (armTokens.toList.filter (·.pos != .punct) |>.map (·.word))}\" " ++
+                   s!"(the correlative either/or sentence's second arm).")
                 matchObSrcs := matchObSrcs.push (fullName, "limit all ttls")
           | none => pure ()
     let rules := proseClauseRuleExt.getState env

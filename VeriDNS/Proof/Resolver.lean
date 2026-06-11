@@ -428,8 +428,8 @@ theorem step_implies_spec (s : State S C NS RR) (nextStep : AlgorithmStep)
       split at h <;> rename_i hcn
       · -- 4c: CNAME chase → checkAnswer
         injection h with h1 _; subst h1
-        -- guard_cnameRedirect: a chase implies a CNAME, hence a nonempty answer
-        refine .cnameRedirect resp ?_
+        -- guard_cname: a chase implies a CNAME, hence a nonempty answer
+        refine .cname resp ?_
         have hext := cnameToChase_extractCname hcn
         cases Nat.eq_zero_or_pos resp.answer.size with
         | inl h0 =>
@@ -573,9 +573,9 @@ def implTransition (resp : Format) : Option AlgorithmStep → Prop
   | none => ∀ s : State S C NS RR, s.lastResponse = some resp →
       ∃ r, stepAnalyzeResponse s = .answer r
 
-/-- The chase trigger fires exactly on guardRefined_cnameRedirect. -/
+/-- The chase trigger fires exactly on guardRefined_cname. -/
 private theorem cnameToChase_none_of_not_guard {resp : Format}
-    (hg : ¬ guardRefined_cnameRedirect (answersQueryB (RR := RR))
+    (hg : ¬ guardRefined_cname (answersQueryB (RR := RR))
       (hasRRTypeIn (RR := RR)) classifiableB resp)
     (haq : answersQueryB (RR := RR) resp = false) :
     cnameToChase (RR := RR) resp = none := by
@@ -605,8 +605,8 @@ private theorem test4d_false_of_not_guard {resp : Format}
   rw [h1, h2]
   rfl
 
-theorem impl_obligation_cnameRedirect :
-    obligation_cnameRedirect (answersQueryB (RR := RR)) (hasRRTypeIn (RR := RR))
+theorem impl_obligation_cname :
+    obligation_cname (answersQueryB (RR := RR)) (hasRRTypeIn (RR := RR))
       classifiableB
       (implTransition (S := S) (C := C) (NS := NS) (RR := RR)) := by
   intro resp hg _ha _hb _hd s hr
@@ -624,7 +624,7 @@ theorem impl_obligation_serverFailure :
       classifiableB
       (implTransition (S := S) (C := C) (NS := NS) (RR := RR)) := by
   intro resp hg ha _hb hc s hr
-  -- ¬answerOrError gives answersQuery = false
+  -- ¬answerOrNameError gives answersQuery = false
   have haq : answersQueryB (RR := RR) resp = false :=
     bool_eq_false_of_ne_true (fun h => ha (Or.inl h))
   have hchase := cnameToChase_none_of_not_guard (RR := RR) hc haq
@@ -663,8 +663,8 @@ theorem impl_obligation_delegation :
   simp only [hr, hchase, hsf, hcond, hgb]
   exact ⟨_, rfl⟩
 
-theorem impl_obligation_answerOrError :
-    obligation_answerOrError (answersQueryB (RR := RR)) (hasRRTypeIn (RR := RR))
+theorem impl_obligation_answerOrNameError :
+    obligation_answerOrNameError (answersQueryB (RR := RR)) (hasRRTypeIn (RR := RR))
       classifiableB
       (implTransition (S := S) (C := C) (NS := NS) (RR := RR)) := by
   intro resp hg _hb hc hd s hr

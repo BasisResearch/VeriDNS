@@ -310,7 +310,7 @@ Sections with numbered algorithm lists (e.g., RFC 1034 §5.3.3) use a dedicated 
    (`         a. description`) items. Parsing stops after sub-steps end and prose begins.
 2. `deriveConstructorName` extracts verb + object from step descriptions via NLP
    (e.g., "See if the answer..." → `checkAnswer`, "if the response shows a CNAME" →
-   `cnameRedirect`).
+   `cname`).
 3. `generateAlgorithmTypes` creates:
    - `inductive {Name}Step` — one constructor per top-level step
    - `inductive ResponseAction` — one constructor per sub-step
@@ -538,7 +538,7 @@ algorithm properties from RFC 1034 §5.3.3:
 - **Response coverage** (`step_analyzeResponse_coverage`): when `responseHandled`
   holds, the resolver does not return the "unhandled response type" error.
   Complete. Required aligning the implementation's 4a condition with
-  `guard_answerOrError` (see Response Analysis below): at the fallback branch
+  `guard_answerOrNameError` (see Response Analysis below): at the fallback branch
   all four guards are provably false, contradicting `responseHandled`.
 
 - **CNAME chase obligation** (`step_cname_chase`): when `cnameToChase` fires,
@@ -547,11 +547,11 @@ algorithm properties from RFC 1034 §5.3.3:
   *liveness/obligation* direction that the NLP-generated spec cannot express:
   `StepSpec` is an inductive *permission* relation (soundness says every
   transition taken is allowed; an implementation that never chases is
-  trivially sound), and the generated `guard_cnameRedirect` was weakened to
+  trivially sound), and the generated `guard_cname` was weakened to
   `answer.size > 0` (the prose "shows a CNAME" has no Format-level meaning
   since answers are opaque ByteArrays, and the qualifier "and that is not the
   answer itself" was dropped), making it identical to the first disjunct of
-  `guard_answerOrError` — so the spec cannot even distinguish the 4a and 4c
+  `guard_answerOrNameError` — so the spec cannot even distinguish the 4a and 4c
   situations. The obligation is therefore stated manually against the
   implementation-level `cnameToChase` trigger.
 
@@ -579,9 +579,9 @@ placeholders. The pipeline extends the existing NLP infrastructure with:
   sub-clauses, each resolved independently, then combined with `PropSpec.disj`/`.conj`.
 
 Generated guards (in `VeriDNS.Spec`):
-- `guard_answerOrError`: `resp.answer.size > 0 ∨ resp.header.rcode = Rcode.nameError`
+- `guard_answerOrNameError`: `resp.answer.size > 0 ∨ resp.header.rcode = Rcode.nameError`
 - `guard_delegation`: `resp.authority.size > 0`
-- `guard_cnameRedirect`: `resp.answer.size > 0`
+- `guard_cname`: `resp.answer.size > 0`
 - `guard_serverFailure`: `resp.header.rcode = Rcode.serverFailure`
 
 ### Step Relation (`StepSpec`)
@@ -594,7 +594,7 @@ inductive StepSpec : AlgorithmStep → AlgorithmStep → Prop where
   | seq_checkAnswer_findServers : StepSpec .checkAnswer .findServers
   | seq_findServers_sendQueries : StepSpec .findServers .sendQueries
   | seq_sendQueries_analyzeResponse : StepSpec .sendQueries .analyzeResponse
-  | answerOrError (resp : Format) : guard_answerOrError resp → StepSpec .analyzeResponse .checkAnswer
+  | answerOrNameError (resp : Format) : guard_answerOrNameError resp → StepSpec .analyzeResponse .checkAnswer
   | delegation (resp : Format) : guard_delegation resp → StepSpec .analyzeResponse .findServers
   | serverFailure (resp : Format) : guard_serverFailure resp → StepSpec .analyzeResponse .sendQueries
 ```
@@ -604,7 +604,7 @@ from sub-steps with `gotoTarget` fields. `StepSpecStar` provides transitive clos
 `isTerminal` identifies terminal sub-steps (answer/name error).
 
 `responseHandled` is the completeness obligation — a disjunction of all sub-step
-guards: `guard_answerOrError resp ∨ guard_delegation resp ∨ guard_cnameRedirect resp
+guards: `guard_answerOrNameError resp ∨ guard_delegation resp ∨ guard_cname resp
 ∨ guard_serverFailure resp`. This states that the guards cover the full response
 space. The NLP pipeline generates soundness (StepSpec: valid transitions) but this
 was missing the completeness direction (all cases must be handled). Generated
@@ -616,7 +616,7 @@ automatically in `generateStepRelation` after the `isTerminal` block.
 detect an implementation that never takes an allowed transition (this is how
 a missing CNAME chase went unnoticed). The base guard derivation also weakens
 content: "shows a CNAME" became `answer.size > 0` — identical to the first
-disjunct of `guard_answerOrError` — because RR sections are opaque ByteArrays
+disjunct of `guard_answerOrNameError` — because RR sections are opaque ByteArrays
 at the Spec level. `generateStepRelation` therefore additionally generates:
 
 - **Refined guards** (`guardRefined_{action}`), parameterized by abstract
@@ -644,7 +644,7 @@ parse-based checks (`answersQueryB`, `hasRRTypeIn` in Impl/Resolver.lean) and
 `transition` with `stepAnalyzeResponse` (`implTransition`), and proves all
 four obligations (`impl_obligation_*` in Proof/Resolver.lean). The old
 implementation (returning answers without chasing) is refuted by
-`impl_obligation_cnameRedirect`: a CNAME-bearing, non-answering response in
+`impl_obligation_cname`: a CNAME-bearing, non-answering response in
 the single-guard region must transition to checkAnswer.
 
 ### Complement-Clause Semantics and Recommendations
@@ -1260,7 +1260,7 @@ checking 4c first per the RFC's qualifier:
   after chasing, the last sub-query's question names the canonical name, and
   stub resolvers silently discard responses whose question section does not
   match what they asked (this manifests as a client-side timeout, not an
-  error). The branch condition matches the NLP-generated `guard_answerOrError`
+  error). The branch condition matches the NLP-generated `guard_answerOrNameError`
   (`answer.size > 0 ∨ rcode = nameError`) exactly, so that `responseHandled`
   covers the branch space (`step_analyzeResponse_coverage`).
 - **4b**: Delegation (empty answer, non-empty authority with NS records) →
@@ -1274,7 +1274,7 @@ checking 4c first per the RFC's qualifier:
 - **4d**: Server failure **or other bizarre contents** → clear the response
   and retry with step 3. The NLP rule for "or other ⟨adj⟩ ⟨noun⟩"
   disjuncts renders the complement class: the base `guard_serverFailure`
-  gains `∨ (¬guard_answerOrError ∧ ¬guard_delegation ∧ ¬guard_cnameRedirect)`
+  gains `∨ (¬guard_answerOrNameError ∧ ¬guard_delegation ∧ ¬guard_cname)`
   (making `responseHandled` total — `step_analyzeResponse_coverage` is now
   unconditional and the fallback error is provably dead), and the refined
   guards gain a uniform abstract `handled : Format → Bool` parameter with

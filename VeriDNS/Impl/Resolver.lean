@@ -70,7 +70,7 @@ def answersQueryB [RRParse RR] (resp : Format) : Bool :=
   | none => false
 
 /-- 4c trigger (RFC 1034 §5.3.3): the response shows a CNAME "and that is not
-    the answer itself". Instantiates guardRefined_cnameRedirect: a CNAME is
+    the answer itself". Instantiates guardRefined_cname: a CNAME is
     present and the response does not answer the query. Returns the canonical
     name to chase. -/
 def cnameToChase [RRParse RR] (resp : Format) : Option ByteArray :=
@@ -353,8 +353,8 @@ def stepAnalyzeResponse (s : State S C NS RR) : StepResult S C NS RR :=
     -- 4c: CNAME redirect, checked first (RFC 1034 §5.3.3: "if the response
     -- shows a CNAME and that is not the answer itself, cache the CNAME,
     -- change the SNAME to the canonical name in the CNAME RR and go to
-    -- step 1"). Justified by StepSpec.cnameRedirect; obligation:
-    -- impl_obligation_cnameRedirect.
+    -- step 1"). Justified by StepSpec.cname; obligation:
+    -- impl_obligation_cname.
     match cnameToChase (RR := RR) resp with
     | some canonicalName =>
       let cache' := cacheUnlessTruncated (RR := RR) s.resources.cache resp resp.answer
@@ -411,7 +411,7 @@ def stepAnalyzeResponse (s : State S C NS RR) : StepResult S C NS RR :=
           .answer (finalizeAnswer s resp)
         else .error "4b: no NS records in authority"
       -- 4a: answer or name error → return the response with the accumulated
-      -- CNAME chain prepended. Condition matches guard_answerOrError
+      -- CNAME chain prepended. Condition matches guard_answerOrNameError
       -- (answer.size > 0 ∨ rcode = nameError) so that responseHandled covers
       -- the branch space (step_analyzeResponse_coverage).
       else if !resp.answer.isEmpty || resp.header.rcode == Rcode.nameError then
