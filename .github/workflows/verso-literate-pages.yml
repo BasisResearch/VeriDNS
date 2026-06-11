@@ -50,9 +50,16 @@ jobs:
             - name: Purge stale literate cache
               run: rm -rf .lake/build/literate .lake/build/literate-html
 
+            # verso-literate re-elaborates each module under the interpreter;
+            # the recursive NLP parsers in VeriDNS/RFC/ overflow the default
+            # 8 MB stack on Linux runners (SIGSEGV, exit 139). Raise the
+            # limit for this step — macOS (where the build was developed)
+            # already runs with a larger effective stack.
             - name: Build literate site
               id: build
-              run: echo "path=$(lake query :literateHtml)" >> "$GITHUB_OUTPUT"
+              run: |
+                ulimit -s unlimited
+                echo "path=$(lake query :literateHtml)" >> "$GITHUB_OUTPUT"
 
             - name: Upload Pages artifact
               uses: actions/upload-pages-artifact@v3
