@@ -1564,9 +1564,56 @@ scenarios whose tree honors §3.6.2 CNAME exclusivity.
   invariant. **Semantic non-poisoning**: nothing the tree does not hold
   can reach the cache or the client.
 
-Remaining (task-tracked): T-derived mock network handlers + `#guard`s in
-Test/Loop, the shim-level composition through `ioResumeLoop`, and the
-completeness direction of `AnswersFromTree`.
+### Shim soundness (the end-to-end theorem)
+
+`Proof/NameTree.lean`'s `ShimSoundness` section composes the pure-loop
+soundness through the monadic IO shim with `SatisfiesM` (Batteries),
+over any `[Monad M] [LawfulMonad M] [UdpSocket M Sock ByteArray]`:
+
+- **`NetworkConsistent`** — the weakened oracle in operational form: any
+  response that survives `forwardQuery`'s datagram gate AND the RFC 5452
+  `acceptResponse` match is `ResponseConsistent` with the tree; spoofs,
+  mismatches, undecodable datagrams, and timeouts are unconstrained.
+- **`ioResumeLoop_sound`** — by induction on the loop's own (depth, fuel)
+  lexicographic measure, through every branch: upstream exchanges, RFC
+  5452 rejection, bogus-delegation filtering, server removal, glueless NS
+  sub-resolution (the inner recursion starts from the empty cache via
+  `resolve_sound` + `cacheAgrees_empty`), and the pure `resume` rounds.
+  `ioResumeLoop` was made public (was `private`) so this theorem can name
+  it. Proof technique: `rw [ioResumeLoop.eq_def]; dsimp only []` (plain
+  `rw [ioResumeLoop]` selects a conditional equation lemma with an
+  impossible side goal), then a `SatisfiesM.bind` cascade where plumbing
+  binds carry `fun _ => True` and the `let y ← pure (…, cache)` pair-binds
+  carry `fun y => y.2 = state.resources.cache` so the cache invariant
+  threads through.
+- **`resolveWithIO_sound`** — the public entry point: starting from an
+  agreeing persistent cache, under the weakened oracle, a full resolution
+  run only ever completes with answers made of tree data and returns a
+  cache that still agrees.
+
+Axiom profile of the headline theorems: `propext`, `Classical.choice`,
+`Quot.sound`, plus the `bv_decide` certificates already trusted by the
+wire-format roundtrips. No new axioms.
+
+### The tree network, executable (Test/Loop.lean)
+
+`treeHandler` is a mock upstream that IS the tree: every query is
+answered with `treeLookup`'s verdict on a concrete `theTree`
+(`.` → `com` → `example` (A) → `www` (CNAME example.com)) — the
+`ResponseConsistent` oracle satisfied by construction. Compile-time
+checks: the served A record is the tree's record byte-for-byte
+(`#guard treeAnswered`), `EXAMPLE.COM` answers from the `example.com`
+node (`#guard treeCaseInsensitive`), the CNAME chase follows tree edges
+with the full chain served (`#guard treeChased`), and a missing node
+yields NXDOMAIN that negatively caches (`treeMissing`) with NODATA for
+present-node/absent-type (`treeNodata`) — the last two checked natively
+via build-failing `#eval` throws (their kernel reduction under `#guard`
+exceeds the default 1 GB stack; the positive-path guards reduce fine).
+
+Remaining (future work): the completeness direction of
+`AnswersFromTree` (a positive verdict's full RRset is delivered), which
+needs the answer-completeness clause of the oracle threaded through
+`finalizeAnswer`.
 
 ## UDP Server Architecture
 

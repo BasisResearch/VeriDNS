@@ -1,6 +1,7 @@
 import VeriDNS.Impl.NameTree
 import VeriDNS.Impl.Resolver
 import VeriDNS.Impl.Cache
+import VeriDNS.Impl.Server
 import VeriDNS.Spec.ServerAlgorithm
 import VeriDNS.Proof.DomainName
 import VeriDNS.Proof.ResourceRecord
@@ -1567,5 +1568,251 @@ theorem lookupNegative_deserved {T : Node ResourceRecord} {c : DnsCache}
     · cases hcond
 
 end StepSoundness
+
+-- ============================================================
+-- Shim soundness: the IO loop under the weakened oracle
+-- ============================================================
+
+section ShimSoundness
+
+open VeriDNS.Impl.Server VeriDNS.Impl.Resolver VeriDNS.Impl.SList
+open VeriDNS.Impl.Cache (DnsCache)
+
+/-- Every monadic value satisfies the trivial postcondition. -/
+private theorem satisfiesM_true {m : Type → Type} [Monad m] [LawfulMonad m]
+    {α : Type} (x : m α) : SatisfiesM (fun _ => True) x :=
+  ⟨(fun a => ⟨a, trivial⟩) <$> x, by simp [Functor.map_map]⟩
+
+variable {M : Type → Type} {Sock : Type} [Monad M] [LawfulMonad M]
+  [UdpSocket M Sock ByteArray]
+
+/-- The weakened oracle, operationally: whatever the network transport
+    delivers, any response that survives `forwardQuery`'s datagram gate
+    AND the RFC 5452 `acceptResponse` match is consistent with the tree.
+    Spoofs, mismatches, undecodable datagrams, and timeouts are entirely
+    unconstrained. -/
+def NetworkConsistent (T : Node ResourceRecord) (M : Type → Type) (Sock : Type)
+    [Monad M] [UdpSocket M Sock ByteArray] : Prop :=
+  ∀ (q : Format) (addr : ByteArray),
+    SatisfiesM (m := M)
+      (fun ro => ∀ resp₀ resp, ro = some resp₀ →
+        acceptResponse q resp₀ = some resp → ResponseConsistent T resp)
+      (forwardQuery (M := M) (Sock := Sock) q addr)
+
+/-- The result postcondition: a completed response's answer section is
+    tree data, and the returned cache still agrees. -/
+def ShimSound (T : Node ResourceRecord)
+    (rc : Except String Format × DnsCache) : Prop :=
+  (∀ f, rc.1 = .ok f → SectionAgrees T f.answer) ∧ CacheAgrees T rc.2
+
+/-- THE shim-soundness theorem: under the weakened oracle, the IO resume
+    loop — upstream exchanges, RFC 5452 gating, bogus-delegation
+    filtering, glueless NS sub-resolution, retries, deadlines — only ever
+    completes with answers made of tree data, and the cache it returns
+    still agrees with the tree. Composes `resume_sound` (the pure loop)
+    through every monadic round. -/
+theorem ioResumeLoop_sound (T : Node ResourceRecord)
+    (hnet : NetworkConsistent T M Sock) (sbelt : DnsSList) :
+    ∀ (depth fuel : Nat)
+      (state : State DnsSList DnsCache SlistEntry ResourceRecord)
+      (deadline : UInt32),
+    StateAgrees T state →
+    SatisfiesM (ShimSound T)
+      (ioResumeLoop (M := M) (Sock := Sock) sbelt state deadline depth fuel)
+  | depth, 0, state, deadline, hs => by
+    rw [ioResumeLoop.eq_def]
+    exact SatisfiesM.pure (p := ShimSound T) ⟨(fun _ h => nomatch h), hs.cache⟩
+  | depth, fuel' + 1, state, deadline, hs => by
+    rw [ioResumeLoop.eq_def]
+    dsimp only []
+    refine SatisfiesM.bind (satisfiesM_true _) ?_
+    intro t _
+    split
+    · -- deadline exceeded
+      exact SatisfiesM.pure ⟨(fun _ h => nomatch h), hs.cache⟩
+    · refine SatisfiesM.bind (satisfiesM_true _) ?_
+      intro _ _
+      split
+      · -- no server with an address
+        split
+        · -- glueless sub-resolution (depth = depth' + 1)
+          next _ _ depth' nsName _ =>
+          refine SatisfiesM.bind (satisfiesM_true _) ?_
+          intro _ _
+          split
+          · -- sub-resolve completed purely
+            refine SatisfiesM.bind
+              (SatisfiesM.pure (p := fun y => y.2 = state.resources.cache) rfl) ?_
+            intro y hy
+            split
+            · split
+              · refine SatisfiesM.bind (satisfiesM_true _) ?_
+                intro _ _
+                refine SatisfiesM.bind (satisfiesM_true _) ?_
+                intro _ _
+                exact ioResumeLoop_sound T hnet sbelt depth' fuel' _ _
+                  ⟨(show CacheAgrees T y.snd by rw [hy]; exact hs.cache), hs.chain⟩
+              · refine SatisfiesM.bind (satisfiesM_true _) ?_
+                intro _ _
+                exact ioResumeLoop_sound T hnet sbelt depth' fuel' _ _
+                  ⟨(show CacheAgrees T y.snd by rw [hy]; exact hs.cache), hs.chain⟩
+            · refine SatisfiesM.bind (satisfiesM_true _) ?_
+              intro _ _
+              exact ioResumeLoop_sound T hnet sbelt depth' fuel' _ _
+                ⟨(show CacheAgrees T y.snd by rw [hy]; exact hs.cache), hs.chain⟩
+          · -- sub-resolve paused: inner IO recursion at depth'
+            next st hres =>
+            refine SatisfiesM.bind
+              (ioResumeLoop_sound T hnet sbelt depth' fuel' st deadline (by
+                have h := resolve_sound (S := DnsSList) (NS := SlistEntry)
+                  (T := T) (mkAddressQuery nsName)
+                  sbelt 64 state.now (cacheAgrees_empty T)
+                rw [hres] at h
+                exact h)) ?_
+            intro _ _
+            refine SatisfiesM.bind
+              (SatisfiesM.pure (p := fun y => y.2 = state.resources.cache) rfl) ?_
+            intro y hy
+            split
+            · split
+              · refine SatisfiesM.bind (satisfiesM_true _) ?_
+                intro _ _
+                refine SatisfiesM.bind (satisfiesM_true _) ?_
+                intro _ _
+                exact ioResumeLoop_sound T hnet sbelt depth' fuel' _ _
+                  ⟨(show CacheAgrees T y.snd by rw [hy]; exact hs.cache), hs.chain⟩
+              · refine SatisfiesM.bind (satisfiesM_true _) ?_
+                intro _ _
+                exact ioResumeLoop_sound T hnet sbelt depth' fuel' _ _
+                  ⟨(show CacheAgrees T y.snd by rw [hy]; exact hs.cache), hs.chain⟩
+            · refine SatisfiesM.bind (satisfiesM_true _) ?_
+              intro _ _
+              exact ioResumeLoop_sound T hnet sbelt depth' fuel' _ _
+                ⟨(show CacheAgrees T y.snd by rw [hy]; exact hs.cache), hs.chain⟩
+          · -- sub-resolve failed purely
+            refine SatisfiesM.bind
+              (SatisfiesM.pure (p := fun y => y.2 = state.resources.cache) rfl) ?_
+            intro y hy
+            split
+            · split
+              · refine SatisfiesM.bind (satisfiesM_true _) ?_
+                intro _ _
+                refine SatisfiesM.bind (satisfiesM_true _) ?_
+                intro _ _
+                exact ioResumeLoop_sound T hnet sbelt depth' fuel' _ _
+                  ⟨(show CacheAgrees T y.snd by rw [hy]; exact hs.cache), hs.chain⟩
+              · refine SatisfiesM.bind (satisfiesM_true _) ?_
+                intro _ _
+                exact ioResumeLoop_sound T hnet sbelt depth' fuel' _ _
+                  ⟨(show CacheAgrees T y.snd by rw [hy]; exact hs.cache), hs.chain⟩
+            · refine SatisfiesM.bind (satisfiesM_true _) ?_
+              intro _ _
+              exact ioResumeLoop_sound T hnet sbelt depth' fuel' _ _
+                ⟨(show CacheAgrees T y.snd by rw [hy]; exact hs.cache), hs.chain⟩
+        · -- no glueless target
+          exact SatisfiesM.pure ⟨(fun _ h => nomatch h), hs.cache⟩
+      · -- a server with a known address
+        next entry ipAddr _ =>
+        split
+        · -- no sub-query buildable
+          exact SatisfiesM.pure ⟨(fun _ h => nomatch h), hs.cache⟩
+        · next subQuery₀ _ =>
+          refine SatisfiesM.bind (satisfiesM_true _) ?_
+          intro _ _
+          refine SatisfiesM.bind (satisfiesM_true _) ?_
+          intro rid _
+          refine SatisfiesM.bind (hnet _ _) ?_
+          intro upstreamResp hup
+          split
+          · -- timeout: retry next candidate
+            exact ioResumeLoop_sound T hnet sbelt depth fuel' _ _
+              ⟨hs.cache, hs.chain⟩
+          · next resp₀ =>
+            split
+            · -- RFC 5452 mismatch: dropped
+              refine SatisfiesM.bind (satisfiesM_true _) ?_
+              intro _ _
+              exact ioResumeLoop_sound T hnet sbelt depth fuel' _ _
+                ⟨hs.cache, hs.chain⟩
+            · next resp hacc =>
+              have hcons : ResponseConsistent T resp :=
+                hup resp₀ resp rfl hacc
+              refine SatisfiesM.bind (satisfiesM_true _) ?_
+              intro _ _
+              split
+              · -- bogus delegation: ignored
+                refine SatisfiesM.bind (satisfiesM_true _) ?_
+                intro _ _
+                exact ioResumeLoop_sound T hnet sbelt depth fuel' _ _
+                  ⟨hs.cache, hs.chain⟩
+              · -- accepted: the pure loop takes over
+                split
+                · -- completed
+                  next finalResp hdone =>
+                  have hres := resume_sound (S := DnsSList) (NS := SlistEntry)
+                    (T := T)
+                    (s := if (resp.header.rcode == Rcode.serverFailure
+                        || !classifiableB resp) = true then
+                      { state with resources := { state.resources with
+                          slist := (state.resources.slist.markQueried
+                            entry.name).removeServer entry.name } }
+                    else
+                      { state with resources := { state.resources with
+                          slist := state.resources.slist.markQueried
+                            entry.name } })
+                    (by split <;> exact ⟨hs.cache, hs.chain⟩) hcons 64
+                  rw [hdone] at hres
+                  exact SatisfiesM.pure ⟨(fun f hf => by cases hf; exact hres),
+                    (by split <;> exact hs.cache)⟩
+                · -- paused: continue the IO loop
+                  next state' hpause =>
+                  have hres := resume_sound (S := DnsSList) (NS := SlistEntry)
+                    (T := T)
+                    (s := if (resp.header.rcode == Rcode.serverFailure
+                        || !classifiableB resp) = true then
+                      { state with resources := { state.resources with
+                          slist := (state.resources.slist.markQueried
+                            entry.name).removeServer entry.name } }
+                    else
+                      { state with resources := { state.resources with
+                          slist := state.resources.slist.markQueried
+                            entry.name } })
+                    (by split <;> exact ⟨hs.cache, hs.chain⟩) hcons 64
+                  rw [hpause] at hres
+                  exact ioResumeLoop_sound T hnet sbelt depth fuel' state' deadline hres
+                · -- resume error
+                  refine SatisfiesM.bind (satisfiesM_true _) ?_
+                  intro _ _
+                  exact SatisfiesM.pure ⟨(fun _ h => nomatch h),
+                    (by split <;> exact hs.cache)⟩
+  termination_by depth fuel => (depth, fuel)
+  decreasing_by all_goals
+    (first | (apply Prod.Lex.left; omega) | (apply Prod.Lex.right; omega))
+
+/-- THE end-to-end soundness theorem at the public entry point: starting
+    from an agreeing persistent cache, under the weakened network oracle,
+    a full `resolveWithIO` run — pure resolution, every upstream exchange,
+    every retry — only ever completes with an answer made of tree data,
+    and hands back a cache that still agrees with the tree. -/
+theorem resolveWithIO_sound (T : Node ResourceRecord)
+    (hnet : NetworkConsistent T M Sock) (query : Format) (sbelt : DnsSList)
+    {cache : DnsCache} (hc : CacheAgrees T cache) (now : UInt32)
+    (fuel depth : Nat) (budget : UInt32) :
+    SatisfiesM (ShimSound T)
+      (resolveWithIO (M := M) (Sock := Sock) query sbelt cache now
+        fuel depth budget) := by
+  unfold resolveWithIO
+  have h := resolve_sound (S := DnsSList) (NS := SlistEntry) (T := T)
+    query sbelt 64 now hc
+  split
+  · next resp hdone =>
+    rw [hdone] at h
+    exact SatisfiesM.pure ⟨(fun f hf => by cases hf; exact h), hc⟩
+  · next st hpause =>
+    rw [hpause] at h
+    exact ioResumeLoop_sound T hnet sbelt depth fuel st (now + budget) h
+  · exact SatisfiesM.pure ⟨(fun _ hf => nomatch hf), hc⟩
+
+end ShimSoundness
 
 end VeriDNS.Proof.NameTree

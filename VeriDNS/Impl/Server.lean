@@ -358,8 +358,11 @@ variable {M : Type → Type} {Sock : Type} [Monad M] [UdpSocket M Sock ByteArray
     follows RFC 1034 §5.3.3 step 2 — "It may be the case that the addresses
     are not available... the best is to start parallel resolver processes
     looking for the addresses" — by sub-resolving an NS name's A record
-    (sequentially; `depth` bounds glueless nesting). -/
-private def ioResumeLoop (sbelt : DnsSList)
+    (sequentially; `depth` bounds glueless nesting).
+
+    Public (not `private`) so the semantic-soundness theorem
+    (`Proof/NameTree.lean: ioResumeLoop_sound`) can be stated about it. -/
+def ioResumeLoop (sbelt : DnsSList)
     (state : Resolver.State DnsSList DnsCache SlistEntry ResourceRecord)
     (deadline : UInt32) (depth fuel : Nat) : M (Except String Format × DnsCache) :=
   match fuel with

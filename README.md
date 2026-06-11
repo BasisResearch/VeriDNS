@@ -68,7 +68,11 @@ generated via symbolic NLP on the RFC prose.
   the tree — RFC 5452 matching keeps everything else out), the cache is
   a sound partial view of the tree and the resolver can only ever tell
   the client what the tree actually holds, through every cache hit,
-  CNAME chase, and delegation.
+  CNAME chase, and delegation — proven end to end through the IO loop
+  (`resolveWithIO_sound`), including retries, glueless NS
+  sub-resolution, and deadline handling. A mock network derived from a
+  concrete tree exercises all of it at compile time, including the
+  missing-node NXDOMAIN path.
 - **Wire safety.** `decodeName` has machine-checked bounds on
   arbitrary input bytes; compression-pointer loops
   terminate. Malformed packets produce FORMERR, never a crash (RFC

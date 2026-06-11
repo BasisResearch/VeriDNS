@@ -30,6 +30,7 @@ import VeriDNS.Impl.ResourceRecord
 import VeriDNS.Impl.Message
 import VeriDNS.Impl.Cache
 import VeriDNS.Impl.SList
+import VeriDNS.Impl.NameTree
 import VeriDNS.Impl.Resolver
 import VeriDNS.Impl.UdpSocket
 import VeriDNS.Impl.Server
@@ -46,4 +47,5 @@ import VeriDNS.Proof.MessageValid
 import VeriDNS.Proof.Resolver
 import VeriDNS.Proof.Server
 import VeriDNS.Proof.Cache
+import VeriDNS.Proof.NameTree
 import VeriDNS.Test.Loop
