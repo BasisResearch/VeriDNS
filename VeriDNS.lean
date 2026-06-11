@@ -40,6 +40,7 @@ import VeriDNS.Proof.Question
 import VeriDNS.Proof.RData
 import VeriDNS.Proof.ResourceRecord
 import VeriDNS.Proof.Message
+import VeriDNS.Proof.MessageValid
 import VeriDNS.Proof.Resolver
 import VeriDNS.Proof.Server
 import VeriDNS.Proof.Cache

@@ -56,8 +56,9 @@ VeriDNS/
     RData.lean          -- RData roundtrip theorems: A, CNAME, HINFO, MX, SOA (complete)
     ResourceRecord.lean -- ResourceRecord roundtrip theorem (complete)
     Message.lean        -- Full message roundtrip theorem (complete; Appends framework + frame lemmas + decodeMany induction)
-    Resolver.lean       -- RFC conformance proofs: SBELT fallback, ID match, dispatch, termination, needsIO, step relation soundness, response coverage (all complete)
-    Server.lean         -- buildResponse/truncateUdp properties (complete)
+    MessageValid.lean   -- Decode-side validity: decode's output satisfies every decode_encode hypothesis; end-to-end decode_encode_of_decode (complete)
+    Resolver.lean       -- RFC conformance proofs: SBELT fallback, ID match, dispatch, loop trace soundness (StepSpecStar), pause inversion, needsIO, step relation soundness, response coverage (all complete)
+    Server.lean         -- buildResponse/truncateUdp properties, RFC 5452 datagram gate (complete)
   Main.lean       -- Executable entry point (UDP server on port 5300)
 ```
 
@@ -338,9 +339,22 @@ by parsing them through the NLP pipeline with conditional sentence awareness:
      (uses `aliasDomainWordGuarded` to distinguish query/response via QR field,
      `pairLeft`/`pairRight` FieldRef constructors to select the correct binder)
    - **SVO with "from" PP**: "initializes SLIST from SBELT"
-     → `∀ (S C NS RR : Type) [SlistSpec S NS] [CacheSpec C RR] (x : Resources S C NS RR), x.slist = x.sbelt`
+     → the field equation `slist = sbelt` over `Resources`
    - **SVAdj with comparative + "than" PP**: numeric comparisons
-   - **Conditional**: if guard or body resolves, use the resolved part
+   - **Conditional**: if both sides resolve, an implication; if only the
+     GUARD resolves, the guard is the property. If only the BODY resolves,
+     the antecedent is NOT dropped (an unconditional reading of a
+     conditional sentence is false in general — it produced a vacuous
+     `algorithm_prop_0`): the emitter abstracts it as a predicate parameter
+     over an abstract state σ, with the body's struct reached through a
+     post-state projection:
+     `def algorithm_prop_0 (σ : Type) (S C NS RR : Type) [SlistSpec S NS]
+     [CacheSpec C RR] (searchForNSRRsFails : σ → Prop)
+     (resourcesAfter : σ → Resources S C NS RR) : Prop :=
+     ∀ st, searchForNSRRsFails st → (resourcesAfter st).slist =
+     (resourcesAfter st).sbelt`. The guard's name is derived grammatically
+     (`predNameOfClause`: subject head + subject postmodifier PPs + an
+     intransitive verb).
 5. `resolveNPToField` resolves NP heads to types/fields:
    - ALL-CAPS words → field name search across context types
    - Capitalized words → type name lookup in environment
@@ -508,22 +522,60 @@ Roundtrip theorems state that for each type T:
     `ResourceRecord.decode`-based statement was too weak because `decode`
     canonicalizes RRs while `encode` writes them raw.
 
+- **MessageValid (Proof/MessageValid.lean)**: the `decode_encode`
+  hypotheses are PROVEN for everything `decode` accepts — they are no
+  longer assumptions at the system boundary:
+  - `decodeNameAux_validLabels` / `run_decodeName_validLabels`: every label
+    the name decoder produces has length 1–63 (positivity + the ≤63 guard);
+  - `run_decodeMany_size` / `run_decodeMany_mem`: `decodeMany` returns
+    exactly the requested count, and every returned element is an output of
+    the item parser — so the header counts match the section sizes and
+    per-element properties lift to sections;
+  - `run_decodeRRCanonical_shape`: every `decodeRRCanonical` output has the
+    canonical shape `rrWire` (valid owner labels + 10 fixed bytes with true
+    RDLENGTH + branch-shaped rdata, `CanonicalRdata`);
+  - `rrWire_frame`: canonical RR bytes embedded at ANY position re-parse to
+    exactly themselves (the `ValidRRBytes` frame property), by the
+    name-decoder frame lemma, ten byte-access lemmas over the fixed fields,
+    `bv_decide` byte-reassembly identities, and per-branch rdata frames;
+  - `decode_encode_of_decode`: anything `decode` accepts survives the
+    encode/decode roundtrip END-TO-END, with no side conditions.
+
 ### Resolver RFC Conformance (Proof/Resolver.lean)
 
 Proofs that the fuel-bounded resolver state machine conforms to NLP-generated
 algorithm properties from RFC 1034 §5.3.3:
 
-- **SBELT fallback** (`stepFindServers_sbelt_fallback`): when `stepFindServers` falls
-  back to SBELT (walkNs returns none), `slist = sbelt`. Weakened from unconditional
-  to conditional after NS walking was added. Proof by `unfold`/`split`/`simp`.
+- **SBELT fallback** (`impl_algorithm_sbelt_fallback`): instantiates the
+  regenerated `algorithm_prop_0` ("If the search for NS RRs fails, then the
+  resolver initializes SLIST from the safety belt SBELT"). The failure event
+  (`nsSearchFails`: the cache walk finds no NS RRs AND the current SLIST has
+  no closer knowledge) and the post-state projection (`findServersState`)
+  instantiate the prop's abstract antecedent and `resourcesAfter` parameters;
+  the conclusion `slist = sbelt` is proven against the real fallback branch
+  of `stepFindServers`. (The earlier unconditional `algorithm_prop_0` was
+  false of real states and its "proof" had been weakened to a vacuous
+  `∨ True`; the generator now abstracts unresolvable antecedents instead of
+  dropping them — see Algorithm Property Generation.)
 - **ID preservation** (`stepAnalyzeResponse_preserves_id`): when `stepAnalyzeResponse`
   returns an answer, its header ID equals the input response's header ID. Handles
   all response branches (4a answer, 4a name error, 4b delegation, 4c CNAME, 4d
   server failure). Proof by nested `split at heq` with `StepResult.answer.injEq`.
 - **Step dispatch**: four theorems (`step_*_dispatch`) proving `step` correctly
   dispatches to the corresponding step function based on `currentStep`.
-- **Termination** (`resolve_loop_result`): the resolve loop always produces either
-  `.ok` or `.error` (never diverges), by induction on fuel.
+- **Loop soundness** (replacing the former `resolve_loop_result`, which was
+  vacuous — its `isResult` predicate was `True` on both constructors, and
+  fuel-bounded totality is already structural):
+  - `step_needsIO_inversion`: the only step yielding `.needsIO` is step 3
+    with no response in hand, and it yields the state unchanged;
+  - `resolve_loop_paused`: every pause is a genuine IO yield — the paused
+    state is at `.sendQueries` with `lastResponse = none` (the contract
+    `buildSubQuery`/`resume` rely on);
+  - `resolve_loop_star`: a paused run's step is `StepSpecStar`-reachable
+    from the start — the loop never takes a transition the generated RFC
+    step relation does not allow;
+  - `resolve_loop_done`: every answer the loop returns is produced by a
+    single `.answer` step at a StepSpec-reachable state.
 - **needsIO yield** (`step_sendQueries_needsIO`): stepSendQueries yields `.needsIO`
   when no response is available.
 - **Sequential transitions** (`step_seq_checkAnswer`, `step_seq_findServers`):
@@ -1120,18 +1172,31 @@ OLD SNAME ("change the SNAME ... and go to step 1" = fresh context).
 
 `rfc/rfc-5452.txt` §9.1–9.2 are captured in Spec/Resilience.lean. The §9.1
 MUST-match bullet list generates `querymatchingrules_match_obligation` (one
-abstract matcher per bullet); `acceptResponse` (ID + question echo, applied
-before `resume` so spoofed responses never reach the resolver or cache)
-instantiates it (`accept_match_obligation`). The three address/port matchers
-are socket-layer attributes enforced below the gate: every upstream query
-runs on its own per-exchange socket (`UdpSocket.exchange`, FFI
-`veri_dns_exchange`) that is `connect(2)`-ed to the queried server, so the
-kernel discards datagrams from non-matching source address/port, and the
-fresh ephemeral local port per query is unpredictable (§9.2's port
-randomization for free). §9.2's unpredictable query IDs are implemented by
-`UdpSocket.randomId` (arc4random FFI) + `withRandomId`; `serveOne` restores
-the client's ID on the final response. `UdpSocket` also has `now` (clock)
-and a defaulted `log` diagnostic hook (IO instance: stderr).
+abstract matcher per bullet) — and ALL SEVEN matchers are instantiated with
+real predicates over data; none is delegated to the transport:
+
+- **Datagram-level** (`datagramMatches` + `acceptExchanged`,
+  Impl/Server.lean): the transport (`UdpSocket.exchange`) runs each query
+  on a fresh UNCONNECTED socket and only REPORTS the first datagram with
+  its kernel-observed addressing (`Exchanged`: payload, source, delivery
+  destination, the socket's local binding at send time). The Lean gate
+  then decides: source = the queried server (address AND port, bytes 0–3 /
+  4–5), destination address = the address the query left from, destination
+  port = the query's source port. A mismatch is dropped before
+  `Message.decode` runs (`forwardQuery`), and is proven dropped
+  (`exchanged_mismatch_dropped`); accepted datagrams provably satisfy all
+  three matchers (`exchanged_matches`).
+- **Message-level** (`acceptResponse`): query ID + question echo
+  (name/class/type, case-insensitive), applied before `resume` so spoofed
+  responses never reach the resolver or cache (`acceptResponse_matches`).
+
+`accept_match_obligation` instantiates the generated obligation over
+(datagram, response) pairs with the conjunction of the two gates. The fresh
+ephemeral local port per query is §9.2's port randomization; unpredictable
+query IDs are implemented by `UdpSocket.randomId` (arc4random FFI) +
+`withRandomId`; `serveOne` restores the client's ID on the final response.
+`UdpSocket` also has `now` (clock) and a defaulted `log` diagnostic hook
+(IO instance: stderr).
 
 ### SBELT Initialization
 
@@ -1303,25 +1368,38 @@ transport specs. The abstraction enables:
 
 Self-contained C FFI in `ffi/recvfrom.c` providing the UDP operations:
 `socket()`, `bind()`, `sendto()`, `recvfrom()`, plus `veri_dns_exchange`
-(one connected query exchange: fresh socket → `connect` → `send` → `recv`
-with 2s timeout → `close`, returning `Option ByteArray`; `none` on timeout),
-`veri_dns_now` (wall clock) and `veri_dns_random_u16` (arc4random). Each is
-exposed via `@[extern]` with simple Lean types (`UInt32` for fd, `ByteArray`
-for 6-byte encoded addresses). No external socket library dependency —
-avoids Alloy/socket.lean version incompatibility with Lean 4.31.
+(one UNCONNECTED query exchange: fresh socket with a 2 s timeout; a brief
+`connect`/`getsockname`/`AF_UNSPEC`-dissolve learns the kernel's local
+address selection for the destination WITHOUT filtering the receive;
+`sendto` → `recvmsg` with `IP_RECVDSTADDR`/`IP_PKTINFO` destination
+metadata → `close`. Returns `Option (payload, source6, destination6,
+local6)`; `none` on timeout. The function makes NO acceptance decision —
+the RFC 5452 §9.1 source/destination match is decided by the Lean gate
+`datagramMatches`), `veri_dns_now` (wall clock) and `veri_dns_random_u16`
+(arc4random). Each is exposed via `@[extern]` with simple Lean types
+(`UInt32` for fd, `ByteArray` for 6-byte encoded addresses). No external
+socket library dependency — avoids Alloy/socket.lean version
+incompatibility with Lean 4.31.
 
 ### IO-Shim Verification (Test/Loop.lean)
 
 `serveOne`/`resolveWithIO`/`ioResumeLoop` are parametric over `UdpSocket`,
 so the full serving loop runs in pure `StateM MockState` over a scripted
 mock socket (per-exchange handlers `ByteArray → Option ByteArray`; an
-exhausted script is a timeout). Five end-to-end behaviors are checked by
-`#guard` AT COMPILE TIME — the build fails on regression:
+exhausted script is a timeout; the mock reports `Exchanged` addressing
+metadata, with `spoofSource`/`spoofDest` overrides for attacker scenarios).
+Seven end-to-end behaviors are checked by `#guard` AT COMPILE TIME — the
+build fails on regression:
 
 1. **Direct answer**: exactly one datagram to the client, client's ID
    restored, QR=1/RA=1/AA=0/Z=0, the answer delivered, question echoed.
 2. **RFC 5452 spoof rejection**: a forged-ID response never reaches the
    client (no answer data; non-NOERROR after the script runs dry).
+2b. **Wrong-source rejection**: a correct-ID response reported from the
+   wrong source address is dropped by the Lean datagram gate (the
+   transport does not filter).
+2c. **Wrong-destination rejection**: a response whose delivery metadata
+   does not match the binding the query left from is dropped.
 3. **Iterative delegation**: a referral (NS + glue, closer match count) is
    chased — two upstream exchanges, final answer correct.
 4. **RFC 2308 negative caching**: NXDOMAIN cached from an A query answers
@@ -1336,6 +1414,15 @@ exercised live with `dig`.
 
 - **buildResponse properties**: ID preservation, QR=1, rcode propagation, question
   preservation — all by `unfold`/`rfl` (struct field projection through `with` update)
-- **truncateUdp_no_trunc**: non-truncation case by `simp` on the size guard
+- **truncateUdp**: the full truncation discipline —
+  - `truncateUdp_no_trunc`: ≤512 bytes pass through unchanged;
+  - `truncateUdp_flag_iff`: the truncated flag is reported exactly when the
+    encoding exceeded 512 bytes;
+  - `truncateUdp_truncated` (RFC 1035 §6.2 "truncation should start at the
+    end of the response and work forward"): a truncated reply keeps the
+    client's ID and question, sets TC=1, always drops the additional
+    section, and never drops the answer while authority data remains;
+  - `truncateUdp_size`: the result is within 512 bytes unless it is the
+    final header+question form (bounded by the client's own ≤512 query).
 
 All theorems are sorry-free.

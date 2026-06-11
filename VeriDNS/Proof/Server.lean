@@ -48,6 +48,64 @@ theorem truncateUdp_no_trunc (encoded : ByteArray) (msg : Format)
     : truncateUdp encoded msg = (encoded, false) := by
   unfold truncateUdp; simp [h]
 
+/-- The truncated flag is reported exactly when the encoding exceeded the
+    RFC 1035 §4.2.1 UDP limit. -/
+theorem truncateUdp_flag_iff (encoded : ByteArray) (msg : Format) :
+    (truncateUdp encoded msg).2 = true ↔ 512 < encoded.size := by
+  unfold truncateUdp
+  split <;> rename_i h1
+  · simp; omega
+  · dsimp only []
+    split
+    · simp; omega
+    · split <;> (simp; omega)
+
+/-- RFC 1035 §6.2 truncation discipline ("the truncation should start at
+    the end of the response and work forward in the datagram"): a truncated
+    reply keeps the client's ID and question, sets TC=1, ALWAYS drops the
+    additional section, and drops a section only after every later one —
+    in particular the answer section is never dropped while authority data
+    remains (§6.2: "if there is any data for the authority section, the
+    answer section is guaranteed to be unique"). -/
+theorem truncateUdp_truncated (encoded : ByteArray) (msg : Format)
+    (h : ¬ encoded.size ≤ 512) :
+    ∃ m : Format,
+      truncateUdp encoded msg = (VeriDNS.Impl.Message.encode m, true) ∧
+      m.header.tc = 1 ∧
+      m.header.id = msg.header.id ∧
+      m.question = msg.question ∧
+      m.additional = #[] ∧
+      ((m.answer = msg.answer ∧ m.authority = msg.authority) ∨
+       (m.answer = msg.answer ∧ m.authority = #[]) ∨
+       (m.answer = #[] ∧ m.authority = #[])) := by
+  unfold truncateUdp
+  rw [if_neg h]
+  dsimp only []
+  split <;> rename_i h1
+  · exact ⟨_, rfl, rfl, rfl, rfl, rfl, Or.inl ⟨rfl, rfl⟩⟩
+  · split <;> rename_i h2
+    · exact ⟨_, rfl, rfl, rfl, rfl, rfl, Or.inr (Or.inl ⟨rfl, rfl⟩)⟩
+    · exact ⟨_, rfl, rfl, rfl, rfl, rfl, Or.inr (Or.inr ⟨rfl, rfl⟩)⟩
+
+/-- The truncation loop terminates within the limit: the result is within
+    512 bytes UNLESS it is the final header+question form (whose size is
+    fixed by the client's own ≤512-byte query, not by the response). -/
+theorem truncateUdp_size (encoded : ByteArray) (msg : Format) :
+    (truncateUdp encoded msg).1.size ≤ 512 ∨
+    (truncateUdp encoded msg).1 = VeriDNS.Impl.Message.encode
+      { msg with
+        header := { msg.header with tc := 1, arcount := 0, nscount := 0, ancount := 0 }
+        answer := #[], authority := #[], additional := #[] } := by
+  unfold truncateUdp
+  split <;> rename_i h1
+  · exact Or.inl h1
+  · dsimp only []
+    split <;> rename_i h2
+    · exact Or.inl h2
+    · split <;> rename_i h3
+      · exact Or.inl h3
+      · exact Or.inr rfl
+
 -- ============================================================
 -- Flag hygiene: the server satisfies the NLP-generated complement
 -- semantics for AA and RA (Spec/Header.lean §4.1.1)
