@@ -59,6 +59,7 @@ VeriDNS/
     MessageValid.lean   -- Decode-side validity: decode's output satisfies every decode_encode hypothesis; end-to-end decode_encode_of_decode (complete)
     Resolver.lean       -- RFC conformance proofs: SBELT fallback, ID match, dispatch, loop trace soundness (StepSpecStar), pause inversion, needsIO, step relation soundness, response coverage (all complete)
     Server.lean         -- buildResponse/truncateUdp properties, RFC 5452 datagram gate (complete)
+    NameTreeComplete.lean -- Completeness: resolveWithIO_complete — untruncated answers deliver treeResolve's verdict whole (RRset indivisibility end-to-end; complete)
   Main.lean       -- Executable entry point (UDP server on port 5300)
 ```
 
@@ -1138,14 +1139,29 @@ the det-adj-verb sequence retags as a noun ("a negative ANSWER"), and
 `stripPlural` only strips "-es" after sibilant stems ("names" → "name",
 "addresses" → "address").
 
-### Cache Bounds (FIFO eviction)
+### Cache Bounds (expiry-class eviction at IO-round boundaries)
 
-Both cache sections are bounded by `DnsCache.capacity` (4096): `store` and
-`storeNegative` run `boundFifo`, which drops oldest-inserted entries to make
-room before pushing (arrays append on store, so index 0 is oldest).
-`store_bounded`/`storeNegative_bounded` (Proof/Cache.lean) prove the bound
-holds after every store, unconditionally; `mem_of_mem_boundFifo` keeps the
-§7.4 `store_replaces` proof intact through the eviction.
+Both cache sections are bounded by `DnsCache.capacity` (4096), but the two
+sections evict differently — a change forced by the COMPLETENESS proof
+(see "Completeness" below):
+
+- **Negative section**: `storeNegative` runs `boundFifo` per store
+  (oldest-inserted entries dropped to make room; each negative entry is
+  its own unit, so per-entry eviction is safe).
+  `storeNegative_bounded` (Proof/Cache.lean) proves the bound.
+- **Positive section**: `store` no longer evicts AT ALL — a per-record
+  eviction in the middle of caching an RRset batch could strand the
+  members already stored, splitting the set and breaking RRset wholeness
+  (`LookupComplete`). Instead `DnsCache.boundExpiryClasses` evicts WHOLE
+  expiry classes (oldest-inserted entry's class first) until the section
+  fits, and is called at IO-round boundaries only: `ioResumeLoop` bounds
+  the cache after every resume round, `serveOne` after its final store.
+  Batch members share one expiry (one store time + RFC 2181 §5.2 uniform
+  TTLs), so class-granular eviction never splits a set —
+  `evictClasses_filter_form` states every eviction pass is a filter on
+  the entry's expiry alone. `boundExpiryClasses_bounded` (Proof/Cache.lean)
+  proves the bound; within a round the section may transiently exceed it
+  by at most one response's record count.
 
 ### Total Query Deadline
 
@@ -1610,10 +1626,88 @@ present-node/absent-type (`treeNodata`) — the last two checked natively
 via build-failing `#eval` throws (their kernel reduction under `#guard`
 exceeds the default 1 GB stack; the positive-path guards reduce fine).
 
-Remaining (future work): the completeness direction of
-`AnswersFromTree` (a positive verdict's full RRset is delivered), which
-needs the answer-completeness clause of the oracle threaded through
-`finalizeAnswer`.
+## Completeness: the resolver delivers the verdict, whole (June 2026)
+
+`Proof/NameTreeComplete.lean` proves the completeness direction of
+`AnswersFromTree`, end to end: under the strengthened oracle and a sane
+tree, every UNTRUNCATED response a `resolveWithIO` run completes carries
+`treeResolve`'s verdict on the client's question at EVERY fuel — NXDOMAIN
+exactly for missing nodes, NODATA with no record of the queried type in
+the answer, and positive answers containing the chased node's WHOLE
+RRset (RFC 2181 §5.2 indivisibility) — and the returned cache keeps
+every answerable RRset whole and every negative entry deserved.
+Headline: `resolveWithIO_complete`, composed from `resolve_complete` /
+`resume_complete` (pure loop) through `ioResumeLoop_complete`
+(`SatisfiesM` cascade mirroring the soundness proof). Axiom profile:
+identical to soundness (`propext`, `Classical.choice`, `Quot.sound`,
+the wire-format `bv_decide` certificates).
+
+### Standing assumptions (beyond the soundness oracle)
+
+- **`TreeSane`** — RFC-mandated tree shape: §3.6.2 CNAME exclusivity
+  (reused) and uniqueness (one CNAME rdata per node), records named by
+  their owner node (§3.1), one class per node.
+- **Completeness clauses of `ResponseConsistent`** (lying by omission is
+  now dishonest; all guarded on `tc = 0` except `redirectsOnPath` —
+  truncation is the protocol's own incompleteness signal and truncated
+  content is never cached or finally served under a `tc = 0` completion):
+  `answerWhole`/`authorityWhole`/`additionalWhole` (RFC 2181 §5.2 RRsets
+  served whole per section), `*TtlUniform` (§5.2 equal TTLs per RRset),
+  `rcodeFaithful` (answer-bearing responses are NOERROR/NXDOMAIN),
+  `answerShape` (a NOERROR answer either answers or redirects),
+  `answersFaithful` (a response claiming to answer really resolves, with
+  the full final RRset), `redirectsOnPath` (offered CNAMEs lie on the
+  question's chase path), `nodataDeserved` (RFC 2308 §2.2 NODATA means
+  the verdict IS `.nodata`). The soundness theorems use none of these;
+  spoofs and timeouts remain unconstrained.
+
+### Cache invariants
+
+- **`LookupComplete`**: every answerable entry's whole tree RRset is
+  cached alongside it, same batch (expiry), answerable credibility — so
+  step-1 cache hits serve RRsets whole. Preservation through the
+  credibility-checked section fold (`lookupComplete_cacheRRs`) rests on
+  a per-key dichotomy: blocking status is CONSTANT across one section's
+  fold (`blocked_storeStep`), so a key's records all store or all no-op;
+  batch members share one expiry (`TtlUniform` + the zero-TTL skip), so
+  `store`'s replacement filter keeps siblings and rdata-equal
+  replacement preserves the satisfier (`sat_foldl`); `final_keyAt` pins
+  every surviving same-key entry to the batch expiry.
+- **`NegativesFaithful`**: negative entries pin the tree verdict —
+  NXDOMAIN ⟹ node missing, NODATA ⟹ verdict `.nodata` (node present, no
+  data of the type, no CNAME); only those two rcodes are ever stored.
+  The pure loop never writes negatives, so this is carried; `serveOne`'s
+  negative store sites discharge it from `nodataDeserved`/
+  `nameErrorDeserved` (the entry-point hypotheses mirror `CacheAgrees`).
+
+### Implementation changes the proof forced
+
+1. **`store` no longer evicts; eviction is whole-expiry-class at IO-round
+   boundaries** (`boundExpiryClasses` — see Cache Bounds): per-record
+   FIFO could strand half an RRset.
+2. **Zero-TTL records are not cached** (`storeChecked`, RFC 1035 §3.2.1
+   "should not be cached") — this also keeps stored entries strictly
+   fresh at store time, which the blocking dichotomy needs.
+3. **The credibility blocker also matches same-expiry entries**
+   (`storeChecked`'s `e.expiry == expiry` disjunct): a least-trustworthy
+   store may not overwrite better-credibility data of the same vintage —
+   without it a floor-credibility re-store could replace an answerable
+   batch member and split its RRset.
+
+### Chase simulation
+
+`Reaches T qtype q s` (defined with the oracle in Proof/NameTree.lean) is
+CI-tolerant reachability along `treeLookup` redirects. The resolver's
+SNAME is `Reaches`-invariant from the original QNAME: cached-CNAME chases
+walk real tree redirects (`localAnswer_complete`, via CNAME exclusivity +
+uniqueness), and upstream chases follow `redirectsOnPath`. Terminal
+verdicts at reachable names pin every defined `treeResolve` outcome from
+the origin (`reaches_terminal_pins`, via determinism/fuel-stability/
+chain-irrelevance of `treeResolve`), which discharges the `∀ fuel`
+quantifier in `AnswersFromTree` with no existential fuel in the statement.
+The accumulated CNAME chain is provably free of records of the queried
+type (`StateOK.chainFree`), so chain prepending never fabricates NODATA
+answers.
 
 ## UDP Server Architecture
 

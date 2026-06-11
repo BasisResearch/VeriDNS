@@ -83,6 +83,47 @@ def AnswerComplete (root : Node ResourceRecord) (resp : Format) : Prop :=
           RRParse.parseRaw (RR := ResourceRecord) b = some rr' ∧
           sameData rr' rr = true
 
+/-- Chase reachability: `s` lies on the tree's CNAME chase path from `q`
+    (up to case, RFC 1035 §3.1). The completeness invariant tracks the
+    resolver's SNAME through this relation; `treeResolve` follows exactly
+    these edges. -/
+inductive Reaches (T : Node ResourceRecord) (qtype : BitVec 16) :
+    ByteArray → ByteArray → Prop where
+  | refl {q s : ByteArray} :
+      VeriDNS.Impl.DomainName.nameEqCI q s = true → Reaches T qtype q s
+  | step {q s t : ByteArray} {rr : ResourceRecord} {c : ByteArray} :
+      Reaches T qtype q s →
+      treeLookup T s qtype = .redirect rr c →
+      VeriDNS.Impl.DomainName.nameEqCI c t = true →
+      Reaches T qtype q t
+
+/-- The section contains a parseable RR of the given type. -/
+def HasType (rrs : Array ByteArray) (t : BitVec 16) : Prop :=
+  ∃ b ∈ rrs.toList, ∃ rr,
+    RRParse.parseRaw (RR := ResourceRecord) b = some rr ∧ rr.type = t
+
+/-- RFC 2181 §5.2 RRset indivisibility as a section property: if the
+    section mentions an ⟨owner, type⟩ RRset at all, it carries the tree's
+    WHOLE set for that key (up to TTL). -/
+def SectionWhole (root : Node ResourceRecord) (rrs : Array ByteArray) : Prop :=
+  ∀ b ∈ rrs.toList, ∀ rr, RRParse.parseRaw (RR := ResourceRecord) b = some rr →
+    ∀ n, nodeAtName root rr.name = some n →
+      ∀ trr ∈ n.resourceSet.toList, trr.type = rr.type →
+        ∃ b' ∈ rrs.toList, ∃ rr',
+          RRParse.parseRaw (RR := ResourceRecord) b' = some rr' ∧
+          sameData rr' trr = true
+
+/-- RFC 2181 §5.2: "the TTLs of all RRs in an RRSet must be the same" —
+    same-key records of one section carry equal TTLs, so a stored batch
+    shares one absolute expiry (the granularity of cache eviction). -/
+def TtlUniform (rrs : Array ByteArray) : Prop :=
+  ∀ b₁ ∈ rrs.toList, ∀ b₂ ∈ rrs.toList, ∀ r₁ r₂,
+    RRParse.parseRaw (RR := ResourceRecord) b₁ = some r₁ →
+    RRParse.parseRaw (RR := ResourceRecord) b₂ = some r₂ →
+    VeriDNS.Impl.DomainName.nameEqCI r₁.name r₂.name = true →
+    r₁.type = r₂.type → r₁.class = r₂.class →
+    r₁.ttl = r₂.ttl
+
 /-- The honesty oracle for ONE accepted response. Everything the resolver
     will consume from the response — answers, authority (delegations,
     negative SOAs), additional (glue) — is tree data at its owner node; a
@@ -91,7 +132,14 @@ def AnswerComplete (root : Node ResourceRecord) (resp : Format) : Prop :=
     constrained anywhere: RFC 5452 matching plus connected per-exchange
     sockets and unpredictable IDs keep them from ever reaching the
     resolver, so the oracle's domain is exactly the traffic those
-    mechanisms admit. -/
+    mechanisms admit.
+
+    The fields from `answerWhole` on are the COMPLETENESS half of
+    honesty (lying by omission): RRsets are served whole with uniform
+    TTLs (RFC 2181 §5.2), an answer-bearing response really answers its
+    question through the tree's chase (§4.3.2 followed through §3.6.2),
+    offered CNAMEs lie on the question's chase path, and NODATA is
+    deserved (RFC 2308 §2.2). The soundness theorems use none of these. -/
 structure ResponseConsistent (root : Node ResourceRecord) (resp : Format) : Prop where
   answer : SectionAgrees root resp.answer
   authority : SectionAgrees root resp.authority
@@ -99,6 +147,54 @@ structure ResponseConsistent (root : Node ResourceRecord) (resp : Format) : Prop
   nameErrorDeserved : resp.header.rcode = Rcode.nameError →
     ∀ qu ∈ resp.question.toList, nodeAtName root qu.qname = none
   complete : AnswerComplete root resp
+  answerWhole : resp.header.tc = 0 → SectionWhole root resp.answer
+  authorityWhole : resp.header.tc = 0 → SectionWhole root resp.authority
+  additionalWhole : resp.header.tc = 0 → SectionWhole root resp.additional
+  answerTtlUniform : resp.header.tc = 0 → TtlUniform resp.answer
+  authorityTtlUniform : resp.header.tc = 0 → TtlUniform resp.authority
+  additionalTtlUniform : resp.header.tc = 0 → TtlUniform resp.additional
+  /-- Honest servers do not attach answer data to REFUSED/SERVFAIL/...
+      responses. -/
+  rcodeFaithful : resp.answer.size > 0 →
+    resp.header.rcode = Rcode.noError ∨ resp.header.rcode = Rcode.nameError
+  /-- An untruncated NOERROR response with answer content either answers
+      the question or redirects it — never neither. -/
+  answerShape : ∀ qu ∈ resp.question.toList, resp.header.tc = 0 →
+    resp.header.rcode = Rcode.noError → resp.answer.size > 0 →
+    HasType resp.answer qu.qtype ∨ HasType resp.answer cnameType
+  /-- An untruncated response claiming to answer (a record of the queried
+      type present) really resolves: the tree chase from the question name
+      terminates in an answer, and the response carries that whole final
+      RRset. (A truncated response is exempt — truncation IS the protocol's
+      incompleteness signal, and the resolver never caches or finally
+      serves such content under a `tc = 0` completion.) -/
+  answersFaithful : ∀ qu ∈ resp.question.toList, resp.header.tc = 0 →
+    resp.header.rcode = Rcode.noError →
+    HasType resp.answer qu.qtype →
+    ∃ k chain rrsT,
+      treeResolve root qu.qtype k qu.qname #[] = some (chain, .answer rrsT) ∧
+      ∀ trr ∈ rrsT.toList, ∃ b ∈ resp.answer.toList, ∃ rr',
+        RRParse.parseRaw (RR := ResourceRecord) b = some rr' ∧
+        sameData rr' trr = true
+  /-- A non-answering response's CNAMEs all lie ON the question's chase
+      path — a server may serve any prefix of the chain, never an
+      off-path alias (this holds even for truncated responses: the chase
+      follows them). With `nameErrorDeserved` this also excludes
+      RFC 2308-style NXDOMAIN+chain responses: this oracle's servers
+      report a name error only at the queried node itself. -/
+  redirectsOnPath : ∀ qu ∈ resp.question.toList,
+    ¬ HasType resp.answer qu.qtype →
+    ∀ b ∈ resp.answer.toList, ∀ rr,
+      RRParse.parseRaw (RR := ResourceRecord) b = some rr →
+      rr.type = cnameType →
+      Reaches root qu.qtype qu.qname rr.rdata
+  /-- An empty untruncated NOERROR non-referral (no NS authority) is a
+      deserved NODATA: the queried node exists and holds no record of the
+      queried type, and no CNAME (RFC 2308 §2.2). -/
+  nodataDeserved : ∀ qu ∈ resp.question.toList, resp.header.tc = 0 →
+    resp.header.rcode = Rcode.noError → resp.answer.isEmpty = true →
+    ¬ HasType resp.authority (2 : BitVec 16) →
+    treeLookup root qu.qname qu.qtype = .nodata
 
 /-- The semantic verdict carried by a client-visible response, relative to
     the chased denotation. Soundness: every answer-section RR is tree data
@@ -916,7 +1012,7 @@ theorem cacheAgrees_store {T : Node ResourceRecord} {c : DnsCache}
   intro e he
   simp only [DnsCache.store] at he
   rcases Array.mem_push.mp he with hmem | heq
-  · exact h.positives e (Array.mem_filter.mp (mem_of_mem_boundFifo hmem)).1
+  · exact h.positives e (Array.mem_filter.mp hmem).1
   · subst heq
     exact ⟨hrr, hwf⟩
 
@@ -930,7 +1026,9 @@ theorem cacheAgrees_storeChecked {T : Node ResourceRecord} {c : DnsCache}
   simp only [DnsCache.storeChecked]
   split
   · exact h
-  · exact cacheAgrees_store h hrr hwf now cred
+  · split
+    · exact h
+    · exact cacheAgrees_store h hrr hwf now cred
 
 /-- A missing node trivially has no record of any type. -/
 theorem noRecordOfType_of_absent {T : Node ResourceRecord} {name : ByteArray}
@@ -970,6 +1068,14 @@ theorem cacheAgrees_sweep {T : Node ResourceRecord} {c : DnsCache}
   · exact h.positives e (Array.mem_filter.mp he).1
   · exact h.nxdomainDeserved e (Array.mem_filter.mp he).1
   · exact h.negativesDeserved e (Array.mem_filter.mp he).1
+
+/-- The round-boundary capacity bound preserves agreement (it only
+    removes entries; negatives are untouched). -/
+theorem cacheAgrees_bound {T : Node ResourceRecord} {c : DnsCache}
+    (h : CacheAgrees T c) : CacheAgrees T c.boundExpiryClasses := by
+  refine ⟨?_, h.nxdomainDeserved, h.negativesDeserved⟩
+  intro e he
+  exact h.positives e (mem_of_mem_evictClasses he)
 
 /-- Everything `lookup` returns is tree data. With `CacheAgrees` as the
     standing invariant, the resolver can only ever serve the tree's
@@ -1779,7 +1885,8 @@ theorem ioResumeLoop_sound (T : Node ResourceRecord)
                             entry.name } })
                     (by split <;> exact ⟨hs.cache, hs.chain⟩) hcons 64
                   rw [hpause] at hres
-                  exact ioResumeLoop_sound T hnet sbelt depth fuel' state' deadline hres
+                  exact ioResumeLoop_sound T hnet sbelt depth fuel' _ deadline
+                    ⟨cacheAgrees_bound hres.cache, hres.chain⟩
                 · -- resume error
                   refine SatisfiesM.bind (satisfiesM_true _) ?_
                   intro _ _

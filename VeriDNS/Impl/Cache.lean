@@ -66,7 +66,7 @@ private def boundFifo {α : Type} (a : Array α) : Array α :=
   if a.size ≥ DnsCache.capacity then a.extract (a.size + 1 - DnsCache.capacity) a.size
   else a
 
-/-- Store an RR with absolute expiry = now + ttl; evicts FIFO at capacity.
+/-- Store an RR with absolute expiry = now + ttl.
 
     RFC 1035 §7.4 all-or-none applies at RRset granularity: a multi-record
     set (e.g. 4 A records) arrives as one batch sharing `expiry`
@@ -74,7 +74,12 @@ private def boundFifo {α : Type} (a : Array α) : Array α :=
     replaces same-key entries from OTHER batches (different expiry — a
     stale set is never merged with the new one) and any identical
     re-stored record, but keeps same-batch siblings, so the whole set
-    survives. -/
+    survives.
+
+    `store` itself never evicts: a capacity eviction in the middle of a
+    batch could orphan the members already stored, breaking RRset
+    wholeness (`LookupComplete`, Proof/NameTreeComplete.lean). The bound
+    is enforced between IO rounds by `boundExpiryClasses`. -/
 def DnsCache.store (c : DnsCache) (rr : ResourceRecord) (now : UInt32)
     (cred : Trustworthiness := .additionalAuthoritative) : DnsCache :=
   let expiry := now + rr.ttl.toNat.toUInt32
@@ -82,7 +87,7 @@ def DnsCache.store (c : DnsCache) (rr : ResourceRecord) (now : UInt32)
   let records := c.records.filter fun e =>
     !(nameEqCI e.rr.name rr.name && e.rr.type == rr.type && e.rr.class == rr.class
       && (e.expiry != expiry || e.rr.rdata == rr.rdata))
-  { c with records := (boundFifo records).push entry }
+  { c with records := records.push entry }
 
 /-- Credibility-checked store (RFC 2181 §5.4.1): a same-key entry of
     STRICTLY BETTER credibility (lower rank) that is still fresh is retained
@@ -95,10 +100,23 @@ def DnsCache.store (c : DnsCache) (rr : ResourceRecord) (now : UInt32)
     legitimately authoritative data. -/
 def DnsCache.storeChecked (c : DnsCache) (rr : ResourceRecord)
     (cred : Trustworthiness) (now : UInt32) : DnsCache :=
-  let betterExists := c.records.any fun e =>
-    nameEqCI e.rr.name rr.name && e.rr.type == rr.type && e.rr.class == rr.class
-      && e.expiry > now && e.credibility.toCode < cred.toCode
-  if betterExists then c else DnsCache.store c rr now cred
+  -- RFC 1035 §3.2.1: a zero TTL means the RR "can only be used for the
+  -- transaction in progress, and should not be cached". (This also keeps
+  -- every stored entry strictly fresh at store time, which the RRset
+  -- wholeness invariant relies on.)
+  if rr.ttl == 0 then c
+  else
+    -- A same-key entry of strictly better credibility blocks the store
+    -- when it is fresh OR of the incoming batch's own expiry (the second
+    -- disjunct refuses to overwrite better-credibility data of the same
+    -- vintage; without it a least-trustworthy store could replace an
+    -- answerable batch member and split its RRset).
+    let expiry := now + rr.ttl.toNat.toUInt32
+    let betterExists := c.records.any fun e =>
+      nameEqCI e.rr.name rr.name && e.rr.type == rr.type && e.rr.class == rr.class
+        && (e.expiry > now || e.expiry == expiry)
+        && e.credibility.toCode < cred.toCode
+    if betterExists then c else DnsCache.store c rr now cred
 
 /-- RFC 2308: store a negative answer, replacing existing same-key entries;
     evicts FIFO at capacity. An NXDOMAIN store replaces ALL entries for
@@ -220,6 +238,98 @@ def DnsCache.lookupNegativeSoa (c : DnsCache) (name : ByteArray) (qtype qclass :
 def DnsCache.sweep (c : DnsCache) (now : UInt32) : DnsCache :=
   { records := c.records.filter fun e => e.fresh now
     negatives := c.negatives.filter fun e => e.expiry > now }
+
+/-- Evict whole expiry classes — oldest-inserted entry's class first —
+    until the positive section is within capacity. An RRset batch shares
+    one expiry (one store time + RFC 2181 §5.2 uniform TTLs), so
+    class-granular eviction never splits a cached set; per-entry FIFO
+    could strand half an RRset, breaking the wholeness invariant
+    (`LookupComplete`, Proof/NameTreeComplete.lean). Runs at IO-round
+    boundaries (`ioResumeLoop`, `serveOne`), never mid-batch. -/
+def evictClasses (a : Array CacheEntry) : Nat → Array CacheEntry
+  | 0 => a
+  | fuel + 1 =>
+    if a.size ≤ DnsCache.capacity then a
+    else
+      match a[0]? with
+      | some e0 => evictClasses (a.filter fun e => e.expiry != e0.expiry) fuel
+      | none => a
+
+def DnsCache.boundExpiryClasses (c : DnsCache) : DnsCache :=
+  { c with records := evictClasses c.records c.records.size }
+
+/-- Every eviction pass is a filter by a predicate on the entry's EXPIRY
+    alone — the formal core of "no RRset is ever split": same-expiry
+    entries are kept or dropped together. -/
+theorem evictClasses_filter_form (a : Array CacheEntry) (fuel : Nat) :
+    ∃ p : UInt32 → Bool, evictClasses a fuel = a.filter (fun e => p e.expiry) := by
+  induction fuel generalizing a with
+  | zero =>
+    exact ⟨fun _ => true, by
+      unfold evictClasses
+      exact (Array.filter_eq_self.mpr (fun _ _ => rfl)).symm⟩
+  | succ fuel ih =>
+    unfold evictClasses
+    split
+    · exact ⟨fun _ => true,
+        (Array.filter_eq_self.mpr (fun _ _ => rfl)).symm⟩
+    · split
+      · next e0 _ =>
+        obtain ⟨p, hp⟩ := ih (a.filter fun e => e.expiry != e0.expiry)
+        refine ⟨fun x => p x && (x != e0.expiry), ?_⟩
+        rw [hp, Array.filter_filter]
+      · exact ⟨fun _ => true,
+          (Array.filter_eq_self.mpr (fun _ _ => rfl)).symm⟩
+
+theorem mem_of_mem_evictClasses {a : Array CacheEntry} {fuel : Nat}
+    {e : CacheEntry} (h : e ∈ evictClasses a fuel) : e ∈ a := by
+  obtain ⟨p, hp⟩ := evictClasses_filter_form a fuel
+  rw [hp] at h
+  exact (Array.mem_filter.mp h).1
+
+/-- Eviction reaches the capacity bound: each pass drops at least the
+    oldest entry, so `a.size` passes suffice. -/
+theorem size_evictClasses_le (a : Array CacheEntry) (fuel : Nat)
+    (hfuel : a.size ≤ fuel) :
+    (evictClasses a fuel).size ≤ DnsCache.capacity := by
+  induction fuel generalizing a with
+  | zero =>
+    unfold evictClasses
+    unfold DnsCache.capacity
+    omega
+  | succ fuel ih =>
+    unfold evictClasses
+    split
+    · assumption
+    · next hbig =>
+      split
+      · next e0 he0 =>
+        refine ih _ ?_
+        have he0mem : a[0]? = some e0 := he0
+        have hsz : 0 < a.size := by
+          by_contra hz
+          rw [Array.getElem?_eq_none (by omega)] at he0mem
+          cases he0mem
+        have hkeep : (a.filter fun e => e.expiry != e0.expiry).size < a.size := by
+          have hmem : e0 ∈ a := by
+            have := Array.getElem?_eq_some_iff.mp he0mem
+            obtain ⟨h0, heq⟩ := this
+            exact heq ▸ a.getElem_mem h0
+          by_contra hge
+          have hle : (a.filter fun e => e.expiry != e0.expiry).size ≤ a.size :=
+            Array.size_filter_le
+          have heq : (a.filter fun e => e.expiry != e0.expiry).size = a.size := by
+            omega
+          have := (Array.filter_size_eq_size.mp heq) e0 hmem
+          simp at this
+        omega
+      · next he0 =>
+        have hempty : a.size ≤ 0 := by
+          by_contra hpos
+          rw [Array.getElem?_eq_none_iff] at he0
+          omega
+        unfold DnsCache.capacity
+        omega
 
 theorem mem_of_mem_boundFifo {α : Type} {a : Array α} {x : α}
     (h : x ∈ boundFifo a) : x ∈ a := by

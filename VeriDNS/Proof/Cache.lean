@@ -145,7 +145,7 @@ theorem store_replaces (c : DnsCache) (rr : ResourceRecord) (now : UInt32) :
   unfold DnsCache.store at he
   rcases Array.mem_push.mp he with hold | hnew
   · right
-    have hkeep := (Array.mem_filter.mp (mem_of_mem_boundFifo hold)).2
+    have hkeep := (Array.mem_filter.mp hold).2
     rw [hkey] at hkeep
     by_contra hne
     have : (e.expiry != now + rr.ttl.toNat.toUInt32) = true := by
@@ -171,16 +171,20 @@ theorem store_never_combined (c : DnsCache) (rr : ResourceRecord) (now : UInt32)
   Or.inl fun e h => store_replaces c rr now e h.1 h.2
 
 -- ============================================================
--- Cache bounds: stores never exceed capacity (FIFO eviction)
+-- Cache bounds: expiry-class eviction at IO-round boundaries
 -- ============================================================
 
-/-- The positive section never exceeds `capacity`, regardless of the prior
-    cache state: a full cache evicts its oldest entry before inserting. -/
-theorem store_bounded (c : DnsCache) (rr : ResourceRecord) (now : UInt32) :
-    (DnsCache.store c rr now).records.size ≤ DnsCache.capacity := by
-  unfold DnsCache.store
-  rw [Array.size_push]
-  exact Nat.succ_le_of_lt (size_boundFifo_lt _)
+/-- The positive section is within `capacity` after the round-boundary
+    bound: `boundExpiryClasses` evicts whole expiry classes (oldest
+    inserted first) until the section fits. `store` itself no longer
+    evicts — a mid-batch eviction could strand part of an RRset, breaking
+    the wholeness invariant (`LookupComplete`,
+    Proof/NameTreeComplete.lean); `ioResumeLoop` and `serveOne` apply the
+    bound between IO rounds instead. -/
+theorem boundExpiryClasses_bounded (c : DnsCache) :
+    (c.boundExpiryClasses).records.size ≤ DnsCache.capacity := by
+  unfold DnsCache.boundExpiryClasses
+  exact size_evictClasses_le _ _ (Nat.le_refl _)
 
 /-- The negative section never exceeds `capacity`. -/
 theorem storeNegative_bounded (c : DnsCache) (name : ByteArray)
@@ -439,15 +443,18 @@ theorem storeChecked_no_downgrade
     e ∈ (DnsCache.storeChecked c rr cred now).records := by
   have hbetter : e.credibility.toCode < cred.toCode := Nat.lt_of_not_le hbetter
   unfold DnsCache.storeChecked
+  split
+  · -- RFC 1035 §3.2.1 zero-TTL skip: the cache is untouched
+    exact he
   rw [if_pos]
   · exact he
   · apply Array.any_eq_true.mpr
     obtain ⟨i, hi, hg⟩ := Array.getElem_of_mem he
     refine ⟨i, hi, ?_⟩
     rw [hg]
-    simp only [Bool.and_eq_true, decide_eq_true_eq]
+    simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq]
     rw [Bool.and_eq_true, Bool.and_eq_true] at hkey
-    exact ⟨⟨⟨⟨hkey.1.1, hkey.1.2⟩, hkey.2⟩, hfresh⟩, hbetter⟩
+    exact ⟨⟨⟨⟨hkey.1.1, hkey.1.2⟩, hkey.2⟩, Or.inl hfresh⟩, hbetter⟩
 
 -- ============================================================
 -- RFC 1035 §3.1: end-to-end case-insensitivity of the cache

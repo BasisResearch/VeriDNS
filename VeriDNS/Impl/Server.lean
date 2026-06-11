@@ -478,7 +478,14 @@ def ioResumeLoop (sbelt : DnsSList)
               Resolver.resume state resp 64
             match resumed with
             | .ok (.done finalResp) => pure (.ok finalResp, state.resources.cache)
-            | .ok (.paused state') => ioResumeLoop sbelt state' deadline depth fuel'
+            | .ok (.paused state') =>
+              -- Capacity bound at the IO-round boundary: whole expiry
+              -- classes are evicted, never part of an RRset batch (a
+              -- mid-batch eviction inside `store` could strand the part
+              -- of a set already stored — see `LookupComplete`).
+              let state'' := { state' with resources := { state'.resources with
+                  cache := state'.resources.cache.boundExpiryClasses } }
+              ioResumeLoop sbelt state'' deadline depth fuel'
             | .error msg => do
               UdpSocket.log (M := M) (Sock := Sock) (Addr := ByteArray)
                 s!"resume error for {nameToString state.resources.sname}: {msg}"
@@ -584,7 +591,9 @@ def serveOne (clientSock : Sock) (sbelt : DnsSList)
     let encoded := Message.encode response
     let (truncated, _) := truncateUdp encoded response
     UdpSocket.sendTo clientSock truncated clientAddr
-    pure cache''
+    -- Capacity bound between queries (whole expiry classes, never part
+    -- of an RRset batch — `boundExpiryClasses_bounded`).
+    pure cache''.boundExpiryClasses
 
 /-- Queries between cache sweeps (§5.3.2 "discards them during periodic
     sweeps to reclaim the memory consumed by old RRs"). -/

@@ -48,4 +48,5 @@ import VeriDNS.Proof.Resolver
 import VeriDNS.Proof.Server
 import VeriDNS.Proof.Cache
 import VeriDNS.Proof.NameTree
+import VeriDNS.Proof.NameTreeComplete
 import VeriDNS.Test.Loop
