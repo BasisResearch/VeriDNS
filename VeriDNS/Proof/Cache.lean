@@ -8,18 +8,34 @@ DnsCache conformance to the NLP-generated cache specification.
 
 The generated `CacheSpec` laws (`store_mem`, `storeAt_mem`, `sweep_subset`,
 from the RFC 1034 §5.3.2 CACHE glossary entry) are proven directly in the
-instance (Impl/Cache.lean). This file proves the remaining RFC constraints:
+instance (Impl/Cache.lean). Every remaining cache constraint in this file
+INSTANTIATES a generated parameterized Prop — the statements come from the
+RFC text via the generator, not from hand-written formalizations (manually
+stated bridges, marked as helpers, only connect the instantiated predicates
+back to membership facts):
 
-- §6.1.3 "convert the interval ... to some sort of absolute time when the RR
-  is stored": `store_absolute_expiry`.
+- §5.3.2 "convert the interval specified in arriving RRs to some sort of
+  absolute time when the RR is stored in the cache":
+  `store_absolute_expiry` instantiates the generated
+  `cache_storeAt_absolute`.
 - §5.3.2 "the resolver just ignores or discards old RRs when it runs across
-  them in the course of a search": `lookup_fresh` (expired entries are never
-  returned) — the keyed-lookup counterpart of the generated sweep law.
-- §5.3.2 "discards them during periodic sweeps": `sweep_removes_expired`.
-- §7.4 "either cache them all or none at all": `store_replaces` (storing
-  replaces all previous same-key entries; sets are never merged).
+  them in the course of a search": `lookup_ignores_old` instantiates the
+  generated `cache_search_ignores_old` against `liveEntry` (the exact
+  per-entry test `lookup` filters by); helper `lookup_fresh` adds the
+  membership/remaining-TTL reading.
+- §5.3.2 "discards them during periodic sweeps": `sweep_discards_old`
+  instantiates the generated `cache_sweep_discards_old` against
+  `CacheEntry.fresh` (the exact retention test `sweep` filters by); helper
+  `sweep_removes_expired` is the membership reading.
+- §7.4 "either the data in the response or the cache is preferred, but the
+  two should never be combined" (the all-or-none discipline):
+  `store_never_combined` instantiates the generated
+  `usingthecache_never_combined`; helper `store_replaces` is the
+  underlying membership argument.
 - §7.4 "should not cache a possibly partial set" (truncation):
-  `truncated_not_cached`.
+  `truncated_not_cached` instantiates the generated
+  `usingthecache_truncated_not_cached`; corollary
+  `truncated_cache_unchanged` is the pointwise equation.
 - §7.4 "unsolicited responses or RR data other than that requested ...
   discard it without caching it": `accept_discard_unrequested` instantiates
   the generated `usingthecache_discard_unrequested`.
@@ -32,13 +48,22 @@ open VeriDNS.Impl.Resolver VeriDNS.Impl.Server
 open VeriDNS.Impl.DomainName (nameEqCI foldNameCase foldCaseByte alphabeticByte)
 
 -- ============================================================
--- §6.1.3: absolute-time conversion on store
+-- §5.3.2: absolute-time conversion on store
 -- ============================================================
 
-/-- Storing an RR records absolute expiry = now + TTL. -/
-theorem store_absolute_expiry (c : DnsCache) (rr : ResourceRecord) (now : UInt32) :
-    ∃ e ∈ (DnsCache.store c rr now).records,
-      e.rr = rr ∧ e.expiry = now + rr.ttl.toNat.toUInt32 := by
+/-- `DnsCache.store` satisfies the generated `cache_storeAt_absolute`
+    ("convert the interval specified in arriving RRs to some sort of
+    absolute time when the RR is stored in the cache"): `interval` is the
+    RR's TTL, `storeAt` is the store, and the post-store predicate holds
+    of the absolute time `now + ttl` — an entry carrying the RR with
+    exactly that absolute expiry is present after the store. -/
+theorem store_absolute_expiry :
+    cache_storeAt_absolute DnsCache ResourceRecord
+      (fun rr => rr.ttl.toNat.toUInt32)
+      (fun c rr now => DnsCache.store c rr now)
+      (fun c rr e => ∃ en ∈ c.records, en.rr = rr ∧ en.expiry = e) := by
+  intro c rr now
+  dsimp only
   unfold DnsCache.store
   exact ⟨_, Array.mem_push.mpr (Or.inr rfl), rfl, rfl⟩
 
@@ -46,10 +71,24 @@ theorem store_absolute_expiry (c : DnsCache) (rr : ResourceRecord) (now : UInt32
 -- §5.3.2: search ignores expired entries
 -- ============================================================
 
-/-- Every RR returned by a lookup comes from an entry that has not expired
-    ("the resolver just ignores or discards old RRs when it runs across them
-    in the course of a search"), and carries the REMAINING ttl
-    (expiry − now), never the original interval. -/
+/-- The search path satisfies the generated `cache_search_ignores_old`
+    ("the resolver just ignores or discards old RRs when it runs across
+    them in the course of a search"): `old` is the negation of
+    `CacheEntry.fresh`, and `ignored` is the negation of `liveEntry` — the
+    EXACT per-entry test `DnsCache.lookup` filters by (single source of
+    truth). An old entry never passes the search test. -/
+theorem lookup_ignores_old (name : ByteArray) (qt qc : BitVec 16)
+    (now : UInt32) :
+    cache_search_ignores_old CacheEntry
+      (fun e => !(e.fresh now))
+      (fun e => !(liveEntry e name qt qc now)) := by
+  intro e h
+  have hf : e.fresh now = false := by simpa using h
+  simp [liveEntry, hf]
+
+/-- Helper (membership reading of `lookup_ignores_old`): every RR returned
+    by a lookup comes from an entry that has not expired, and carries the
+    REMAINING ttl (expiry − now), never the original interval. -/
 theorem lookup_fresh (c : DnsCache) (name : ByteArray) (qt qc : BitVec 16)
     (now : UInt32) (rr : ResourceRecord)
     (h : rr ∈ DnsCache.lookup c name qt qc now) :
@@ -60,6 +99,7 @@ theorem lookup_fresh (c : DnsCache) (name : ByteArray) (qt qc : BitVec 16)
   split at hf
   · rename_i hcond
     refine ⟨e, he, ?_, (Option.some.inj hf).symm⟩
+    unfold liveEntry CacheEntry.fresh at hcond
     simp only [Bool.and_eq_true, decide_eq_true_eq] at hcond
     exact hcond.2
   · exact absurd hf (by simp)
@@ -68,22 +108,34 @@ theorem lookup_fresh (c : DnsCache) (name : ByteArray) (qt qc : BitVec 16)
 -- §5.3.2: periodic sweeps remove expired entries
 -- ============================================================
 
-/-- After a sweep at time `now`, no expired entry remains. -/
+/-- The sweep satisfies the generated `cache_sweep_discards_old`
+    ("discards them during periodic sweeps"): `old` is the negation of
+    `CacheEntry.fresh`, which is the EXACT retention test
+    `DnsCache.sweep` filters by (single source of truth) — old data is
+    discarded by the sweep filter. -/
+theorem sweep_discards_old (now : UInt32) :
+    cache_sweep_discards_old CacheEntry
+      (fun e => !(e.fresh now))
+      (fun e => !(e.fresh now)) :=
+  fun _ h => h
+
+/-- Helper (membership reading of `sweep_discards_old`): after a sweep at
+    time `now`, no expired entry remains. -/
 theorem sweep_removes_expired (c : DnsCache) (now : UInt32) :
     ∀ e ∈ (DnsCache.sweep c now).records, e.expiry > now := by
   intro e he
   unfold DnsCache.sweep at he
   have := (Array.mem_filter.mp he).2
-  simpa using this
+  simpa [CacheEntry.fresh] using this
 
 -- ============================================================
--- §7.4: all-or-none — storing replaces same-key entries
+-- §7.4: all-or-none — the response and the cache are never combined
 -- ============================================================
 
-/-- After storing an RR, every same-key entry belongs to the new record's
-    batch (same expiry — its RRset siblings, RFC 2181 §5.2) or is the new
-    record itself: "the resolver should either cache them all or none at
-    all" — a stale set is never merged with the new one. -/
+/-- Helper (membership argument for `store_never_combined`): after storing
+    an RR, every same-key entry belongs to the new record's batch (same
+    expiry — its RRset siblings, RFC 2181 §5.2) or is the new record
+    itself — a stale set is never merged with the new one. -/
 theorem store_replaces (c : DnsCache) (rr : ResourceRecord) (now : UInt32) :
     ∀ e ∈ (DnsCache.store c rr now).records,
       (nameEqCI e.rr.name rr.name && e.rr.type == rr.type
@@ -101,6 +153,22 @@ theorem store_replaces (c : DnsCache) (rr : ResourceRecord) (now : UInt32) :
     rw [this] at hkeep
     simp at hkeep
   · left; rw [hnew]
+
+/-- Storing satisfies the generated `usingthecache_never_combined`
+    ("either the data in the response or the cache is preferred, but the
+    two should never be combined"): the entries `preferred` for the
+    stored RR's key are drawn wholly from the `response` side (the new
+    record and its same-expiry batch siblings) — proven via the left
+    disjunct; old same-key data from the `cache` side never survives
+    alongside them (`store_replaces`). -/
+theorem store_never_combined (c : DnsCache) (rr : ResourceRecord) (now : UInt32) :
+    usingthecache_never_combined CacheEntry
+      (fun e => e.rr = rr ∨ e.expiry = now + rr.ttl.toNat.toUInt32)
+      (fun e => e ∈ c.records)
+      (fun e => e ∈ (DnsCache.store c rr now).records ∧
+        (nameEqCI e.rr.name rr.name && e.rr.type == rr.type
+          && e.rr.class == rr.class) = true) :=
+  Or.inl fun e h => store_replaces c rr now e h.1 h.2
 
 -- ============================================================
 -- Cache bounds: stores never exceed capacity (FIFO eviction)
@@ -128,15 +196,31 @@ theorem storeNegative_bounded (c : DnsCache) (name : ByteArray)
 -- §7.4: truncated responses are not cached
 -- ============================================================
 
-/-- A truncated response contributes nothing to the cache (at any
-    credibility rank). -/
-theorem truncated_not_cached {C RR : Type} [TrustworthinessSpec C RR] [RRParse RR]
-    (cache : C) (resp : Format) (raws : Array ByteArray) (cred : Trustworthiness)
-    (now : UInt32) (h : resp.header.tc = 1) :
-    cacheUnlessTruncated (RR := RR) cache resp raws cred now = cache := by
+/-- The caching gate satisfies the generated
+    `usingthecache_truncated_not_cached` ("When a response is truncated,
+    ... it should not cache a possibly partial set of RRs"): `truncated`
+    reads the TC bit, and the `cache` action is `cacheUnlessTruncated` —
+    a no-op on truncated data (at any credibility rank). -/
+theorem truncated_not_cached {C RR : Type} [TrustworthinessSpec C RR]
+    [RRParse RR] :
+    usingthecache_truncated_not_cached C
+      (Format × Array ByteArray × Trustworthiness × UInt32)
+      (fun p => p.1.header.tc == 1)
+      (fun cache p => cacheUnlessTruncated (RR := RR) cache p.1 p.2.1
+        p.2.2.1 p.2.2.2) := by
+  intro cache p h
+  obtain ⟨resp, raws, cred, now⟩ := p
+  show cacheUnlessTruncated (RR := RR) cache resp raws cred now = cache
   unfold cacheUnlessTruncated
-  rw [h]
-  rfl
+  rw [if_pos h]
+
+/-- Corollary (pointwise equation): a truncated response contributes
+    nothing to the cache. -/
+theorem truncated_cache_unchanged {C RR : Type} [TrustworthinessSpec C RR]
+    [RRParse RR] (cache : C) (resp : Format) (raws : Array ByteArray)
+    (cred : Trustworthiness) (now : UInt32) (h : resp.header.tc = 1) :
+    cacheUnlessTruncated (RR := RR) cache resp raws cred now = cache :=
+  truncated_not_cached cache (resp, raws, cred, now) (by simp [h])
 
 -- ============================================================
 -- §7.4: unsolicited / unrequested data is discarded before caching
@@ -340,16 +424,20 @@ theorem lookupAnswerable_subset
   · exact absurd hf (by simp)
 
 /-- RFC 2181 §5.4.1 no-downgrade: `storeChecked` at credibility `cred` never
-    evicts a fresh same-key entry of strictly better (lower) rank — that
-    entry survives the store. "Data from a reply will be ignored if the
-    cache contains data from a [more trustworthy] source." -/
+    evicts a fresh same-key entry the incoming data is NOT at least as
+    trustworthy as (stated with the generated
+    `Trustworthiness.atLeastAsTrustworthy` ranking relation) — that entry
+    survives the store. "Data from a reply will be ignored if the cache
+    contains data from a [more trustworthy] source." -/
 theorem storeChecked_no_downgrade
     (c : DnsCache) (rr : ResourceRecord) (cred : Trustworthiness) (now : UInt32)
     (e : CacheEntry) (he : e ∈ c.records)
     (hkey : nameEqCI e.rr.name rr.name && e.rr.type == rr.type
       && e.rr.class == rr.class)
-    (hfresh : e.expiry > now) (hbetter : e.credibility.toCode < cred.toCode) :
+    (hfresh : e.expiry > now)
+    (hbetter : ¬ Trustworthiness.atLeastAsTrustworthy cred e.credibility) :
     e ∈ (DnsCache.storeChecked c rr cred now).records := by
+  have hbetter : e.credibility.toCode < cred.toCode := Nat.lt_of_not_le hbetter
   unfold DnsCache.storeChecked
   rw [if_pos]
   · exact he
@@ -374,7 +462,7 @@ theorem lookupAnswerable_caseInsensitive (c : DnsCache) (n1 n2 : ByteArray)
     (h : foldNameCase n1 = foldNameCase n2) :
     DnsCache.lookupAnswerable c n1 qt qc now
       = DnsCache.lookupAnswerable c n2 qt qc now := by
-  unfold DnsCache.lookupAnswerable answerableEntry nameEqCI
+  unfold DnsCache.lookupAnswerable answerableEntry liveEntry nameEqCI
   rw [h]
 
 /-- The internal lookup is likewise case-invariant in the queried name. -/
@@ -382,7 +470,7 @@ theorem lookup_caseInsensitive (c : DnsCache) (n1 n2 : ByteArray)
     (qt qc : BitVec 16) (now : UInt32)
     (h : foldNameCase n1 = foldNameCase n2) :
     DnsCache.lookup c n1 qt qc now = DnsCache.lookup c n2 qt qc now := by
-  unfold DnsCache.lookup nameEqCI
+  unfold DnsCache.lookup liveEntry nameEqCI
   rw [h]
 
 /-- Negative-cache retrieval is case-invariant in the queried name

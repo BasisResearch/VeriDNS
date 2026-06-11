@@ -1,4 +1,5 @@
 import VeriDNS.Impl.Server
+import VeriDNS.Impl.NameTree
 
 /-!
 # Compile-time verification of the IO shim
@@ -254,5 +255,141 @@ def refusedIterative : Bool := Id.run do
   return resp.header.rcode == Rcode.refused && st.exchanged.isEmpty
 
 #guard refusedIterative
+
+-- ## 6. The semantic model, executable: a network derived from the
+-- RFC 1034 §3.1 name tree answers per `treeLookup`, and the served
+-- responses carry exactly the tree's verdicts — the data at the node the
+-- query names, NXDOMAIN for missing nodes, the CNAME chase along tree
+-- edges. This is the `ResponseConsistent` oracle instantiated by
+-- construction (the handler cannot say anything the tree does not hold).
+
+section TreeNetwork
+
+open VeriDNS.Impl.NameTree
+
+/-- Raw label bytes (no length prefix — node labels, not wire names). -/
+def lab (s : String) : ByteArray := s.toUTF8
+
+def wwwExampleCom : ByteArray := wireName ["www", "example", "com"]
+def missingName : ByteArray := wireName ["missing", "example", "com"]
+
+def aRR : ResourceRecord :=
+  { name := exampleCom, type := 1, «class» := 1, ttl := 300,
+    rdlength := 4, rdata := aRdata }
+
+def cnameRR : ResourceRecord :=
+  { name := wwwExampleCom, type := 5, «class» := 1, ttl := 300,
+    rdlength := BitVec.ofNat 16 exampleCom.size, rdata := exampleCom }
+
+/-- The global tree:
+    `.` → `com` → `example` (A 93.184.216.34) → `www` (CNAME example.com) -/
+def theTree : Node ResourceRecord :=
+  .mk ByteArray.empty #[] #[
+    .mk (lab "com") #[] #[
+      .mk (lab "example") #[aRR] #[
+        .mk (lab "www") #[cnameRR] #[]]]]
+
+/-- A server that IS the tree: every query is answered with
+    `treeLookup`'s verdict. An NXDOMAIN carries the RFC 2308 SOA so the
+    resolver can negatively cache it. -/
+def treeHandler (q : ByteArray) : Option ByteArray :=
+  match Message.decode q with
+  | .error _ => none
+  | .ok query =>
+    match query.question[0]? with
+    | none => none
+    | some qu =>
+      match treeLookup theTree qu.qname qu.qtype with
+      | .answer rrs =>
+        let h := { query.header with
+                     qr := 1
+                     aa := 1
+                     ancount := BitVec.ofNat 16 rrs.size }
+        some <| Message.encode
+          { query with header := h, answer := rrs.map RRParse.rrBytes }
+      | .redirect rr _ =>
+        let h := { query.header with qr := 1, aa := 1, ancount := 1 }
+        some <| Message.encode
+          { query with header := h, answer := #[RRParse.rrBytes rr] }
+      | .nodata =>
+        let h := { query.header with qr := 1, aa := 1, nscount := 1 }
+        some <| Message.encode
+          { query with header := h
+                       authority := #[mkRR comName 6 soaRdata (ttl := 60)] }
+      | .nameError =>
+        let h := { query.header with
+                     qr := 1
+                     aa := 1
+                     rcode := Rcode.nameError
+                     nscount := 1 }
+        some <| Message.encode
+          { query with header := h
+                       authority := #[mkRR comName 6 soaRdata (ttl := 60)] }
+
+/-- The A record served for example.com is the tree's record at that
+    node, byte for byte. -/
+def treeAnswered : Bool := Id.run do
+  let (_, st) := runServe (mkQuery exampleCom) [treeHandler]
+  let some resp := sentResponse st | return false
+  let some bytes := resp.answer[0]? | return false
+  return resp.header.rcode == Rcode.noError && resp.answer.size == 1 &&
+    bytes == RRParse.rrBytes aRR && resp.header.id == 0x1234
+
+#guard treeAnswered
+
+/-- A name whose node is missing from the tree gets NXDOMAIN — and the
+    cached negative answers a re-query with no upstream exchange
+    (`treeLookup theTree missingName = .nameError` is the §3.1 meaning of
+    "the node does not exist"). -/
+def treeMissing : Bool := Id.run do
+  let (cache1, st1) := runServe (mkQuery missingName) [treeHandler]
+  let some r1 := sentResponse st1 | return false
+  let (_, st2) := runServe (mkQuery missingName 28) [] cache1
+  let some r2 := sentResponse st2 | return false
+  return r1.header.rcode == Rcode.nameError &&
+    r2.header.rcode == Rcode.nameError && st2.exchanged.isEmpty
+
+-- The negative-caching path through the tree handler exceeds the
+-- kernel's reduction stack under `#guard` (the positive-path guards
+-- above reduce fine); checked natively instead — a regression still
+-- fails the build, via the thrown error.
+#eval show IO Unit from do
+  unless treeMissing do
+    throw <| IO.userError "treeMissing regressed"
+
+/-- Case-insensitivity at the semantic level: the tree node for
+    `example.com` answers a query spelled `EXAMPLE.COM`. -/
+def treeCaseInsensitive : Bool := Id.run do
+  let upper := wireName ["EXAMPLE", "COM"]
+  let (_, st) := runServe (mkQuery upper) [treeHandler]
+  let some resp := sentResponse st | return false
+  return resp.header.rcode == Rcode.noError && resp.answer.size == 1
+
+#guard treeCaseInsensitive
+
+/-- The CNAME chase follows tree edges: www.example.com redirects to
+    example.com, the resolver re-queries, and the final answer carries
+    the full chain (CNAME + A), both of which are tree data. -/
+def treeChased : Bool := Id.run do
+  let (_, st) := runServe (mkQuery wwwExampleCom) [treeHandler, treeHandler]
+  let some resp := sentResponse st | return false
+  return st.exchanged.size == 2 && resp.header.rcode == Rcode.noError &&
+    resp.answer.size == 2 && resp.header.id == 0x1234 &&
+    resp.question[0]?.any (fun qu => qu.qname == wwwExampleCom)
+
+#guard treeChased
+
+/-- NODATA: the node exists but holds no record of the queried type
+    (example.com MX) — NOERROR with an empty answer section. -/
+def treeNodata : Bool := Id.run do
+  let (_, st) := runServe (mkQuery exampleCom 15) [treeHandler]
+  let some resp := sentResponse st | return false
+  return resp.header.rcode == Rcode.noError && resp.answer.size == 0
+
+#eval show IO Unit from do
+  unless treeNodata do
+    throw <| IO.userError "treeNodata regressed"
+
+end TreeNetwork
 
 end VeriDNS.Test.Loop

@@ -10,13 +10,16 @@ open VeriDNS.Spec
 
 set_option maxHeartbeats 6400000 in
 /-- ResourceRecord roundtrip: decode ∘ encode = id.
-    Requires domain name labels + rdlength consistency. -/
+    Requires domain name labels + rdlength consistency — the latter stated
+    as the generated `rdlength_prop_0` ("length in octets of the RDATA
+    field"). -/
 theorem decode_encode (rr : VeriDNS.Spec.ResourceRecord)
     (labels : Array ByteArray) (hv : Proof.DomainName.ValidLabels labels)
     (hqn : DomainName.labelsToWireFormat labels = rr.name)
-    (hrl : rr.rdlength.toNat = rr.rdata.size) :
+    (hrl : rdlength_prop_0 rr) :
     DnsParser.run ResourceRecord.decode (DnsSerializer.runBytes (ResourceRecord.encode rr)) =
       .ok (rr, rr.name.size + 10 + rr.rdata.size) := by
+  have hrl : rr.rdlength.toNat = rr.rdata.size := hrl
   obtain ⟨name, type_, class_, ttl, rdlength, rdata⟩ := rr
   simp only at hqn hrl ⊢
   subst hqn

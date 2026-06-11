@@ -141,6 +141,24 @@ private def eFinalVerbRoots : Array String :=
   #["cache", "retrieve", "store", "locate", "ignore", "include", "require",
     "release", "update", "combine", "remove", "receive", "serve", "use"]
 
+/-- Strip third-person inflection down to the verb root, restoring an
+    e-final stem from the morphological lexicon: "ignores" → "ignore",
+    "discards" → "discard". -/
+private def verbBase (w : String) : String :=
+  let b := stripVerbInflection w
+  if eFinalVerbRoots.contains (b ++ "e") then b ++ "e" else b
+
+/-- Form the regular past participle of a verb root: "cache" → "cached",
+    "discard" → "discarded". -/
+private def pastForm (v : String) : String :=
+  if v.endsWith "e" then v ++ "d" else v ++ "ed"
+
+/-- Closed-class lexicon of state-modifying action verbs (the
+    store-shaped actions a spec structure takes on data); matched on the
+    root via `verbBase`. -/
+private def statefulActionVerbs : Array String :=
+  #["store", "cache", "discard", "add", "update", "set", "remove"]
+
 /-- Stem an "-ed" past participle to its verb root: "stored" → "store",
     "returned" → "return", "cached" → "cache", "tried" → "try". -/
 private def participleStem (w : String) : String :=
@@ -818,6 +836,33 @@ structure AxiomSpec where
   predicateName : Option String     -- which predicate (if any)
   deriving Repr, Inhabited
 
+/-- Shape of a standalone parameterized Prop emitted alongside a glossary
+    class. The class vocabulary (Self, type params, getters) cannot express
+    these constraints — they need projections the RFC leaves abstract (an
+    entry's age, its absolute expiry) — so they are emitted as
+    predicate-transformer Props over abstract types for instances to
+    instantiate, the `usingthecache_discard_unrequested` convention. -/
+inductive ParamPropShape where
+  /-- `(ρ : Type) (p q : ρ → Bool) : ∀ r, p r = true → q r = true`
+      — params: [guard, consequent]. -/
+  | guardedBool
+  /-- `(κ ρ : Type) (interval : ρ → UInt32) (storeAt : κ → ρ → UInt32 → κ)
+      (holds : κ → ρ → UInt32 → Prop) :
+      ∀ c r t, holds (storeAt c r t) r (t + interval r)`
+      — converting an interval to an absolute time at the store event `t`
+      is addition; params: [interval, storeAt, holds]. -/
+  | storeAbsolute
+  deriving Repr, Inhabited
+
+/-- A standalone parameterized Prop derived from a glossary entry. -/
+structure ParamProp where
+  name : String
+  params : Array String   -- predicate parameter names, from sentence tokens
+  doc : String
+  src : String            -- source phrase anchoring hover
+  shape : ParamPropShape
+  deriving Repr, Inhabited
+
 /-- Full NLP-derived class specification. -/
 structure ClassSpec where
   className : String
@@ -825,6 +870,7 @@ structure ClassSpec where
   methods : Array MethodSpec
   predicates : Array PredicateSpec
   axioms : Array AxiomSpec
+  paramProps : Array ParamProp := #[]
   deriving Repr, Inhabited
 
 /-- Transparent nouns defer to their "of" complement: "the EQUIVALENT of
@@ -833,7 +879,7 @@ structure ClassSpec where
     an of-complement exists. -/
 private def transparentOf (np : NLP.NounPhrase)
     (pps : Array NLP.PrepPhrase := #[]) : Option NLP.NPData :=
-  if #["equivalent", "sort", "kind"].contains np.head.toLower then
+  if #["equivalent", "sort", "kind", "course"].contains np.head.toLower then
     (np.postMods.findSome? fun pm => match pm with
       | .pp "of" npd => some npd
       | _ => none) <|>
@@ -1076,17 +1122,41 @@ private def inferClassFromClauses (entryName : String) (clauses : Array NLP.Clau
   -- absolute time") — is headed "time" with the premodifier "absolute",
   -- plus a when-clause whose passive participle stems to an existing
   -- Self-returning method: that method gains a time-indexed variant
-  -- (suffix "At", UInt32 absolute seconds).
+  -- (suffix "At", UInt32 absolute seconds). The same frame yields the
+  -- conversion LAW as a parameterized Prop: converting the object noun
+  -- (an interval) to an absolute time at the store event `t` is addition,
+  -- `holds (storeAt c r t) r (t + interval r)`.
   -- Periodic-event derivation ("discards them during periodic sweeps to
   -- reclaim the memory ..."): a discarding verb with an anaphoric object
   -- and a "during"-PP naming a recurring plural event — the event head
   -- names a time-indexed Self-returning operation whose law is
   -- removal-only.
+  -- Discard-target derivation: an ignore/discard verb (possibly the
+  -- second arm of a "V or V" cluster) whose object NP carries a
+  -- premodifying adjective and a plural head ("ignores or discards OLD
+  -- RRs") names the guard predicate of the per-event discard laws: at
+  -- each discarding event (the when-clause's in-PP resolved through a
+  -- transparent noun — "in the COURSE OF a search" — or the during-PP's
+  -- recurring plural event), data satisfying the guard satisfies the
+  -- verb's outcome (∀ r, old r = true → ignored/discarded r = true).
+  let mut paramProps : Array ParamProp := #[]
   for sentence in Property.splitSentences rawText do
     let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+    -- the discarded-object pre-pass: adjective + cluster-initial verb
+    let mut oldAdj? : Option String := none
+    let mut clusterVerb? : Option String := none
+    for k in [:toks.size] do
+      let base := verbBase toks[k]!.word
+      if oldAdj?.isNone && (base == "ignore" || base == "discard") then
+        if let some (np, _) := NLP.parseNP toks (k + 1) (absorbPP := false) then
+          if !np.preAdjs.isEmpty && np.number == .plural then
+            oldAdj? := some np.preAdjs[0]!
+            clusterVerb? := some (
+              if k ≥ 2 && toks[k - 1]!.word == "or" then toks[k - 2]!.word
+              else toks[k]!.word)
     for k in [:toks.size] do
       if stripVerbInflection toks[k]!.word == "convert" then
-        let mut timeOk := false
+        let mut absName? : Option String := none
         let mut whenStem? : Option String := none
         for j in [k:toks.size] do
           if toks[j]!.word == "to" then
@@ -1094,7 +1164,7 @@ private def inferClassFromClauses (entryName : String) (clauses : Array NLP.Clau
               let target : Option NLP.NPData := transparentOf np <|> some np.toData
               if let some t := target then
                 if t.head == "time" && t.preAdjs.contains "absolute" then
-                  timeOk := true
+                  absName? := t.preAdjs[0]?
         for j in [k:toks.size] do
           if toks[j]!.word == "when" then
             for m in [j:toks.size] do
@@ -1102,7 +1172,7 @@ private def inferClassFromClauses (entryName : String) (clauses : Array NLP.Clau
                   (toks[m + 1]!.pos == .verb || toks[m + 1]!.pos == .adj) &&
                   toks[m + 1]!.word.endsWith "ed" then
                 whenStem? := some (participleStem toks[m + 1]!.word)
-        if timeOk then
+        if let some absName := absName? then
           if let some stem := whenStem? then
             if let some baseM := methods.find? (fun m =>
                 m.name == stem && m.returnsSelf) then
@@ -1111,6 +1181,20 @@ private def inferClassFromClauses (entryName : String) (clauses : Array NLP.Clau
                   name := stem ++ "At"
                   args := baseM.args.push ("UInt32", false)
                   sourceClause := sentence }
+              -- the conversion law over the object noun's projection
+              let intervalName :=
+                (NLP.parseNP toks (k + 1) |>.map (·.1.head)).getD "interval"
+              let pName := s!"{entryName.toLower}_{stem}At_{absName}"
+              unless paramProps.any (·.name == pName) do
+                paramProps := paramProps.push
+                  { name := pName
+                    params := #[intervalName, stem ++ "At", absName]
+                    doc := s!"Converting the {intervalName} of stored data " ++
+                      s!"to an {absName} time at store time `t` is addition " ++
+                      s!"(`t + {intervalName} r`), over an abstract store and " ++
+                      s!"an abstract post-store predicate: \"{sentence}\""
+                    src := s!"{absName} time"
+                    shape := .storeAbsolute }
       if stripVerbInflection toks[k]!.word == "discard" && k + 1 < toks.size &&
           (toks[k + 1]!.word == "them" || toks[k + 1]!.word == "it") then
         for j in [k:toks.size] do
@@ -1124,6 +1208,48 @@ private def inferClassFromClauses (entryName : String) (clauses : Array NLP.Clau
                   axioms := axioms.push ⟨s!"{mName}_subset",
                     s!"{mName} only discards entries (no additions)",
                     mName, some "entries"⟩
+                -- removal-completeness law: the anaphoric object's
+                -- antecedent adjective guards what the event discards
+                if let some adj := oldAdj? then
+                  let base := verbBase toks[k]!.word
+                  let pName := s!"{entryName.toLower}_{mName}_{base}s_{adj}"
+                  unless paramProps.any (·.name == pName) do
+                    paramProps := paramProps.push
+                      { name := pName
+                        params := #[adj, pastForm base]
+                        doc := s!"Data that is `{adj}` is `{pastForm base}` " ++
+                          s!"by a {mName} (abstract predicates): \"{sentence}\""
+                        src := String.intercalate " "
+                          (np.preAdjs.toList ++ [np.head])
+                        shape := .guardedBool }
+    -- search-event arm: "ignores or discards old RRs when it runs across
+    -- them in the course of a search" — the when-clause's in-PP names the
+    -- event through a transparent noun
+    if let some adj := oldAdj? then
+      if let some cv := clusterVerb? then
+        let mut event? : Option (String × String) := none
+        let mut whenIdx? : Option Nat := none
+        for k in [:toks.size] do
+          if whenIdx?.isNone && toks[k]!.word == "when" then
+            whenIdx? := some k
+        if let some w := whenIdx? then
+          for j in [w:toks.size] do
+            if event?.isNone && toks[j]!.word == "in" then
+              if let some (np, _) := NLP.parseNP toks (j + 1) then
+                if let some eff := transparentOf np then
+                  event? := some (eff.head, np.head)
+        if let some (ev, transNoun) := event? then
+          let base := verbBase cv
+          let pName := s!"{entryName.toLower}_{ev}_{base}s_{adj}"
+          unless paramProps.any (·.name == pName) do
+            paramProps := paramProps.push
+              { name := pName
+                params := #[adj, pastForm base]
+                doc := s!"Data that is `{adj}` is `{pastForm base}` when " ++
+                  s!"encountered during a {ev} (abstract predicates): " ++
+                  s!"\"{sentence}\""
+                src := s!"{transNoun} of a {ev}"
+                shape := .guardedBool }
 
   -- Post-processing: generate implied getters + axioms for Self-returning methods
   let mut impliedMethods : Array MethodSpec := #[]
@@ -1151,7 +1277,7 @@ private def inferClassFromClauses (entryName : String) (clauses : Array NLP.Clau
         "discard", some "entries"⟩
 
   let className := capitalize entryName.toLower ++ "Spec"
-  return ⟨className, typeParams, methods, predicates, axioms⟩
+  return ⟨className, typeParams, methods, predicates, axioms, paramProps⟩
 
 -- ============================================================
 -- Algorithm step parser (numbered lists, e.g., §5.3.3)
@@ -1603,7 +1729,8 @@ private def mkMethodTypeStr (spec : MethodSpec) (selfParamName : String)
   return " → ".intercalate argParts.toList
 
 /-- Generate a class declaration from a ClassSpec. Returns the full name. -/
-private def generateGlossaryClass (spec : ClassSpec) : CommandElabM Name := do
+private def generateGlossaryClass (spec : ClassSpec)
+    : CommandElabM (Name × Array (Name × String)) := do
   let ns ← getCurrNamespace
   let selfParamName := (spec.className.take 1).toString
 
@@ -1691,7 +1818,47 @@ private def generateGlossaryClass (spec : ClassSpec) : CommandElabM Name := do
     let fieldFullName := fullName ++ Name.mkSimple ax.name
     addDocStringCore fieldFullName s!"{ax.body}"
 
-  return fullName
+  -- Standalone parameterized Props: constraints the class vocabulary
+  -- cannot state (they need projections the RFC leaves abstract), for
+  -- instances to instantiate. Returned with their source phrases so the
+  -- caller can anchor hovers.
+  let mut paramSrcs : Array (Name × String) := #[]
+  for pp in spec.paramProps do
+    let dName := mkIdent (Name.mkSimple pp.name)
+    let fullPName := ns ++ Name.mkSimple pp.name
+    let emitted ← (do
+      match pp.shape, pp.params with
+      | .guardedBool, #[g, q] =>
+        let gId := mkIdent (Name.mkSimple g)
+        let qId := mkIdent (Name.mkSimple q)
+        let rhoId := mkIdent (Name.mkSimple "ρ")
+        let rId := mkIdent (Name.mkSimple "r")
+        elabCommand (← `(def $dName ($rhoId : Type)
+          ($gId : $rhoId → Bool) ($qId : $rhoId → Bool) : Prop :=
+          ∀ ($rId : $rhoId), $gId $rId = true → $qId $rId = true))
+        return true
+      | .storeAbsolute, #[intv, sAt, holds] =>
+        let intvId := mkIdent (Name.mkSimple intv)
+        let sAtId := mkIdent (Name.mkSimple sAt)
+        let holdsId := mkIdent (Name.mkSimple holds)
+        let kapId := mkIdent (Name.mkSimple "κ")
+        let rhoId := mkIdent (Name.mkSimple "ρ")
+        let cId := mkIdent (Name.mkSimple "c")
+        let rId := mkIdent (Name.mkSimple "r")
+        let tId := mkIdent (Name.mkSimple "t")
+        elabCommand (← `(def $dName ($kapId $rhoId : Type)
+          ($intvId : $rhoId → UInt32)
+          ($sAtId : $kapId → $rhoId → UInt32 → $kapId)
+          ($holdsId : $kapId → $rhoId → UInt32 → Prop) : Prop :=
+          ∀ ($cId : $kapId) ($rId : $rhoId) ($tId : UInt32),
+            $holdsId ($sAtId $cId $rId $tId) $rId ($tId + $intvId $rId)))
+        return true
+      | _, _ => return false)
+    if emitted then
+      addDocStringCore fullPName pp.doc
+      paramSrcs := paramSrcs.push (fullPName, pp.src)
+
+  return (fullName, paramSrcs)
 
 -- ============================================================
 -- Code generation
@@ -1817,6 +1984,28 @@ private def generateStructure (name : String) (docstring : String)
       let fieldName := fullName ++ Name.mkSimple f.name.toLower
       addDocStringCore fieldName f.description
 
+/-- Constructor names for the top-level steps, deduplicated: a later step
+    that re-derives an already-used name (§4.3.2's two "Start matching
+    down ..." steps) is distinguished by the final nominal of its first
+    sentence ("... in the zone" / "... in the cache"), falling back to
+    the step number. -/
+def topStepCtorNames (topSteps : Array AlgorithmStep) : Array String := Id.run do
+  let mut names : Array String := #[]
+  for s in topSteps do
+    let base := deriveConstructorName s.description false
+    let name := if !names.contains base then base
+      else Id.run do
+        let firstSentence := (s.description.splitOn ". ")[0]!
+        let toks := NLP.tagPOS (NLP.tokenize firstSentence.toLower)
+        let lastNoun? := toks.reverse.find? fun t =>
+          t.pos == .noun || t.pos == .nounPlural
+        let cand := match lastNoun? with
+          | some t => base ++ capitalize t.word
+          | none => s!"{base}{s.index}"
+        if names.contains cand then s!"{base}{s.index}" else cand
+    names := names.push name
+  return names
+
 /-- Generate inductive types and transition table from parsed algorithm steps. -/
 private def generateAlgorithmTypes (sectionName : String)
     (topSteps : Array AlgorithmStep) (subSteps : Array AlgorithmStep)
@@ -1825,14 +2014,14 @@ private def generateAlgorithmTypes (sectionName : String)
   -- 1. Generate inductive AlgorithmStep
   let stepTypeName := sectionName ++ "Step"
   let stepTypeIdent := mkIdent (Name.mkSimple stepTypeName)
-  let stepCtorNames := topSteps.map fun s =>
-    mkIdent (Name.mkSimple (deriveConstructorName s.description false))
+  let stepNames := topStepCtorNames topSteps
+  let stepCtorNames := stepNames.map fun n => mkIdent (Name.mkSimple n)
   elabCommand <| mkInductiveCmd stepTypeIdent stepCtorNames #[`Repr, `BEq, `Inhabited]
   -- Docstrings for step constructors
   let fullStepName := ns ++ Name.mkSimple stepTypeName
-  for s in topSteps do
-    let ctorName := deriveConstructorName s.description false
-    let ctorFullName := fullStepName ++ Name.mkSimple ctorName
+  for i in [:topSteps.size] do
+    let s := topSteps[i]!
+    let ctorFullName := fullStepName ++ Name.mkSimple stepNames[i]!
     addDocStringCore ctorFullName s!"Step {s.index}: {s.description}"
 
   -- 2. Generate inductive ResponseAction (from sub-steps)
@@ -1868,11 +2057,12 @@ private def generateAlgorithmTypes (sectionName : String)
     if let some target := s.gotoTarget then
       let constName := mkIdent (Name.mkSimple s!"{sectionName.toLower}_transition_{transIdx}")
       -- Find source step (step 4 = analyzeResponse for sub-steps)
+      let stepNames := topStepCtorNames topSteps
       let sourceCtorName := if topSteps.size >= 4
-        then deriveConstructorName topSteps[topSteps.size - 1]!.description false
+        then stepNames[topSteps.size - 1]!
         else "unknown"
       let targetCtorName := if target > 0 && target ≤ topSteps.size
-        then deriveConstructorName topSteps[target - 1]!.description false
+        then stepNames[target - 1]!
         else "unknown"
       let actionCtorName := deriveConstructorName s.description true
       let sourceIdent := mkIdent (Name.mkSimple stepTypeName ++ Name.mkSimple sourceCtorName)
@@ -1940,17 +2130,20 @@ private def interpretFieldRefForField (ref : FieldRef) (ctx : FieldInterpContext
 private partial def interpretPropSpecForField (spec : PropSpec) (ctx : FieldInterpContext)
     (binders : Array (TSyntax `ident)) : CommandElabM (TSyntax `term) := do
   match spec with
+  -- Struct quantifiers become LAMBDAS: the emitted def is a predicate
+  -- over the struct, instantiable at constructed values (a closed ∀
+  -- over the free struct is refuted by any `mk` value).
   | .forallStruct body =>
     let hIdent : TSyntax `ident := mkIdent `h
     let binders' := binders.push hIdent
     let bodyTerm ← interpretPropSpecForField body ctx binders'
-    `(∀ ($hIdent : $(ctx.structIdent)), $bodyTerm)
+    `(fun ($hIdent : $(ctx.structIdent)) => $bodyTerm)
   | .forallPair body =>
     let aIdent : TSyntax `ident := mkIdent `a
     let bIdent : TSyntax `ident := mkIdent `b
     let binders' := binders.push aIdent |>.push bIdent
     let bodyTerm ← interpretPropSpecForField body ctx binders'
-    `(∀ ($aIdent $bIdent : $(ctx.structIdent)), $bodyTerm)
+    `(fun ($aIdent $bIdent : $(ctx.structIdent)) => $bodyTerm)
   | .eq lhs rhs =>
     let lhsTerm ← interpretFieldRefForField lhs ctx binders
     let rhsTerm ← interpretFieldRefForField rhs ctx binders
@@ -2118,7 +2311,10 @@ private def generateProperties (structName : String) (fields : Array MergedField
     for i in [:clauses.size] do
       let some propVal ← mkFormalProp clauses[i]! structName f.name | continue
       let propName : Ident := mkIdent (Name.mkSimple s!"{f.name.toLower}_prop_{i}")
-      elabCommand (← `(def $propName : Prop := $propVal))
+      -- No `: Prop` ascription: rule props are now PREDICATES over the
+      -- struct (`Struct → Prop`, or `Struct → Struct → Prop` for pair
+      -- rules) — the type is inferred from the interpreter's lambdas.
+      elabCommand (← `(def $propName := $propVal))
       let fullName := ns ++ Name.mkSimple s!"{f.name.toLower}_prop_{i}"
       let fmt ← liftCoreM (ppTerm propVal)
       addDocStringCore fullName s!"{f.name} — {clauseLabel clauses[i]!}\n```lean\n{fmt.pretty}\n```"
@@ -2395,12 +2591,16 @@ prose_clause_rule {
   output := .declField "timer" (.extractedNat "bitWidth")
 }
 
--- "should not be cached" / "the data should not be cached" → cacheable = 0
+-- "should not be cached" / "the data should not be cached" → cacheable
+-- field (modeling only). The CONSTRAINT is not expressible as a closed
+-- Prop over the free struct (∀ msg, msg.cacheable = 0 is refuted by any
+-- mk 1 value); the conditional no-cache obligations are emitted as
+-- parameterized Props by the token frames below (e.g.
+-- `{struct}_truncated_not_cached`).
 prose_clause_rule {
   name := "should_not_cache"
   pattern := { verbs := #["cached"], requireNegation := true }
-  output := .seq (.declField "cacheable" (.lit 1))
-    (.forallStruct (.eq (.namedField "cacheable") (.lit 0)))
+  output := .declField "cacheable" (.lit 1)
 }
 
 -- "should never be used in preference to authoritative data"
@@ -2412,22 +2612,24 @@ prose_clause_rule {
     (.forallStruct (.eq (.namedField "preferauthoritative") (.lit 1)))
 }
 
--- "should never be combined"
+-- "should never be combined" → sourcesMerged field (modeling only). The
+-- constraint is the parameterized `{struct}_never_combined` (emitted by
+-- the correlative-preference token frame): a closed ∀ over the free
+-- struct is unprovable.
 prose_clause_rule {
   name := "never_combine"
   pattern := { verbs := #["combined"], requireNegation := true }
-  output := .seq (.declField "sourcesMerged" (.lit 1))
-    (.forallStruct (.neg (.eq (.namedField "sourcesmerged") (.lit 1))))
+  output := .declField "sourcesMerged" (.lit 1)
 }
 
--- "data is expired and should be ignored"
+-- "data is expired and should be ignored" → expired field (modeling
+-- only; a closed ∀ over the free struct is unprovable). The freshness
+-- discipline is the glossary-derived `cache_search_ignores_old` /
+-- `cache_sweep_discards_old` parameterized Props.
 prose_clause_rule {
   name := "expired_ignore"
   pattern := { verbs := #["expired", "ignored"], subjHead := some #["data", "TTL"] }
-  output := .seq (.declField "expired" (.lit 1))
-    (.forallStruct (.implies
-      (.le (.lit 2147483648) (.toNat (.namedField "timer")))
-      (.eq (.namedField "expired") (.lit 1))))
+  output := .declField "expired" (.lit 1)
 }
 
 -- Resolver algorithm rules (§5.3.3) — derived via full NLP inference in algorithm path
@@ -2644,13 +2846,18 @@ private partial def interpretPropSpecForProse (spec : PropSpec) (ctx : ProseInte
     let ra ← interpretPropSpecForProse a ctx binders bindings
     let rb ← interpretPropSpecForProse b ctx binders bindings
     return ra ++ rb
+  -- The struct quantifiers become LAMBDAS, so emitted defs are
+  -- PREDICATES over the struct (`Struct → Prop`), not closed `∀`s: a
+  -- closed ∀ over the free generated struct is refuted by any `mk`
+  -- value, while a predicate is the constraint implementations
+  -- instantiate at the values they construct.
   | .forallStruct body =>
     -- Check if body contains .resolvedExtField — if so, add extra binder
     let hasExtRef := containsExtRef body
     let msgIdent : TSyntax `ident := mkIdent `msg
     let ctx' := { ctx with structBinder := some msgIdent }
     if hasExtRef then
-      -- ∀ (msg : Struct) (ext : ExtStruct), body
+      -- fun (msg : Struct) (ext : ExtStruct) => body
       let extIdent : TSyntax `ident := mkIdent `ext
       let binders' := binders.push msgIdent |>.push extIdent
       -- Resolve ext struct type from bindings
@@ -2659,13 +2866,13 @@ private partial def interpretPropSpecForProse (spec : PropSpec) (ctx : ProseInte
       let extTypeIdent := mkIdent (ctx.ns ++ Name.mkSimple extStructName)
       let bodyResult ← interpretPropSpecForProse body ctx' binders' bindings
       let propTerms ← bodyResult.propTerms.mapM fun bodyTerm => do
-        `(∀ ($msgIdent : $(ctx.structIdent)) ($extIdent : $extTypeIdent), $bodyTerm)
+        `(fun ($msgIdent : $(ctx.structIdent)) ($extIdent : $extTypeIdent) => $bodyTerm)
       return ⟨bodyResult.structFields, propTerms⟩
     else
       let binders' := binders.push msgIdent
       let bodyResult ← interpretPropSpecForProse body ctx' binders' bindings
       let propTerms ← bodyResult.propTerms.mapM fun bodyTerm => do
-        `(∀ ($msgIdent : $(ctx.structIdent)), $bodyTerm)
+        `(fun ($msgIdent : $(ctx.structIdent)) => $bodyTerm)
       return ⟨bodyResult.structFields, propTerms⟩
   | .forallPair body =>
     let aIdent : TSyntax `ident := mkIdent `a
@@ -2673,7 +2880,7 @@ private partial def interpretPropSpecForProse (spec : PropSpec) (ctx : ProseInte
     let binders' := binders.push aIdent |>.push bIdent
     let bodyResult ← interpretPropSpecForProse body ctx binders' bindings
     let propTerms ← bodyResult.propTerms.mapM fun bodyTerm => do
-      `(∀ ($aIdent $bIdent : $(ctx.structIdent)), $bodyTerm)
+      `(fun ($aIdent $bIdent : $(ctx.structIdent)) => $bodyTerm)
     return ⟨bodyResult.structFields, propTerms⟩
   | .forallElem container body =>
     let elemIdent : TSyntax `ident := mkIdent `elem
@@ -3713,18 +3920,19 @@ private def generateStepRelation (sectionName : String)
   if !guardNames.isEmpty then
     let mut stepSpecCtors := ""
     -- Sequential transitions: adjacent top-level steps
+    let stepNames := topStepCtorNames topSteps
     for i in [:topSteps.size - 1] do
-      let fromCtor := deriveConstructorName topSteps[i]!.description false
-      let toCtor := deriveConstructorName topSteps[i + 1]!.description false
+      let fromCtor := stepNames[i]!
+      let toCtor := stepNames[i + 1]!
       stepSpecCtors := stepSpecCtors ++ s!"\n  | seq_{fromCtor}_{toCtor} : StepSpec .{fromCtor} .{toCtor}"
     -- Conditional transitions: sub-steps with goto targets and guards
     let sourceCtorName := if topSteps.size >= 4
-      then deriveConstructorName topSteps[topSteps.size - 1]!.description false
+      then stepNames[topSteps.size - 1]!
       else "unknown"
     for (actionName, guardDefName, gotoTarget?) in guardNames do
       if let some target := gotoTarget? then
         let targetCtorName := if target > 0 && target ≤ topSteps.size
-          then deriveConstructorName topSteps[target - 1]!.description false
+          then stepNames[target - 1]!
           else "unknown"
         stepSpecCtors := stepSpecCtors ++ s!"\n  | {actionName} (resp : Format) : {guardDefName} resp → StepSpec .{sourceCtorName} .{targetCtorName}"
     let stepSpecStr := s!"inductive StepSpec : {stepTypeName} → {stepTypeName} → Prop where{stepSpecCtors}"
@@ -3803,7 +4011,7 @@ private def generateStepRelation (sectionName : String)
       let targetTerm : TSyntax `term ← match gotoTarget? with
         | some target =>
           let targetCtorName := if target > 0 && target ≤ topSteps.size
-            then deriveConstructorName topSteps[target - 1]!.description false
+            then (topStepCtorNames topSteps)[target - 1]!
             else "unknown"
           let ctorId := mkIdent (Name.mkSimple stepTypeName ++ Name.mkSimple targetCtorName)
           `(some $ctorId)
@@ -4324,8 +4532,11 @@ private partial def interpretPropSpecForAlgorithm (spec : PropSpec) (env : Envir
         let typeIdent := mkIdent typeFullName
         let binders' := binders.push xIdent
         let bodyTerms ← interpretPropSpecForAlgorithm body env ns binders'
+        -- Lambda, not ∀: the emitted def is a predicate over the type,
+        -- instantiable at constructed values (a closed ∀ over a free
+        -- type is refuted by any counterexample value).
         bodyTerms.mapM fun bodyTerm => do
-          `(∀ ($xIdent : $typeIdent), $bodyTerm)
+          `(fun ($xIdent : $typeIdent) => $bodyTerm)
       else
         -- Polymorphic type: use string-based elaboration
         match renderPropSpecStr body "x" with
@@ -4351,7 +4562,7 @@ private partial def interpretPropSpecForAlgorithm (spec : PropSpec) (env : Envir
         let binders' := binders.push aIdent |>.push bIdent
         let bodyTerms ← interpretPropSpecForAlgorithm body env ns binders'
         bodyTerms.mapM fun bodyTerm => do
-          `(∀ ($aIdent $bIdent : $typeIdent), $bodyTerm)
+          `(fun ($aIdent $bIdent : $typeIdent) => $bodyTerm)
       else
         -- Polymorphic type: use string-based elaboration
         match renderPropSpecStr body "x" with
@@ -4554,17 +4765,20 @@ private def interpretFieldRef (ref : FieldRef) (ctx : InterpContext)
 private partial def interpretPropSpec (spec : PropSpec) (ctx : InterpContext)
     (binders : Array (TSyntax `ident)) : CommandElabM (TSyntax `term) := do
   match spec with
+  -- Struct quantifiers become LAMBDAS: the emitted def is a predicate
+  -- over the struct, instantiable at constructed values (a closed ∀
+  -- over the free struct is refuted by any `mk` value).
   | .forallStruct body =>
     let msgIdent : TSyntax `ident := mkIdent `msg
     let binders' := binders.push msgIdent
     let bodyTerm ← interpretPropSpec body ctx binders'
-    `(∀ ($msgIdent : $(ctx.structIdent)), $bodyTerm)
+    `(fun ($msgIdent : $(ctx.structIdent)) => $bodyTerm)
   | .forallPair body =>
     let aIdent : TSyntax `ident := mkIdent `a
     let bIdent : TSyntax `ident := mkIdent `b
     let binders' := binders.push aIdent |>.push bIdent
     let bodyTerm ← interpretPropSpec body ctx binders'
-    `(∀ ($aIdent $bIdent : $(ctx.structIdent)), $bodyTerm)
+    `(fun ($aIdent $bIdent : $(ctx.structIdent)) => $bodyTerm)
   | .forallMatchedIndex body =>
     if ctx.field.isArray then
       let iIdent : TSyntax `ident := mkIdent `i
@@ -4659,7 +4873,35 @@ private def generateCrossStructProps (structName : String) (fields : Array Merge
                     structName, structIdent, field := f,
                     subStructName, sfName, pps, allFields := fields, ns
                   }
-                  let propTerm ← interpretPropSpec rule.prop ctx #[]
+                  let propTerm ←
+                    match rule.prop with
+                    | .forallStruct (.forallMatchedIndex (.existsTyped _
+                        (.forallElem (.bound 0) constraint))) =>
+                      -- "represented as a sequence of labels": the Spec
+                      -- has no wire codec, so the label decomposition is
+                      -- an abstract FUNCTION parameter applied to the
+                      -- matched wire field — a bare ∃ would be vacuously
+                      -- satisfied by the empty sequence, disconnected
+                      -- from the message. The constraint then governs
+                      -- every label of every entry's field.
+                      let labelsId : TSyntax `ident := mkIdent `labels
+                      let msgIdent : TSyntax `ident := mkIdent `msg
+                      let iIdent : TSyntax `ident := mkIdent `i
+                      let hiIdent : TSyntax `ident := mkIdent `hi
+                      let lIdent : TSyntax `ident := mkIdent `l
+                      let parentProj := mkIdent (Name.mkSimple structName
+                        ++ Name.mkSimple f.name.toLower)
+                      let subProj := mkIdent (subStructName ++ sfName)
+                      let constraintTerm ← interpretPropSpec constraint ctx
+                        #[msgIdent, iIdent, lIdent]
+                      `(fun ($labelsId : ByteArray → Array ByteArray)
+                            ($msgIdent : $structIdent) =>
+                        ∀ ($iIdent : Nat)
+                          ($hiIdent : $iIdent < Array.size ($parentProj $msgIdent)),
+                          ∀ ($lIdent : ByteArray),
+                            $lIdent ∈ $labelsId ($subProj (($parentProj $msgIdent)[$iIdent])) →
+                              $constraintTerm)
+                    | _ => interpretPropSpec rule.prop ctx #[]
                   -- Generate the prop name based on the rule
                   let propName ← match rule.prop with
                     | .forallStruct (.eq (.toNat .matchedSubField) (.size (.resolvedFromPP prep))) =>
@@ -4678,7 +4920,9 @@ private def generateCrossStructProps (structName : String) (fields : Array Merge
                       -- Domain name / other: field_subfield_valid
                       pure (mkIdent (Name.mkSimple
                         s!"{structName.toLower}_{f.name.toLower}_{sfName.toString.toLower}_valid"))
-                  elabCommand (← `(def $propName : Prop := $propTerm))
+                  -- Predicate form (no `: Prop` ascription) — see the
+                  -- interpreter's lambda convention.
+                  elabCommand (← `(def $propName := $propTerm))
                   let fullName := ns ++ propName.getId
                   let fmt ← liftCoreM (ppTerm propTerm)
                   let propText := fmt.pretty
@@ -5153,6 +5397,243 @@ def generateExampleProps (structName : String) (text : String)
 -- Main pipeline
 -- ============================================================
 
+-- ============================================================
+-- Sub-step discourse obligations (RFC 1034 §4.3.2 match-down cases)
+-- ============================================================
+
+/-- Negation markers a VP adverb can carry, including contracted
+    auxiliaries ("QTYPE doesn't match CNAME"). -/
+private def negatedAdv (a : Option String) : Bool :=
+  a == some "not" || a == some "never" ||
+  a == some "doesn't" || a == some "don't"
+
+/-- Split a token sequence at top-level commas, dropping parenthesized
+    spans (the parenthetical restates the guard — "(i.e., the
+    corresponding label does not exist)"). -/
+private def segmentAtCommas (toks : Array NLP.Token) : Array (Array NLP.Token) := Id.run do
+  let mut segs : Array (Array NLP.Token) := #[]
+  let mut cur : Array NLP.Token := #[]
+  let mut depth : Nat := 0
+  for t in toks do
+    if t.word == "(" then depth := depth + 1
+    else if t.word == ")" then depth := depth - 1
+    else if depth == 0 then
+      if t.pos == .punct && t.word == "," then
+        if !cur.isEmpty then segs := segs.push cur
+        cur := #[]
+      else
+        cur := cur.push t
+  if !cur.isEmpty then segs := segs.push cur
+  return segs
+
+/-- First content token of a segment, skipping punctuation and leading
+    connectives ("and", "but") and adverbs ("just"). -/
+private def segmentHead? (seg : Array NLP.Token) : Option NLP.Token :=
+  seg.find? fun t =>
+    t.pos != .punct && t.pos != .conj && t.pos != .adv && t.pos != .discMarker
+
+/-- Name a sub-step guard clause from its grammatical structure: subject
+    (with its PP postmodifiers) + negation + the predicated content
+    (copular complement, participle, or verb + object). -/
+private def subGuardName (c : NLP.Clause) : Option String :=
+  let sanitize (s : String) : Option String :=
+    let cleaned := String.ofList (s.toList.filter (·.isAlphanum))
+    if cleaned.isEmpty || !(cleaned.get 0).isAlpha then none else some cleaned
+  let subjPPs (subj : NLP.NounPhrase) : String :=
+    String.join (subj.postMods.filterMap (fun pm =>
+      match pm with
+      | NLP.PostMod.pp prep np => some (capitalize prep ++ capitalize np.head)
+      | _ => none)).toList
+  match c with
+  | .svPassive subj part _ neg =>
+    sanitize (subj.head.toLower ++ subjPPs subj ++
+      (if neg then "Not" else "") ++ capitalize part)
+  | .svAdj subj vp comp _ =>
+    sanitize (subj.head.toLower ++ subjPPs subj ++
+      (if negatedAdv vp.adv then "Not" else "") ++ capitalize comp.adj)
+  | .svo subj vp obj _ =>
+    if obj.head.isEmpty then none
+    else if vp.isCopula then
+      sanitize (subj.head.toLower ++ subjPPs subj ++
+        (if negatedAdv vp.adv then "Not" else "") ++
+        String.join (obj.preAdjs.map capitalize).toList ++ capitalize obj.head)
+    else
+      sanitize (subj.head.toLower ++ subjPPs subj ++
+        (if negatedAdv vp.adv then "Not" else "") ++
+        capitalize (stripVerbInflection vp.verb) ++ capitalize obj.head)
+  | _ => none
+
+/-- Verbs that structure the discourse rather than oblige an effect:
+    transitions ("go ..."), terminations ("exit"), and check-introducers
+    ("look to see if ...", "check whether ...", "see"). -/
+private def discourseVerbs : Array String :=
+  #["go", "exit", "look", "check", "see"]
+
+/-- Name an imperative action segment: verb + object NP (premodifiers
+    kept) + the object's relative-clause content + the first PP. Returns
+    none for discourse verbs and non-imperative segments. -/
+private def subActionName (seg : Array NLP.Token) : Option String := Id.run do
+  let some vi := seg.findIdx? (fun t =>
+    t.pos != .punct && t.pos != .conj && t.pos != .adv && t.pos != .discMarker)
+    | return none
+  let first := seg[vi]!
+  if first.pos != .verb then return none
+  let v := first.word.toLower
+  if discourseVerbs.contains v then return none
+  let some (obj, _) := NLP.parseNP seg (vi + 1) | return none
+  -- relative-clause content: its verb + object + first PP
+  let relPart := String.join (obj.postMods.filterMap (fun pm =>
+    match pm with
+    | NLP.PostMod.relClause _ relText => Id.run do
+      let rtoks := NLP.tagPOS (NLP.tokenize relText)
+      let some rvi := rtoks.findIdx? (·.pos == .verb) | return none
+      let rv := capitalize (stripVerbInflection rtoks[rvi]!.word)
+      match NLP.parseNP rtoks (rvi + 1) with
+      | some (rnp, after) =>
+        let rpp := match NLP.parsePP rtoks after with
+          | some (pp, _) => capitalize pp.prep ++ capitalize pp.np.head
+          | none => ""
+        return some (rv ++ capitalize rnp.head ++ rpp)
+      | none => return some rv
+    | _ => none)).toList
+  -- first PP after / on the object
+  let ppPart := obj.postMods.findSome? (fun pm =>
+    match pm with
+    | NLP.PostMod.pp prep np =>
+      some (capitalize prep ++
+        String.join (np.preAdjs.map capitalize).toList ++ capitalize np.head)
+    | _ => none) |>.getD ""
+  let raw := stripVerbInflection v ++
+    String.join ((obj.preAdjs.filter (fun a => a.toLower != "all")).map capitalize).toList ++
+    capitalize obj.head ++ relPart ++ ppPart
+  let cleaned := String.ofList (raw.toList.filter (·.isAlphanum))
+  if cleaned.isEmpty then return none
+  return some cleaned
+
+/-- Split a verb-led segment at VP coordination ("copy X ... and go to
+    step 6"): a conjunction token directly followed by a verb starts a
+    new action. -/
+private def splitCoordActions (seg : Array NLP.Token) : Array (Array NLP.Token) := Id.run do
+  let mut parts : Array (Array NLP.Token) := #[]
+  let mut cur : Array NLP.Token := #[]
+  for i in [:seg.size] do
+    let t := seg[i]!
+    if t.pos == .conj && i + 1 < seg.size && seg[i + 1]!.pos == .verb then
+      if !cur.isEmpty then parts := parts.push cur
+      cur := #[]
+    else
+      cur := cur.push t
+  if !cur.isEmpty then parts := parts.push cur
+  return parts
+
+/-- Parameterized-Prop frames over a prose section, emitted as standalone
+    defs (the `discard_unrequested` convention: the constraint needs
+    projections the Spec leaves abstract, so it is stated over abstract
+    predicates for implementations to instantiate). Two frames:
+
+    * Conditional no-cache (§7.4 "When a response is truncated, ..., it
+      should not cache a possibly partial set of RRs"): a when-clause
+      whose passive participle names the guard, plus a negated modal over
+      a stateful action verb — the action (a state transformer
+      `κ → ρ → κ`) must be the identity on guarded data.
+    * Two-source preference (§7.4 "either the data in the response or the
+      cache is preferred, but the two should never be combined"): a
+      correlative either/or names the two sources (a generic head defers
+      to its in-PP complement), the copula's participle names the kept
+      set, and the anaphoric "the two" under a negated modal passive
+      forbids mixing — whatever is kept is drawn wholly from one source
+      or wholly from the other.
+
+    Returns (name × source-phrase) pairs for hover anchoring. -/
+private def emitProseParamProps (structName : String) (ns : Name)
+    (prose : String) : CommandElabM (Array (Name × String)) := do
+  let mut srcs : Array (Name × String) := #[]
+  let mut noopFrame? : Option (String × String × String) := none
+  let mut combineFrame? : Option (String × String × String × String × String) :=
+    none
+  for sentence in Property.splitSentences prose do
+    let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+    if noopFrame?.isNone then
+      let mut guard? : Option String := none
+      let mut act? : Option String := none
+      let mut sawWhen := false
+      for i in [:toks.size] do
+        if toks[i]!.word == "when" then sawWhen := true
+        if guard?.isNone && sawWhen && toks[i]!.pos == .copula &&
+            i + 1 < toks.size &&
+            (toks[i + 1]!.pos == .verb || toks[i + 1]!.pos == .adj) &&
+            toks[i + 1]!.word.endsWith "ed" then
+          guard? := some toks[i + 1]!.word
+        if act?.isNone && i + 2 < toks.size && toks[i]!.word == "should" &&
+            toks[i + 1]!.word == "not" &&
+            statefulActionVerbs.contains (verbBase toks[i + 2]!.word) then
+          act? := some (verbBase toks[i + 2]!.word)
+      if guard?.isSome && act?.isSome then
+        noopFrame? := some (guard?.getD "", act?.getD "", sentence)
+    if combineFrame?.isNone then
+      let mut sources? : Option (String × String × String) := none
+      let mut combWord? : Option String := none
+      for i in [:toks.size] do
+        if sources?.isNone && toks[i]!.word == "either" then
+          if let some (np1, n1) := NLP.parseNP toks (i + 1) then
+            let src1 := (np1.postMods.findSome? fun pm =>
+              match pm with
+              | .pp "in" npd => some npd.head
+              | _ => none).getD np1.head
+            if n1 < toks.size && toks[n1]!.word == "or" then
+              if let some (np2, n2) := NLP.parseNP toks (n1 + 1) then
+                if n2 + 1 < toks.size && toks[n2]!.pos == .copula &&
+                    toks[n2 + 1]!.word.endsWith "ed" then
+                  sources? := some (src1, np2.head, toks[n2 + 1]!.word)
+        if combWord?.isNone && i ≥ 1 && i + 4 < toks.size &&
+            toks[i - 1]!.word == "the" && toks[i]!.word == "two" &&
+            toks[i + 1]!.word == "should" && toks[i + 2]!.word == "never" &&
+            toks[i + 3]!.pos == .copula &&
+            toks[i + 4]!.word.endsWith "ed" then
+          combWord? := some toks[i + 4]!.word
+      if let some (s1, s2, pref) := sources? then
+        if let some cw := combWord? then
+          combineFrame? := some (s1, s2, pref, cw, sentence)
+  if let some (guardWord, actWord, noopSrc) := noopFrame? then
+    let noopName := s!"{structName.toLower}_{guardWord}_not_{pastForm actWord}"
+    let dName := mkIdent (Name.mkSimple noopName)
+    let kapId := mkIdent (Name.mkSimple "κ")
+    let rhoId := mkIdent (Name.mkSimple "ρ")
+    let cId := mkIdent (Name.mkSimple "c")
+    let rId := mkIdent (Name.mkSimple "r")
+    let guardId := mkIdent (Name.mkSimple guardWord)
+    let actId := mkIdent (Name.mkSimple actWord)
+    elabCommand (← `(def $dName ($kapId $rhoId : Type)
+      ($guardId : $rhoId → Bool) ($actId : $kapId → $rhoId → $kapId) : Prop :=
+      ∀ ($cId : $kapId) ($rId : $rhoId), $guardId $rId = true →
+        $actId $cId $rId = $cId))
+    let fullName := ns ++ Name.mkSimple noopName
+    addDocStringCore fullName
+      (s!"`{guardWord}` data must not be `{pastForm actWord}`: the " ++
+       s!"`{actWord}` action is a no-op on it (abstract guard and " ++
+       s!"state transformer): \"{noopSrc}\"")
+    srcs := srcs.push (fullName, s!"should not {actWord}")
+  if let some (src1Word, src2Word, prefWord, combWord, combSrc) :=
+      combineFrame? then
+    let combName := s!"{structName.toLower}_never_{combWord}"
+    let dName := mkIdent (Name.mkSimple combName)
+    let rhoId := mkIdent (Name.mkSimple "ρ")
+    let rId := mkIdent (Name.mkSimple "r")
+    let s1Id := mkIdent (Name.mkSimple src1Word)
+    let s2Id := mkIdent (Name.mkSimple src2Word)
+    let prefId := mkIdent (Name.mkSimple prefWord)
+    elabCommand (← `(def $dName ($rhoId : Type)
+      ($s1Id $s2Id $prefId : $rhoId → Prop) : Prop :=
+      (∀ ($rId : $rhoId), $prefId $rId → $s1Id $rId) ∨
+      (∀ ($rId : $rhoId), $prefId $rId → $s2Id $rId)))
+    let fullName := ns ++ Name.mkSimple combName
+    addDocStringCore fullName
+      (s!"What is `{prefWord}` comes wholly from the `{src1Word}` or " ++
+       s!"wholly from the `{src2Word}` — the two are never " ++
+       s!"`{combWord}` (abstract predicates): \"{combSrc}\"")
+    srcs := srcs.push (fullName, s!"never be {combWord}")
+  return srcs
+
 /-- Process verified RFC text to generate formal Lean specifications.
 
     Recognizes section headers, bit diagrams, and where blocks.
@@ -5297,10 +5778,13 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
               classSpecs := classSpecs.set! i (entryName, { spec with
                 methods := spec.methods.push lookupMethod })
 
-      -- Phase 2: Generate class declarations
+      -- Phase 2: Generate class declarations (and their standalone
+      -- parameterized Props, collecting hover sources)
+      let mut classParamSrcs : Array (Name × String) := #[]
       for (entryName, spec) in classSpecs do
-        let fullName ← generateGlossaryClass spec
+        let (fullName, paramSrcs) ← generateGlossaryClass spec
         classNames := classNames.insert entryName fullName
+        classParamSrcs := classParamSrcs ++ paramSrcs
 
       -- Propagate "same form as X" references
       for (entry, refName) in sameFormRefs do
@@ -5384,7 +5868,7 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
             let result ← interpretPropSpecForProse rule.output ctx #[] allBindings
             for propTerm in result.propTerms do
               let propName := mkIdent (Name.mkSimple s!"{structName.toLower}_prop_{propIdx}")
-              elabCommand (← `(def $propName : Prop := $propTerm))
+              elabCommand (← `(def $propName := $propTerm))
               let fullName := ns ++ Name.mkSimple s!"{structName.toLower}_prop_{propIdx}"
               let fmt ← liftCoreM (ppTerm propTerm)
               addDocStringCore fullName s!"{structName}: prop {propIdx}\n```lean\n{fmt.pretty}\n```"
@@ -5396,7 +5880,7 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
         | .ident _ _ _ _ => true
         | _ => false
       pushGlossaryHoverInfo structName glossaryIdents classNames
-      return some (structName, glossaryFields, propSrcs)
+      return some (structName, glossaryFields, classParamSrcs ++ propSrcs)
     -- Algorithm path (e.g., RFC 1034 §5.3.3: numbered step lists)
     let (algorithmTopSteps, algorithmSubSteps) := parseNumberedAlgorithm text
     if !algorithmTopSteps.isEmpty then
@@ -5405,6 +5889,117 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
       -- Generate step relation (guards, StepSpec, StepSpecStar, isTerminal)
       -- plus refined guards and obligations (returned for hover support)
       let obligationSrcs ← generateStepRelation structName algorithmTopSteps algorithmSubSteps
+      -- Sub-step discourse obligations (RFC 1034 §4.3.2 match-down cases):
+      -- a sub-step body is a small discourse. Its FIRST conditional
+      -- sentence's guard names the termination case ("the whole of QNAME
+      -- is matched", "a match is impossible") and obliges nothing itself
+      -- (its body declares the case or introduces a check); LATER
+      -- conditional sentences nest inside the case; an "Otherwise"-led
+      -- sentence holds in the complement of its predecessor's local
+      -- guard. Every conditional imperative emits one obligation per
+      -- substantive action — discourse verbs (go/exit/look/check/see)
+      -- structure the flow and oblige nothing — over an abstract state σ:
+      --   ∀ s, ⟨case⟩ s = true → ⟨local⟩ s = true → … → ⟨action⟩ s
+      -- A later conditional whose guard fails to name is skipped WITH its
+      -- body (an unscoped obligation would be overbroad): §4.3.2's
+      -- wildcard sentences drop out this way, consistent with wildcards
+      -- being out of implementation scope.
+      let mut subObSrcs : Array (Name × String) := #[]
+      for sub in algorithmSubSteps do
+        let sentences := sub.description.splitOn ". "
+        let mut headGuards : Array String := #[]
+        let mut prevLocals : Array String := #[]
+        for sentenceRaw in sentences do
+          let sentence := trimStr sentenceRaw
+          let toks := NLP.tagPOS (NLP.tokenize sentence)
+          let some first := toks.find? (fun t => t.pos != .punct) | continue
+          let firstW := first.word.toLower
+          let isIf := firstW == "if"
+          let isOtherwise := firstW == "otherwise"
+          unless isIf || isOtherwise do continue
+          let segs := segmentAtCommas toks
+          -- the consequent starts at the first verb-led (imperative) or
+          -- pronoun-led (case-declaring) segment; earlier segments are
+          -- guard conjuncts (fronted PPs fold into the guard)
+          let isBodySeg := fun (seg : Array NLP.Token) =>
+            match segmentHead? seg with
+            | some t => t.pos == .verb || t.word.toLower == "we"
+            | none => false
+          let mut guardSegs : Array (Array NLP.Token) := #[]
+          let mut bodySegs : Array (Array NLP.Token) := #[]
+          let mut inBody := isOtherwise
+          for seg in segs do
+            if !inBody && isBodySeg seg then inBody := true
+            if inBody then bodySegs := bodySegs.push seg
+            else guardSegs := guardSegs.push seg
+          -- name the guard conjuncts (leading connectives stripped)
+          let mut locals : Array String := #[]
+          for g in guardSegs do
+            let g' := g.toList.dropWhile (fun t =>
+              t.pos == .conj || t.pos == .subConj || t.pos == .punct) |>.toArray
+            if let some nm := subGuardName (NLP.parseClause g') then
+              locals := locals.push nm
+          if isIf && headGuards.isEmpty then
+            headGuards := locals
+            continue
+          if isIf && locals.isEmpty then
+            -- unnameable local guard: its body cannot be honestly scoped
+            prevLocals := #[]
+            continue
+          let posGuards := if isOtherwise then headGuards
+            else headGuards ++ locals
+          let negGuards := if isOtherwise then prevLocals else #[]
+          if posGuards.isEmpty then continue
+          for bseg in bodySegs do
+            for aseg in splitCoordActions bseg do
+              let some actName := subActionName aseg | continue
+              let defShort := s!"obligation_{actName}"
+              let fullName := ns ++ Name.mkSimple defShort
+              if ((← getEnv).find? fullName).isSome then continue
+              let sigmaId := mkIdent (Name.mkSimple "σ")
+              let sId := mkIdent (Name.mkSimple "s")
+              let actId := mkIdent (Name.mkSimple actName)
+              let obId := mkIdent (Name.mkSimple defShort)
+              -- body: positives → ¬(negatives conj) → action
+              let mut body : TSyntax `term ← `($actId $sId)
+              if !negGuards.isEmpty then
+                let negIds := negGuards.map (fun g => mkIdent (Name.mkSimple g))
+                let mut conj : TSyntax `term ← `($(negIds[0]!) $sId = true)
+                for ni in negIds.toList.drop 1 do
+                  conj ← `($conj ∧ $ni $sId = true)
+                body ← `(¬ ($conj) → $body)
+              for g in posGuards.reverse do
+                let gi := mkIdent (Name.mkSimple g)
+                body ← `($gi $sId = true → $body)
+              let allIds := (posGuards ++ negGuards).map
+                (fun g => mkIdent (Name.mkSimple g))
+              match allIds.toList with
+              | [a] => elabCommand (← `(def $obId ($sigmaId : Type)
+                  ($a : $sigmaId → Bool) ($actId : $sigmaId → Prop) : Prop :=
+                  ∀ ($sId : $sigmaId), $body))
+              | [a, b] => elabCommand (← `(def $obId ($sigmaId : Type)
+                  ($a $b : $sigmaId → Bool) ($actId : $sigmaId → Prop) : Prop :=
+                  ∀ ($sId : $sigmaId), $body))
+              | [a, b, c] => elabCommand (← `(def $obId ($sigmaId : Type)
+                  ($a $b $c : $sigmaId → Bool) ($actId : $sigmaId → Prop) : Prop :=
+                  ∀ ($sId : $sigmaId), $body))
+              | [a, b, c, d] => elabCommand (← `(def $obId ($sigmaId : Type)
+                  ($a $b $c $d : $sigmaId → Bool) ($actId : $sigmaId → Prop) : Prop :=
+                  ∀ ($sId : $sigmaId), $body))
+              | _ => continue
+              let tick := fun (g : String) => s!"`{g}`"
+              let subLabel := (sub.label.map (String.singleton ·)).getD "?"
+              let posList := String.intercalate ", " (posGuards.toList.map tick)
+              let negList := String.intercalate ", " (negGuards.toList.map tick)
+              let guardWord := if posGuards.size > 1 then "guards" else "guard"
+              addDocStringCore fullName
+                (s!"Sub-step {subLabel} discourse obligation: when the case " ++
+                 s!"{guardWord} {posList} hold" ++
+                 (if negGuards.isEmpty then "" else
+                  s!" and the preceding conditional's guard(s) {negList} do not") ++
+                 s!", the action `{actName}` MUST be taken: \"{sentence}\"")
+              subObSrcs := subObSrcs.push (fullName, sentence)
+          if isIf then prevLocals := locals
       -- Parse algorithm prose with conditional awareness (NLP-driven)
       let env ← getEnv
       let prose := extractAllProse text
@@ -5412,7 +6007,7 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
       let contextTypes := collectContextTypes env ns
       -- Derive properties from grammatical structure
       let mut propIdx : Nat := 0
-      let mut propSrcs : Array (Name × String) := obligationSrcs
+      let mut propSrcs : Array (Name × String) := obligationSrcs ++ subObSrcs
       for (cc, src) in condClauses do
         let propSpec? := deriveAlgorithmProperty cc env ns contextTypes
         if let some (propSpec, guardClause?) := propSpec? then
@@ -5466,7 +6061,7 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
             if !propTerms.isEmpty then
               for propTerm in propTerms do
                 let propName := mkIdent (Name.mkSimple s!"{structName.toLower}_prop_{propIdx}")
-                elabCommand (← `(def $propName : Prop := $propTerm))
+                elabCommand (← `(def $propName := $propTerm))
                 let fullName := ns ++ Name.mkSimple s!"{structName.toLower}_prop_{propIdx}"
                 let fmt ← liftCoreM (ppTerm propTerm)
                 addDocStringCore fullName s!"Algorithm: prop {propIdx}\n```lean\n{fmt.pretty}\n```"
@@ -5713,8 +6308,12 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
         let rId := mkIdent (Name.mkSimple rLetter)
         -- the recursive node type: ⟨labelField⟩ : ByteArray,
         -- ⟨collField⟩ : Array R, children : Array (Node R)
+        -- (constructor ident antiquoted — a literal `mk` inside the
+        -- quotation picks up macro scopes under include_rfc elaboration)
+        let mkId := mkIdent (Name.mkSimple "mk")
+        let mkPat := mkIdent (Name.mkSimple nodeShort ++ Name.mkSimple "mk")
         elabCommand (← `(inductive $nodeId ($rId : Type) where
-          | mk : ByteArray → Array $rId → Array ($nodeId $rId) → $nodeId $rId))
+          | $mkId:ident : ByteArray → Array $rId → Array ($nodeId $rId) → $nodeId $rId))
         addDocStringCore nodeFull
           (s!"A node of the domain name space tree (RFC 1034 §3.1): " ++
            s!"\"{treeSrc}\"\n\nThe term \"{term}\" covers interior nodes and " ++
@@ -5730,19 +6329,22 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
         let collProj := mkIdent (Name.mkSimple nodeShort ++ Name.mkSimple collField)
         let childrenProj := mkIdent (Name.mkSimple nodeShort ++ Name.mkSimple "children")
         elabCommand (← `(def $labelProj {$rId : Type} (n : $nodeId $rId) : ByteArray :=
-          match n with | .mk l _ _ => l))
+          match n with | $mkPat:ident l _ _ => l))
         elabCommand (← `(def $collProj {$rId : Type} (n : $nodeId $rId) : Array $rId :=
-          match n with | .mk _ rs _ => rs))
+          match n with | $mkPat:ident _ rs _ => rs))
         elabCommand (← `(def $childrenProj {$rId : Type} (n : $nodeId $rId)
             : Array ($nodeId $rId) :=
-          match n with | .mk _ _ cs => cs))
-        -- label size bound from the possession relative clause
+          match n with | $mkPat:ident _ _ cs => cs))
+        -- label size bound from the possession relative clause. "Each node"
+        -- ranges over the nodes of THE TREE, not over all values of the
+        -- type, so the prop binds the node — a recursive well-formedness
+        -- closure (Impl-side) applies it to every node actually in a tree.
         if let some (_, hi) := range? then
           let propName := Name.mkSimple s!"{term}_{labelField}_size"
           let propId := mkIdent propName
           let hiLit : TSyntax `term := ⟨Syntax.mkNumLit (toString hi)⟩
-          elabCommand (← `(def $propId ($rId : Type) : Prop :=
-            ∀ (n : $nodeId $rId), ($labelProj n).size ≤ $hiLit))
+          elabCommand (← `(def $propId ($rId : Type) (n : $nodeId $rId) : Prop :=
+            ($labelProj n).size ≤ $hiLit))
           addDocStringCore (ns ++ propName)
             (s!"Label length bound, range read from the relative clause: \"{labelSrc}\"")
           treePropSrcs := treePropSrcs.push (ns ++ propName, labelSrc)
@@ -5758,8 +6360,11 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
                 obj.head.toLower == labelField then
               let propName := Name.mkSimple s!"{term}_brothers_distinct_{labelField}"
               let propId := mkIdent propName
-              elabCommand (← `(def $propId ($rId : Type) : Prop :=
-                ∀ (n : $nodeId $rId) (i j : Fin ($childrenProj n).size),
+              -- "Brother nodes" are children of a common parent — the prop
+              -- binds that parent (a node of the tree, as with the size
+              -- bound above) and quantifies over its child pairs.
+              elabCommand (← `(def $propId ($rId : Type) (n : $nodeId $rId) : Prop :=
+                ∀ (i j : Fin ($childrenProj n).size),
                   i ≠ j →
                     $labelProj (($childrenProj n)[i]) ≠
                     $labelProj (($childrenProj n)[j])))
@@ -7042,6 +7647,7 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
       let ctx : ProseInterpContext := { structName, structIdent, ns }
       let mut propIdx : Nat := 0
       let mut propSrcs : Array (Name × String) := matchObSrcs
+      let mut seenPropTexts : Array String := #[]
       for (spec, localBindings, src) in matchedSpecs do
         -- Merge local bindings with shared bindings (local takes precedence for its own extractions)
         let mut merged := allBindings
@@ -7061,12 +7667,16 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
         -- Skip purely trivial specs (True, ∀ _ True, ¬ True)
         if isPurelyTrivial finalSpec then continue
         let result ← interpretPropSpecForProse finalSpec ctx #[] merged
-        -- Emit prop defs
+        -- Emit prop defs (predicate form), deduplicating identical
+        -- bodies: two sentences matching the same rule with the same
+        -- extracted bound would otherwise emit the same predicate twice
         for propTerm in result.propTerms do
-          let propName := mkIdent (Name.mkSimple s!"{structName.toLower}_prop_{propIdx}")
-          elabCommand (← `(def $propName : Prop := $propTerm))
-          let fullName := ns ++ Name.mkSimple s!"{structName.toLower}_prop_{propIdx}"
           let fmt ← liftCoreM (ppTerm propTerm)
+          if seenPropTexts.contains fmt.pretty then continue
+          seenPropTexts := seenPropTexts.push fmt.pretty
+          let propName := mkIdent (Name.mkSimple s!"{structName.toLower}_prop_{propIdx}")
+          elabCommand (← `(def $propName := $propTerm))
+          let fullName := ns ++ Name.mkSimple s!"{structName.toLower}_prop_{propIdx}"
           addDocStringCore fullName s!"{structName}: prop {propIdx}\n```lean\n{fmt.pretty}\n```"
           propSrcs := propSrcs.push (fullName, src)
           propIdx := propIdx + 1
@@ -7108,6 +7718,9 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
           (s!"Data not `{reqWord}` must not be `{cachWord}` (abstract " ++
            s!"predicates): \"{discardSrc}\"")
         propSrcs := propSrcs.push (fullName, "other than that")
+      -- Conditional no-cache + two-source preference frames (§7.4),
+      -- emitted as parameterized Props (see `emitProseParamProps`)
+      propSrcs := propSrcs ++ (← emitProseParamProps structName ns prose)
       -- Generate numeric constants from extractConstraintValues
       let rawConstraints := extractConstraintValues prose
       for i in [:rawConstraints.size] do

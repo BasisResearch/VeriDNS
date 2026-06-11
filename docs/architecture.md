@@ -200,14 +200,88 @@ Generates structures like `NameSpace { labels : Array ByteArray }` with
 element-level bounds, and transport structures like `UdpUsage { data : ByteArray }`
 with size constraints and cross-spec reference props.
 
+### Predicate emission (no closed ∀ over free structs)
+
+A closed `∀ (msg : Struct), …` Prop over a free generated struct is
+unprovable — any `mk` value refutes it — so EVERY rule-derived prop is
+emitted as a PREDICATE: the interpreters (`interpretPropSpecForField`,
+`interpretPropSpec`, `interpretPropSpecForProse`,
+`interpretPropSpecForAlgorithm`) turn the outer `.forallStruct` /
+`.forallPair` / `.forallNamed(Pair)` quantifiers into LAMBDAS, and the
+emitters drop the `: Prop` ascription, giving `Struct → Prop` (or binary)
+defs that implementations instantiate at the values they construct.
+Identical prop bodies within a section are deduplicated (two sentences
+matching the same rule with the same extracted bound). The
+`domain_name_valid` cross-struct rule additionally turns its `∃ labels`
+(which would be vacuously satisfiable by `#[]`, disconnected from the
+message) into an abstract label-decomposition FUNCTION parameter:
+`format_question_qname_valid (labels : ByteArray → Array ByteArray)
+(msg : Format)`.
+
+Instantiation sites (Proof/): the four `format_*count_counts_*` predicates
+are `decode_encode`'s count hypotheses (Proof/Message.lean), discharged on
+the decode side by `run_decodeMany_size` (Proof/MessageValid.lean);
+`format_question_qname_valid` ← `validQuestions_qname_valid` (labels :=
+the wire-format decoder); `rdlength_prop_0` ← `ResourceRecord.decode_encode`'s
+`hrl`; `udpusage_prop_0/1` ← `truncateUdp_udpusage(_tc)`; `z_prop_0` /
+`aa_prop_0` / `id_prop_1` ← `emitted_z_conforms` / `emitted_aa_conforms` /
+`response_id_conforms`; `algorithm_prop_1` ← `accept_id_conforms`;
+`namespace_prop_0` ← `decodeName_namespace_conforms`; `qr_semantics_0` /
+`rcode_nameError_semantics` / `rcode_serverFailure_semantics` ←
+`server_qr_semantics` / `localAnswer_nameError_semantics` /
+`hygiene_serverFailure`; `tc_semantics_0` ← `truncate_tc_semantics` (the
+oversize condition is genuinely due whenever truncation emits, via
+`truncateUdp_flag_iff`); `Trustworthiness.atLeastAsTrustworthy` is the
+ranking vocabulary of `storeChecked_no_downgrade`'s hypothesis. Still
+uninstantiated: `tcpusage_prop_0` (no TCP framing in Impl — the server is
+UDP-only) and `algorithm_prop_2` (TTL positivity; no impl event enforces
+it). `guard_delegation`/`guardRefined_delegation`/
+`guardRefined_answerOrNameError` are consumed INSIDE the generated
+obligation definitions — a zero-grep-hit guard name is not a bypass.
+
 ### Negation and Disjunction
 
-`PropSpec` supports `.neg` (¬) and `.disj` (∨) constructors for cache-style
-constraints where RFC prose uses negation ("should not be cached", "should
-never be combined") and disjunction ("all or none"). The `ProseClausePattern`
-`requireNegation` flag ensures rules only fire on negated passive clauses
-(where the VP adverb is "not" or "never"). The NLP `Clause.svPassive`
-carries a `negated : Bool` field derived from VP adverb analysis
+`PropSpec` supports `.neg` (¬) and `.disj` (∨) constructors. The
+`ProseClausePattern` `requireNegation` flag ensures rules only fire on
+negated passive clauses (where the VP adverb is "not" or "never"). The NLP
+`Clause.svPassive` carries a `negated : Bool` field derived from VP adverb
+analysis.
+
+**Closed props over free structs are unprovable** — `∀ msg, msg.cacheable
+= 0` is refuted by any `mk 1` value — so negated-prohibition rules
+(`should_not_cache`, `never_combine`, `expired_ignore`) emit only their
+modeling `declField`; the CONSTRAINTS are emitted as parameterized Props
+over abstract predicates (the `discard_unrequested` convention), which
+implementations instantiate:
+
+- **Conditional no-cache frame** (`emitProseParamProps`): a when-clause
+  whose passive participle names the guard + a negated modal over a
+  stateful action verb (closed-class `statefulActionVerbs` lexicon) →
+  `{struct}_{guard}_not_{action}d (κ ρ) (guard : ρ → Bool)
+  (act : κ → ρ → κ) : ∀ c r, guard r = true → act c r = c`
+  (§7.4 truncation → `usingthecache_truncated_not_cached`).
+- **Two-source preference frame** (`emitProseParamProps`): correlative
+  "either ⟨NP⟩ or ⟨NP⟩" + copula + participle names the sources and the
+  kept set (a generic head defers to its in-PP complement: "the data in
+  the response" → `response`); the anaphoric "the two" under a negated
+  modal passive forbids mixing → `{struct}_never_{participle} (ρ)
+  (s₁ s₂ kept : ρ → Prop) : (∀ r, kept r → s₁ r) ∨ (∀ r, kept r → s₂ r)`
+  (§7.4 → `usingthecache_never_combined`).
+- **Glossary discard-old frames** (`inferClassFromClauses` →
+  `ClassSpec.paramProps`, emitted by `generateGlossaryClass`): an
+  ignore/discard verb (possibly the second arm of a "V or V" cluster)
+  whose object NP carries a premodifying adjective and plural head
+  ("ignores or discards OLD RRs") names the guard; each discarding event
+  — the when-clause's in-PP through a transparent noun ("in the COURSE OF
+  a search"; `transparentOf` gained "course") or the during-PP's
+  recurring plural event — yields `cache_{event}_{verb}s_{adj} (ρ)
+  (old p : ρ → Bool) : ∀ r, old r = true → p r = true`
+  (→ `cache_search_ignores_old`, `cache_sweep_discards_old`).
+- **Absolute-time law** (same convert-frame that derives `storeAt`):
+  converting an interval to an absolute time at store time `t` is
+  addition → `cache_storeAt_absolute (κ ρ) (interval : ρ → UInt32)
+  (storeAt : κ → ρ → UInt32 → κ) (holds : κ → ρ → UInt32 → Prop) :
+  ∀ c r t, holds (storeAt c r t) r (t + interval r)`.
 
 ## Example Sentence Analysis
 
@@ -821,12 +895,37 @@ The manual `CacheLookup` class is gone entirely:
   "Negative-Cache Typeclass Generation" below.
 
 `DnsCache` (Impl/Cache.lean) wires the TTL machinery into the instances and
-proves all laws; Proof/Cache.lean adds `store_absolute_expiry` (§6.1.3),
-`lookup_fresh` and `sweep_removes_expired` (§5.3.2 expiry), `store_replaces`
-(§7.4 all-or-none), `truncated_not_cached` (§7.4 partial sets), and
-`accept_discard_unrequested` (instantiating the generated
-`usingthecache_discard_unrequested` from §7.4's "other than that requested ...
-without caching it"). The cache persists across queries: `serveOne` threads
+proves all laws. Every remaining cache constraint in Proof/Cache.lean
+INSTANTIATES a generated parameterized Prop (the
+`usingthecache_discard_unrequested` convention — the generator emits the
+constraint over abstract predicates when it needs projections the Spec
+leaves abstract; hand-written statements survive only as marked membership
+helpers):
+
+- `store_absolute_expiry` instantiates `cache_storeAt_absolute` (§5.3.2
+  "convert the interval ... to some sort of absolute time when the RR is
+  stored" — the same convert-frame that derives `storeAt` also emits the
+  conversion LAW: `holds (storeAt c r t) r (t + interval r)`).
+- `lookup_ignores_old` instantiates `cache_search_ignores_old` (§5.3.2
+  "ignores or discards old RRs ... in the course of a search") against
+  `liveEntry`, the exact per-entry test `DnsCache.lookup` filters by;
+  helper `lookup_fresh` is the membership/remaining-TTL reading.
+- `sweep_discards_old` instantiates `cache_sweep_discards_old` (§5.3.2
+  "discards them during periodic sweeps") against `CacheEntry.fresh`, the
+  exact retention test `DnsCache.sweep` filters by; helper
+  `sweep_removes_expired` is the membership reading.
+- `store_never_combined` instantiates `usingthecache_never_combined`
+  (§7.4 "either the data in the response or the cache is preferred, but
+  the two should never be combined"); helper `store_replaces` carries the
+  membership argument.
+- `truncated_not_cached` instantiates `usingthecache_truncated_not_cached`
+  (§7.4 partial sets: the caching action must be a no-op on truncated
+  data); corollary `truncated_cache_unchanged` is the pointwise equation.
+- `accept_discard_unrequested` instantiates the generated
+  `usingthecache_discard_unrequested` (§7.4 "other than that requested ...
+  without caching it").
+
+The cache persists across queries: `serveOne` threads
 it (final answers stored with TTL at the wall clock from `UdpSocket.now`),
 and `State.now` carries the resolution start time for expiry checks.
 
@@ -1350,6 +1449,124 @@ checking 4c first per the RFC's qualifier:
   is removed (shim-side, §7.2) and the next candidate tried. This also
   fixed a live bug: 4d previously kept `lastResponse`, so an upstream
   SERVFAIL ping-ponged between steps 3 and 4 until fuel ran out.
+
+## Semantic Model: the RFC 1034 §3.1 Name Tree (June 2026)
+
+Everything above constrains the *mechanics* of resolution (wire
+roundtrips, cache laws, step permissions/obligations). The semantic layer
+gives queries their *meaning*: one global tree of labeled nodes, and a
+proof that the resolver can only ever tell the client what that tree
+holds.
+
+### Generated tree model (Spec/NameTree.lean)
+
+`include_rfc [1034][355:371]` runs the new **tree-structure frame** in the
+prose-only path: a copular clause whose object NP is headed "structure"
+with premodifier "tree" defines a recursive node type — the lexical entry
+for "tree" carries the recursive-children semantics, the way time-unit
+nouns carry seconds. The other pieces are read from the surrounding
+clauses (all grammatical, no string anchors):
+
+- term introduction ("uses the term ⟨"node"⟩ to refer to both") names the
+  type from the quoted object head → `inductive Node (R : Type)`;
+- possession ("Each node has a label, which is zero to 63 octets in
+  length") → `label : ByteArray` field + `node_label_size` (the numeral
+  range is parsed from the relative clause). "Each node" ranges over the
+  nodes of THE TREE, not all values of the type, so the prop binds the
+  node (a ∀-over-type reading is provably false — construct a bad value);
+- correspondence ("corresponds to a resource set (which may be empty)")
+  → `resourceSet : Array R` (collection head noun → Array; element
+  premodifier unresolvable → abstract type parameter; the modal relative
+  clause permits emptiness, so no constraint);
+- negated kinship possession ("Brother nodes may not have the same
+  label") → `node_brothers_distinct_label` over one node's child pairs;
+- "null (zero length) label used for the root" (token-level with the
+  parenthetical, like the A=a example rule) → `node_root_label_null`;
+- the path-definition copula → `domainname_labels_on_path`
+  (name = label projection mapped over an abstract root path).
+
+NLP support added for this: coordinated subjects distribute over the
+predicate in `parseClauses` (one clause per conjunct), modal "can",
+subordinator "although", demonstrative subjects ("that is the null
+label"), and an NP-final bare-verb retag ("a resource SET (").
+Constructor idents in generation quotations must be antiquoted
+(`$mkId:ident`) — a literal `mk` picks up macro scopes under
+`include_rfc` elaboration.
+
+### Denotation (Impl/NameTree.lean)
+
+`nodeAt`/`nodeAtName` descend from the root by labels (case-insensitive
+via `foldNameCase`); `treeLookup` is the per-query verdict
+(`Outcome`: answer / nodata / redirect / nameError — NXDOMAIN exactly
+for missing nodes); `treeResolve` adds the §3.6.2 CNAME chase with chain
+accumulation; `WellFormed` is the recursive closure of the generated
+node-local props. `cnameType : BitVec 16 := 5` is a named constant so
+proofs can `rw` across the OfNat/`5#16` literal-form divide.
+
+### §4.3.2 lookup semantics (Spec/ServerAlgorithm.lean)
+
+`include_rfc [1034][1289:1366]` (own namespace `Spec.ServerLookup` — the
+algorithm path's `AlgorithmStep`/`ResponseAction`/`Transition`/`StepSpec`
+names would collide with §5.3.3's). The new **sub-step discourse rule**
+reads each match-termination sub-step as a small discourse: the first
+conditional names the case guard, later conditionals nest inside it,
+"Otherwise" holds in the complement of its predecessor's local guard,
+and each conditional imperative emits one obligation per substantive
+action (discourse verbs — go/exit/look/check/see — oblige nothing).
+Generated: `obligation_copyRRsMatchQTYPE`,
+`obligation_copyCNAMERRIntoAnswerSection`,
+`obligation_changeQNAMEToCanonicalName`,
+`obligation_setAuthoritativeNameErrorInResponse`. A conditional whose
+guard fails to name is skipped WITH its body (an unscoped obligation
+would be overbroad) — §4.3.2's wildcard sentences drop out this way,
+consistent with wildcards being out of scope. Top-level step constructor
+names are deduplicated by the final nominal of the first sentence
+(`startMatchingZone`/`startMatchingCache`). All four obligations are
+PROVEN of `treeLookup` (Proof/NameTree.lean) over the subtype of
+scenarios whose tree honors §3.6.2 CNAME exclusivity.
+
+### The proof layer (Proof/NameTree.lean)
+
+- **Oracle** (`ResponseConsistent`): the WEAKENED honesty assumption —
+  only responses the resolver ACCEPTS are constrained (RFC 5452 matching
+  + connected per-exchange sockets + random IDs keep everything else
+  out): every section RR parses to tree data at its owner (up to TTL —
+  `sameData`), a name error is deserved, answers are RRset-complete.
+- **Tree lemmas**: `treeLookup_nameError_iff` (NXDOMAIN ⟺ missing
+  node), `treeLookup_answer_sound` (answers = the node's records of the
+  queried type), `treeLookup_nodata_sound`.
+- **CI congruence** (`nodeAtName_congrCI`): CI-equal names reach the
+  same node — `EXAMPLE.COM` and `example.com` exist and are absent
+  together. Via fold-commutation through the label decomposition
+  (`wireFormatToLabelsGo_fold_ok`/`_error`; the parse takes identical
+  branches because length bytes ≤ 63 fold to themselves).
+  `wireFormatToLabelsGo`'s guard is now phrased over `wire.data.size` so
+  its index bound proofs are type-correct at instances transparency
+  (rewriting under its `dite`s was impossible before).
+- **Wire fidelity** (`parseRaw_rrBytes_of_wf`): decoded records are
+  `WfRR` (valid name labels + RDLENGTH consistency — `decodeNameAux`
+  only returns 1–63-octet labels) and well-formed records re-encode to
+  bytes that parse back to themselves — cached data is served
+  byte-for-byte honestly.
+- **Cache soundness** (`CacheAgrees`): every positive entry is tree data
+  (and `WfRR`); an NXDOMAIN entry's node is really absent; every
+  negative entry's key really has no data. Preserved by
+  store/storeChecked/storeNegative/sweep/FIFO; `lookup`/
+  `lookupAnswerable` only return tree data;
+  `lookupNegative_deserved` transfers stored deservedness to the queried
+  spelling through the CI congruence.
+- **Resolver soundness** (`StateAgrees` = cache + CNAME chain agree):
+  `stepCheckLocal_sound`, `stepAnalyzeResponse_sound` (all of 4a–4d),
+  `step_sound`, and the headline `resolveLoop_sound` /
+  `resume_sound` / `resolve_sound`: starting from an agreeing cache,
+  with every injected response T-consistent, the resolver only ever
+  completes with answers made of tree data and pauses preserve the
+  invariant. **Semantic non-poisoning**: nothing the tree does not hold
+  can reach the cache or the client.
+
+Remaining (task-tracked): T-derived mock network handlers + `#guard`s in
+Test/Loop, the shim-level composition through `ioResumeLoop`, and the
+completeness direction of `AnswersFromTree`.
 
 ## UDP Server Architecture
 

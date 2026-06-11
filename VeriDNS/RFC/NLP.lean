@@ -261,7 +261,7 @@ private def knownVerbs : Array String :=
     "chosen", "prevent", "tried", "altered",
     "cached", "retrieved", "returned", "resulted",
     "refuse", "add", "encounter", "encounters", "decremented",
-    "compare", "compared"]
+    "compare", "compared", "change", "exit"]
 
 private def knownAdjs : Array String :=
   #["present", "empty", "same", "additional", "optional", "variable",
@@ -279,11 +279,15 @@ private def knownAdjs : Array String :=
     -- (in)sensitivity compounds and their stems (RFC 1035 §2.3.3/§3.1);
     -- '-' is not punctuation, so hyphenated compounds are single tokens
     "case-insensitive", "case-sensitive", "insensitive", "sensitive",
-    "alphabetic", "non-alphabetic"]
+    "alphabetic", "non-alphabetic",
+    -- match-termination guards (RFC 1034 §4.3.2)
+    "impossible", "original", "canonical"]
 
 private def knownAdvs : Array String :=
   #["always", "possibly", "currently", "only", "not", "never", "then",
-    "exactly"]
+    "exactly", "otherwise", "just",
+    -- contracted negated auxiliaries: negation markers on the VP
+    "doesn't", "don't"]
 
 private def knownPreps : Array String :=
   #["in", "of", "for", "to", "from", "with", "toward", "towards",
@@ -313,7 +317,7 @@ private def knownSingularNouns : Array String :=
 private def lexiconLookup (word : String) : POS :=
   let w := word.toLower
   if w == "e.g." || w == "i.e." then .discMarker
-  else if w == "if" || w == "when" then .subConj
+  else if w == "if" || w == "when" || w == "although" then .subConj
   else if knownDeterminers.contains w then .det
   else if knownCopula.contains w then .copula
   else if knownVerbs.contains w then .verb
@@ -377,10 +381,10 @@ private def disambiguate (tokens : Array Token) : Array Token := Id.run do
     if w == "example" && i > 0 && tokens[i - 1]!.word.toLower == "for" then
       result := result.set! (i - 1) { result[i - 1]! with pos := .discMarker }
       result := result.set! i { tokens[i]! with pos := .discMarker }
-    -- "must"/"should"/"may" before copula/verb/adv → retag as adverb (modal
-    -- modifier). "may" marks permission/partiality (RFC 2119-style): e.g.
-    -- "It may be the case that the addresses are not available" (§5.3.3).
-    else if (w == "should" || w == "must" || w == "may") then
+    -- "must"/"should"/"may"/"can" before copula/verb/adv → retag as adverb
+    -- (modal modifier). "may" marks permission/partiality (RFC 2119-style):
+    -- e.g. "It may be the case that the addresses are not available" (§5.3.3).
+    else if (w == "should" || w == "must" || w == "may" || w == "can") then
       if i + 1 < tokens.size then
         let nextPos := result[i + 1]!.pos
         if nextPos == .copula || nextPos == .verb || nextPos == .adv then
@@ -436,6 +440,19 @@ private def disambiguate (tokens : Array Token) : Array Token := Id.run do
         result := result.set! i { tokens[i]! with pos := .adj }
       else
         result := result.set! i { tokens[i]! with pos := .noun }
+    -- bare verb form in NP-final position after a det-initiated singular
+    -- compound ("a resource SET (", "the answer SET .") → noun: after a
+    -- singular subject a finite present verb would carry -s inflection, so
+    -- an uninflected form at a phrase boundary (punct/prep/conj/relPron/end)
+    -- is the compound's head noun, not a verb. Plural-headed compounds are
+    -- excluded — there the bare form IS finite ("the labels compose ...").
+    else if tokens[i]!.pos == .verb && !w.endsWith "s" && !w.endsWith "ed" &&
+            i >= 2 && result[i - 1]!.pos == .noun &&
+            (result[i - 2]!.pos == .det || result[i - 2]!.pos == .adj) &&
+            (i + 1 >= tokens.size ||
+             (let nxt := result[i + 1]!.pos
+              nxt == .punct || nxt == .prep || nxt == .conj || nxt == .relPron)) then
+      result := result.set! i { tokens[i]! with pos := .noun }
     -- "that" after noun or verb → relPron
     else if w == "that" then
       if i > 0 then
@@ -507,6 +524,14 @@ partial def parseNP (tokens : Array Token) (pos : Nat) (absorbPP : Bool := true)
         let number : Number := .unknown
         let postMods : Array PostMod := #[]
         return some (⟨det, preAdjs, head, number, postMods⟩, i)
+    -- Demonstrative pronoun subject: bare "that"/"this" directly before a
+    -- copula is an anaphor standing in for the previous clause's subject
+    -- ("One label is reserved, and THAT IS the null label ...")
+    if preAdjs.isEmpty && i < tokens.size && tokens[i]!.pos == .copula then
+      if let some d := det then
+        let dl := d.toLower
+        if dl == "that" || dl == "this" then
+          return some (⟨none, #[], d, .singular, #[]⟩, i)
     return none
   let mut head := tokens[i]!.word
   let mut number : Number := match tokens[i]!.pos with
@@ -711,37 +736,64 @@ def parseClauses (tokens : Array Token) : Array Clause := Id.run do
 
   let mut clauses : Array Clause := #[]
 
+  -- Helper: build a clause from a parsed subject and the VP start position
+  -- (the SVO / passive / SVAdj / PP-fallback ladder)
+  let ladder := fun (np : NounPhrase) (afterNP : Nat) =>
+      (Id.run do
+    if let some (vp, afterVP) := parseVP filtered afterNP then
+      -- Try SVO
+      if let some (obj, afterObj) := parseNP filtered afterVP (absorbPP := false) then
+        let (pps, _) := parsePPs filtered afterObj
+        return some (Clause.svo np vp obj pps)
+      else if vp.isCopula then
+        -- Try passive: copula + past participle (verb or adj ending in "ed")
+        if afterVP < filtered.size then
+          let nextT := filtered[afterVP]!
+          let isPassiveParticiple := nextT.pos == .verb ||
+            (nextT.pos == .adj && nextT.word.toLower.endsWith "ed")
+          if isPassiveParticiple then
+            let participle := nextT.word
+            let (pps, _) := parsePPs filtered (afterVP + 1)
+            let negated := vp.adv == some "not" || vp.adv == some "never"
+            return some (Clause.svPassive np participle pps negated)
+        -- no passive match → try SVAdj
+        if let some (adjP, afterAdj) := parseAdjP filtered afterVP then
+          let (adjPPs, _) := parsePPs filtered afterAdj
+          return some (Clause.svAdj np vp adjP adjPPs)
+        return none
+      else
+        -- Fallback: NP + VP + PPs (no object, e.g., "depends on X")
+        let (pps, _) := parsePPs filtered afterVP
+        if !pps.isEmpty then
+          let dummyObj : NounPhrase := ⟨none, #[], "", .unknown, #[]⟩
+          return some (Clause.svo np vp dummyObj pps)
+        return none
+    return none : Option Clause)
+
+  -- Helper: a clause with its subject NP replaced (for distributing a
+  -- coordinated subject over the shared predicate)
+  let withSubject := fun (np : NounPhrase) (c : Clause) =>
+    match c with
+    | .svo _ vp obj pps => Clause.svo np vp obj pps
+    | .svAdj _ vp comp pps => Clause.svAdj np vp comp pps
+    | .svPassive _ part pps neg => Clause.svPassive np part pps neg
+    | c => c
+
   -- Helper: try full clause parse from a given start position
   let tryFrom := fun (startPos : Nat)
       (cs : Array Clause) => Id.run do
     let mut result := cs
     if let some (np, afterNP) := parseNP filtered startPos then
-      if let some (vp, afterVP) := parseVP filtered afterNP then
-        -- Try SVO
-        if let some (obj, afterObj) := parseNP filtered afterVP (absorbPP := false) then
-          let (pps, _) := parsePPs filtered afterObj
-          result := result.push (.svo np vp obj pps)
-        else if vp.isCopula then
-          -- Try passive: copula + past participle (verb or adj ending in "ed")
-          if afterVP < filtered.size then
-            let nextT := filtered[afterVP]!
-            let isPassiveParticiple := nextT.pos == .verb ||
-              (nextT.pos == .adj && nextT.word.toLower.endsWith "ed")
-            if isPassiveParticiple then
-              let participle := nextT.word
-              let (pps, _) := parsePPs filtered (afterVP + 1)
-              let negated := vp.adv == some "not" || vp.adv == some "never"
-              result := result.push (.svPassive np participle pps negated)
-          if result.size == cs.size then  -- no passive match → try SVAdj
-            if let some (adjP, afterAdj) := parseAdjP filtered afterVP then
-              let (adjPPs, _) := parsePPs filtered afterAdj
-              result := result.push (.svAdj np vp adjP adjPPs)
-        else
-          -- Fallback: NP + VP + PPs (no object, e.g., "depends on X")
-          let (pps, _) := parsePPs filtered afterVP
-          if !pps.isEmpty then
-            let dummyObj : NounPhrase := ⟨none, #[], "", .unknown, #[]⟩
-            result := result.push (.svo np vp dummyObj pps)
+      if let some c := ladder np afterNP then
+        result := result.push c
+      -- Coordinated subject ("Each node and leaf on the tree corresponds
+      -- ..."): NP₁ + conj + NP₂ + VP → the shared predicate distributes,
+      -- one clause per conjunct subject
+      else if afterNP < filtered.size && filtered[afterNP]!.pos == .conj then
+        if let some (np2, afterNP2) := parseNP filtered (afterNP + 1) then
+          if let some c2 := ladder np2 afterNP2 then
+            result := result.push (withSubject np c2)
+            result := result.push c2
     return result
 
   -- Try from position 0 (handles sentences starting without a determiner)

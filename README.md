@@ -53,6 +53,22 @@ The resolver is a recursive UDP server, and the properties below are
 proven about its core implementation, each instantiating a spec
 generated via symbolic NLP on the RFC prose.
 
+- **Semantic correctness against the name tree.** RFC 1034 §3.1's "The
+  domain name space is a tree structure" generates a recursive node
+  model (labels ≤ 63 octets, distinct brother labels, the null root
+  label, names as label paths), and §4.3.2's match-down algorithm
+  generates the lookup obligations: whole-QNAME match → exactly the
+  records of the queried type, CNAME at the node → restart at the
+  canonical name, missing label → authoritative name error. A
+  denotational `treeLookup` is proven against all of them — NXDOMAIN is
+  the verdict *exactly* for missing nodes, and case-insensitively so
+  (`EXAMPLE.COM` and `example.com` reach the same node, exist together,
+  and are absent together). On top of it, semantic non-poisoning: under
+  the honesty oracle (only *accepted* responses need be consistent with
+  the tree — RFC 5452 matching keeps everything else out), the cache is
+  a sound partial view of the tree and the resolver can only ever tell
+  the client what the tree actually holds, through every cache hit,
+  CNAME chase, and delegation.
 - **Wire safety.** `decodeName` has machine-checked bounds on
   arbitrary input bytes; compression-pointer loops
   terminate. Malformed packets produce FORMERR, never a crash (RFC

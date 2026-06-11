@@ -106,6 +106,46 @@ theorem truncateUdp_size (encoded : ByteArray) (msg : Format) :
       · exact Or.inl h3
       · exact Or.inr rfl
 
+/-- The generated `udpusage_prop_0` ("UDP messages are restricted to 512
+    octets") instantiated at the truncation loop's output: the datagram
+    the server sends is within the limit, unless it is the final
+    header+question form (whose size is bounded by the client's own
+    ≤512-byte query, not by the response). -/
+theorem truncateUdp_udpusage (encoded : ByteArray) (msg : Format) :
+    udpusage_prop_0 ⟨(truncateUdp encoded msg).1⟩ ∨
+    (truncateUdp encoded msg).1 = VeriDNS.Impl.Message.encode
+      { msg with
+        header := { msg.header with tc := 1, arcount := 0, nscount := 0, ancount := 0 }
+        answer := #[], authority := #[], additional := #[] } :=
+  truncateUdp_size encoded msg
+
+/-- The generated `udpusage_prop_1` (a message longer than 512 octets ⇒
+    "the TC bit is set in the header") instantiated at truncation: when
+    the encoding exceeds the limit, the message actually sent carries
+    TC = 1 in its header. -/
+theorem truncateUdp_udpusage_tc (encoded : ByteArray) (msg : Format)
+    (h : ¬ encoded.size ≤ 512) :
+    ∃ m : Format, truncateUdp encoded msg = (VeriDNS.Impl.Message.encode m, true) ∧
+      udpusage_prop_1 ⟨encoded⟩ m.header := by
+  obtain ⟨m, heq, htc, -, -, -, -⟩ := truncateUdp_truncated encoded msg h
+  exact ⟨m, heq, fun _ => htc⟩
+
+/-- The generated `tc_semantics_0` ("specifies that this message was
+    truncated due to length greater than that permitted on the
+    transmission channel") instantiated at the truncation event: among
+    headers truncation actually emitted (flag reported true), the
+    oversize condition was genuinely due — via `truncateUdp_flag_iff`. -/
+theorem truncate_tc_semantics (encoded : ByteArray) (msg : Format) :
+    tc_semantics_0
+      (fun h => ∃ m : Format,
+        truncateUdp encoded msg = (VeriDNS.Impl.Message.encode m, true) ∧
+        h = m.header)
+      (decide (512 < encoded.size)) := by
+  rintro h ⟨m, heq, rfl⟩ _
+  have hflag : (truncateUdp encoded msg).2 = true := by rw [heq]
+  have hgt := (truncateUdp_flag_iff encoded msg).mp hflag
+  simpa using hgt
+
 -- ============================================================
 -- Flag hygiene: the server satisfies the NLP-generated complement
 -- semantics for AA and RA (Spec/Header.lean §4.1.1)
@@ -150,6 +190,37 @@ theorem server_aa_semantics : aa_semantics_0 emittedHeader false := by
   obtain ⟨resp, rfl⟩ := hem
   rw [finalizeForClient_aa resp] at haa
   exact absurd haa (by decide)
+
+/-- qr_semantics_0 ("specifies whether this message is a query (0), or a
+    response (1)") instantiated over emitted headers with the QR = 1
+    polarity: everything this server sends a client is of the QR = 1 kind
+    (a response) — `finalizeForClient` forces the bit. -/
+theorem server_qr_semantics : qr_semantics_0 emittedHeader true := by
+  intro h hem
+  obtain ⟨resp, rfl⟩ := hem
+  exact ⟨fun _ => rfl, fun _ => finalizeForClient_qr resp⟩
+
+/-- Every emitted header satisfies the generated `z_prop_0` (Z "must be
+    zero in all queries and responses"). -/
+theorem emitted_z_conforms (resp : Format) :
+    z_prop_0 (finalizeForClient resp).header :=
+  finalizeForClient_z resp
+
+/-- Every emitted header satisfies the generated `aa_prop_0` (AA is
+    meaningful only in responses: a query-flagged header carries AA = 0)
+    — emitted headers carry AA = 0 outright. -/
+theorem emitted_aa_conforms (resp : Format) :
+    aa_prop_0 (finalizeForClient resp).header :=
+  fun _ => finalizeForClient_aa resp
+
+/-- The generated `id_prop_1` ("this identifier is copied [into] the
+    corresponding reply"): the client's query and the response `serveOne`
+    sends back (upstream ID restored, then finalized) share the ID. -/
+theorem response_id_conforms (query resp0 : Format) :
+    id_prop_1 query.header
+      (finalizeForClient
+        { resp0 with header := { resp0.header with id := query.header.id } }).header :=
+  fun _ => (finalizeForClient_id _).symm
 
 -- ============================================================
 -- Glueless NS: the SLIST satisfies the NLP-generated recommendation
@@ -218,6 +289,16 @@ theorem acceptResponse_matches (sent resp r : Format)
     subst heq
     simpa [Bool.and_eq_true] using hcond
   · exact absurd h (by simp)
+
+/-- The generated `algorithm_prop_1` (a reply and the query it answers
+    share the ID) instantiated at the §9.1 acceptance gate: any reply the
+    gate accepts has the sent query's header ID. -/
+theorem accept_id_conforms (sent resp r : Format)
+    (h : acceptResponse sent resp = some r) :
+    algorithm_prop_1 r.header sent.header := by
+  intro _
+  have hid := (acceptResponse_matches sent resp r h).1
+  simpa using hid
 
 /-- Every datagram the §9.1 gate accepts satisfies all three
     source/destination matchers: source = the queried server (address and
@@ -347,6 +428,28 @@ theorem hygiene_refused :
   unfold queryProblem
   rw [hq, hs, h']
   rfl
+
+/-- `serveOne`'s fallback satisfies the generated
+    `rcode_serverFailure_semantics` ("The name server was unable to
+    process this query due to a problem with the name server"):
+    σ is the resolution outcome, and when it is not `.ok`
+    (`Except.isOk = false`), the response built for the client — the
+    exact fallback expression `serveOne` uses — carries SERVFAIL. -/
+theorem hygiene_serverFailure (query : Format) :
+    rcode_serverFailure_semantics (Except String Format)
+      (fun r => r.isOk)
+      (fun r => (match r with
+        | .ok resp => resp
+        | .error _ => buildErrorResponse query .serverFailure).header.rcode
+          = Rcode.serverFailure) := by
+  intro r hfail
+  match r with
+  | .ok _ => exact absurd (show (true : Bool) = false from hfail) (by decide)
+  | .error _ =>
+    show (buildErrorResponse query .serverFailure).header.rcode
+      = Rcode.serverFailure
+    unfold buildErrorResponse
+    exact buildResponse_sets_rcode query .serverFailure #[] #[] #[]
 
 -- ============================================================
 -- RFC 2308 §5: negative-TTL cap

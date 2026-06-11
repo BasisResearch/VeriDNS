@@ -69,8 +69,9 @@ private theorem wireFormatToLabelsGo_prepend (pre : ByteArray) (ls : List ByteAr
     have hsz1 : (⟨#[0]⟩ : ByteArray).size = 1 := by decide
     have hlt : pre.size < (pre ++ (⟨#[0]⟩ : ByteArray)).size := by
       rw [ByteArray.size_append, hsz1]; omega
-    simp only [dif_pos hlt]
-    have hbyte : (pre ++ (⟨#[0]⟩ : ByteArray)).data[pre.size]'hlt = (0 : UInt8) := by
+    have hltd : pre.size < (pre ++ (⟨#[0]⟩ : ByteArray)).data.size := hlt
+    simp only [dif_pos hltd]
+    have hbyte : (pre ++ (⟨#[0]⟩ : ByteArray)).data[pre.size]'hltd = (0 : UInt8) := by
       simp only [ByteArray.data_append]
       rw [Array.getElem_append_right (show pre.data.size ≤ pre.size from by
         simp [ByteArray.size_data])]
@@ -87,10 +88,13 @@ private theorem wireFormatToLabelsGo_prepend (pre : ByteArray) (ls : List ByteAr
         (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++
           labelsToWireFormatGo rest)).size := by
       simp [ByteArray.size_append, ByteArray.size_push]; omega
-    simp only [dif_pos hlt]
+    have hltd : pre.size <
+        (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++
+          labelsToWireFormatGo rest)).data.size := hlt
+    simp only [dif_pos hltd]
     -- Byte at pre.size is l.size
     have hbyte : ((pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++
-        labelsToWireFormatGo rest)).data[pre.size]'hlt).toNat = l.size := by
+        labelsToWireFormatGo rest)).data[pre.size]'hltd).toNat = l.size := by
       simp only [ByteArray.data_append, ByteArray.data_push, ByteArray.data_empty]
       show (pre.data ++ (#[l.size.toUInt8] ++ l.data ++
         (labelsToWireFormatGo rest).data))[pre.size].toNat = l.size
@@ -541,6 +545,19 @@ theorem decodeName_adversarial_bounds (buf : ByteArray) (pos : Nat)
     obtain ⟨rfl, rfl⟩ := Prod.mk.injEq .. ▸ hpair
     exact decodeNameAux_adversarial_bounds _ _ _ _ (by simp) _ _ hrec
   · simp at h
+
+open VeriDNS.Impl VeriDNS.Spec in
+/-- The generated `namespace_prop_0` (every label within the §2.3.4 size
+    limits) instantiated at the decoder's output: any label array
+    `decodeName` produces — even on adversarial input — satisfies it,
+    since each decoded label is at most 63 octets. -/
+theorem decodeName_namespace_conforms (buf : ByteArray) (pos : Nat)
+    (labels : Array ByteArray) (endPos : Nat)
+    (h : DnsParser.run decodeName buf pos = .ok (labels, endPos)) :
+    namespace_prop_0 ⟨labels⟩ := by
+  intro l hl
+  have hb := (decodeName_adversarial_bounds buf pos labels endPos h).2.1 l hl
+  omega
 
 -- ============================================================
 -- RFC 1035 §3.1: case-insensitive comparison conformance

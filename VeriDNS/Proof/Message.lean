@@ -398,18 +398,24 @@ private theorem rrpairs_frame (rrs : Array ByteArray) (hv : ValidRRBytes rrs) :
 
 set_option maxHeartbeats 3200000 in
 /-- Full message roundtrip: decode ∘ encode = id, given count fields match
-    section sizes, questions have valid domain names, and RR byte sequences
-    are canonical wire format. -/
+    section sizes — each stated as its generated count predicate
+    (`format_qdcount_counts_question` etc., from the §4.1 "specifying the
+    number of entries" field descriptions) — questions have valid domain
+    names, and RR byte sequences are canonical wire format. -/
 theorem decode_encode (msg : Format)
-    (hqd : msg.header.qdcount.toNat = msg.question.size)
-    (han : msg.header.ancount.toNat = msg.answer.size)
-    (hns : msg.header.nscount.toNat = msg.authority.size)
-    (har : msg.header.arcount.toNat = msg.additional.size)
+    (hqd : format_qdcount_counts_question msg)
+    (han : format_ancount_counts_answer msg)
+    (hns : format_nscount_counts_authority msg)
+    (har : format_arcount_counts_additional msg)
     (hvq : ValidQuestions msg.question)
     (hva : ValidRRBytes msg.answer)
     (hvn : ValidRRBytes msg.authority)
     (hvd : ValidRRBytes msg.additional) :
     Impl.Message.decode (Impl.Message.encode msg) = .ok msg := by
+  have hqd : msg.header.qdcount.toNat = msg.question.size := hqd
+  have han : msg.header.ancount.toNat = msg.answer.size := han
+  have hns : msg.header.nscount.toNat = msg.authority.size := hns
+  have har : msg.header.arcount.toNat = msg.additional.size := har
   -- Section encodings
   have hQ : DnsParser.run
       (Impl.Message.decodeMany Question.decode msg.question.size #[])
@@ -511,5 +517,26 @@ theorem decode_encode (msg : Format)
   simp only []
   rw [har, hD]
   simp only [Primitives.run_pure]
+
+/-- `ValidQuestions` discharges the generated `format_question_qname_valid`
+    (qname "a domain name represented as a sequence of labels", each label
+    1–63 octets), with the abstract label decomposition instantiated by the
+    wire-format decoder: every question's qname decodes to labels within
+    the RFC 1035 §2.3.1 bounds. -/
+theorem validQuestions_qname_valid (msg : Format)
+    (hvq : ValidQuestions msg.question) :
+    format_question_qname_valid
+      (fun b => (Impl.DomainName.wireFormatToLabels b).toOption.getD #[]) msg := by
+  intro i hi l hl
+  simp only [] at hl
+  have hval := hvq.valid ⟨i, hi⟩
+  have hcorr : Impl.DomainName.labelsToWireFormat (hvq.labels ⟨i, hi⟩)
+      = msg.question[i].qname := by
+    simpa using hvq.corresponds ⟨i, hi⟩
+  rw [← hcorr, DomainName.wireFormat_roundtrip _ hval] at hl
+  simp only [Except.toOption, Option.getD_some] at hl
+  obtain ⟨j, hj, hjl⟩ := Array.getElem_of_mem hl
+  rw [← hjl]
+  exact hval j hj
 
 end VeriDNS.Proof.Message

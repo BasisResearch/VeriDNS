@@ -98,7 +98,10 @@ def labelsToWireFormat (labels : Array ByteArray) : ByteArray :=
 /-- Recursive helper: parse wire-format bytes into labels starting at `pos`. -/
 def wireFormatToLabelsGo (wire : ByteArray) (pos : Nat)
     : Except String (List ByteArray) :=
-  if h : pos < wire.size then
+  -- the guard is phrased over `wire.data.size` (definitionally `wire.size`)
+  -- so the index's bound proof is type-correct at instances transparency —
+  -- proofs about this function rewrite under its `dite`s
+  if h : pos < wire.data.size then
     let len := wire.data[pos]'h |>.toNat
     if hlen : len = 0 then .ok []
     else if _ : len > 63 then .error s!"wireFormatToLabels: label length {len} > 63"

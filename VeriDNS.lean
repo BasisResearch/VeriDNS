@@ -17,6 +17,8 @@ import VeriDNS.Spec.Resolver
 import VeriDNS.Spec.Server
 import VeriDNS.Spec.Resilience
 import VeriDNS.Spec.NegativeCache
+import VeriDNS.Spec.NameTree
+import VeriDNS.Spec.ServerAlgorithm
 import VeriDNS.Impl.Parsec
 import VeriDNS.Impl.BitPacking
 import VeriDNS.Impl.Enum

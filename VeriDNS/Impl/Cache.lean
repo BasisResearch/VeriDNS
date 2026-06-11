@@ -26,6 +26,15 @@ structure CacheEntry where
   credibility : Trustworthiness := .additionalAuthoritative
   deriving Inhabited
 
+/-- Per-entry freshness (RFC 1034 §5.3.2): an entry whose absolute expiry
+    has passed is "old". Single source of truth for the freshness
+    discipline — `lookup` (via `liveEntry`) and `sweep` filter through it,
+    and its negation instantiates `old` in the generated
+    `cache_search_ignores_old` / `cache_sweep_discards_old`
+    (Proof/Cache.lean). -/
+def CacheEntry.fresh (e : CacheEntry) (now : UInt32) : Bool :=
+  e.expiry > now
+
 /-- RFC 2308: a cached negative answer for (name, qtype, qclass). `soa` is
     the SOA record that carried the negative TTL (§6: it MUST be added to
     the authority section when the entry answers a query, TTL decremented);
@@ -124,6 +133,15 @@ def DnsCache.lookupNegative (c : DnsCache) (name : ByteArray) (qtype qclass : Bi
         some e.rcode
       else none
 
+/-- The per-entry search test (RFC 1034 §5.3.2): key match AND fresh.
+    Single source of truth — `lookup` filters by it, and its negation
+    instantiates `ignored` in the generated `cache_search_ignores_old`
+    (an old entry never passes; Proof/Cache.lean `lookup_ignores_old`). -/
+def liveEntry (e : CacheEntry) (name : ByteArray) (qtype qclass : BitVec 16)
+    (now : UInt32) : Bool :=
+  nameEqCI e.rr.name name && e.rr.type == qtype && e.rr.class == qclass
+    && e.fresh now
+
 /-- Lookup RRs by name+type+class, excluding expired entries. Returned RRs
     carry the REMAINING TTL (expiry − now): a cached RR passed on to a client
     must not restart its lifetime (RFC 1035 §6.1.3 absolute-expiry
@@ -137,7 +155,7 @@ def DnsCache.lookupNegative (c : DnsCache) (name : ByteArray) (qtype qclass : Bi
 def DnsCache.lookup (c : DnsCache) (name : ByteArray) (qtype qclass : BitVec 16) (now : UInt32)
     : Array ResourceRecord :=
   c.records.filterMap fun e =>
-    if nameEqCI e.rr.name name && e.rr.type == qtype && e.rr.class == qclass && e.expiry > now then
+    if liveEntry e name qtype qclass now then
       some { e.rr with ttl := BitVec.ofNat 32 (e.expiry - now).toNat }
     else
       none
@@ -148,8 +166,8 @@ def DnsCache.lookup (c : DnsCache) (name : ByteArray) (qtype qclass : BitVec 16)
     generated `obligation_untrustworthyNotAnswerable`. -/
 def answerableEntry (e : CacheEntry) (name : ByteArray) (qtype qclass : BitVec 16)
     (now : UInt32) : Bool :=
-  nameEqCI e.rr.name name && e.rr.type == qtype && e.rr.class == qclass
-    && e.expiry > now && e.credibility.toCode < untrustworthyFloor
+  liveEntry e name qtype qclass now
+    && e.credibility.toCode < untrustworthyFloor
 
 /-- Lookup for the CLIENT ANSWER path (RFC 1034 §5.3.3 step 1): like
     `lookup`, but EXCLUDES entries at the untrustworthy floor. RFC 2181
@@ -195,9 +213,12 @@ def DnsCache.lookupNegativeSoa (c : DnsCache) (name : ByteArray) (qtype qclass :
   | some e => e.authority now
   | none => #[]
 
-/-- Remove expired entries (positive and negative). -/
+/-- Remove expired entries (positive and negative). The positive
+    section's retention test is exactly `CacheEntry.fresh` — the
+    generated `cache_sweep_discards_old` is instantiated against it
+    (Proof/Cache.lean `sweep_discards_old`). -/
 def DnsCache.sweep (c : DnsCache) (now : UInt32) : DnsCache :=
-  { records := c.records.filter fun e => e.expiry > now
+  { records := c.records.filter fun e => e.fresh now
     negatives := c.negatives.filter fun e => e.expiry > now }
 
 theorem mem_of_mem_boundFifo {α : Type} {a : Array α} {x : α}
@@ -262,7 +283,7 @@ instance : NegativeAuthoritySpec DnsCache ResourceRecord where
   storeSoaRecord := DnsCache.setNegativeSoa
   authoritySection := DnsCache.lookupNegativeSoa
 
-instance : RRParse ResourceRecord where
+instance instRRParseResourceRecord : RRParse ResourceRecord where
   parseRaw bytes := match DnsParser.run VeriDNS.Impl.ResourceRecord.decode bytes with
     | .ok (rr, _) => some rr | .error _ => none
   rrType rr := rr.type

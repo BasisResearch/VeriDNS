@@ -830,10 +830,20 @@ theorem decode_encode_of_decode {buf : ByteArray} {msg : Format}
     intro α P x hx
     simp at hx
   refine decode_encode _ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
-  · simpa using (run_decodeMany_size Question.decode _ _ _ _ _ _ hqs).symm
-  · simpa using (run_decodeMany_size Impl.Message.decodeRRCanonical _ _ _ _ _ _ hans).symm
-  · simpa using (run_decodeMany_size Impl.Message.decodeRRCanonical _ _ _ _ _ _ hauth).symm
-  · simpa using (run_decodeMany_size Impl.Message.decodeRRCanonical _ _ _ _ _ _ hadd).symm
+  -- the four generated count predicates unfold definitionally to the
+  -- decodeMany size equations
+  · have h : hdr.qdcount.toNat = qs.size := by
+      simpa using (run_decodeMany_size Question.decode _ _ _ _ _ _ hqs).symm
+    exact h
+  · have h : hdr.ancount.toNat = ans.size := by
+      simpa using (run_decodeMany_size Impl.Message.decodeRRCanonical _ _ _ _ _ _ hans).symm
+    exact h
+  · have h : hdr.nscount.toNat = auth.size := by
+      simpa using (run_decodeMany_size Impl.Message.decodeRRCanonical _ _ _ _ _ _ hauth).symm
+    exact h
+  · have h : hdr.arcount.toNat = add.size := by
+      simpa using (run_decodeMany_size Impl.Message.decodeRRCanonical _ _ _ _ _ _ hadd).symm
+    exact h
   · exact validQuestionsOfForall (fun i =>
       run_decodeMany_mem QuestionFromLabels Question.decode
         (fun hq => run_questionDecode_valid hq) _ _ _ _ _ _ hqs

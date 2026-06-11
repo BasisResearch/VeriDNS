@@ -746,6 +746,34 @@ theorem impl_obligation_checkAnswer :
       rw [hla]
       exact ⟨_, rfl⟩
 
+private theorem optRcode_eq_of_beq {a : Option Rcode}
+    (h : (a == some Rcode.nameError) = true) : a = some Rcode.nameError := by
+  cases a with
+  | none => exact absurd h (by decide)
+  | some rc => cases rc <;> first | rfl | exact absurd h (by decide)
+
+/-- Step 1's cache consultation satisfies the generated
+    `rcode_nameError_semantics` ("this code signifies that the domain name
+    referenced in the query does not exist"): nonexistence knowledge is a
+    fresh cached NXDOMAIN (RFC 2308), and whenever it is present
+    (`exist = false`) the local answer is a `.negative` carrying
+    nameError with its §6 SOA authority section. -/
+theorem localAnswer_nameError_semantics (qtype qclass : BitVec 16)
+    (now : UInt32) (fuel : Nat) (chain : Array ByteArray) :
+    rcode_nameError_semantics (C × ByteArray)
+      (fun p => !(NegativeCacheSpec.retrieveNegative p.1 p.2 qtype qclass now
+        == some Rcode.nameError))
+      (fun p => localAnswer (RR := RR) p.1 qtype qclass now (fuel + 1) p.2 chain
+        = .negative Rcode.nameError
+            (NegativeAuthoritySpec.authoritySection p.1 p.2 qtype qclass now)) := by
+  intro p h
+  have hb : (NegativeCacheSpec.retrieveNegative p.1 p.2 qtype qclass now
+      == some Rcode.nameError) = true := by
+    simpa using h
+  have heq := optRcode_eq_of_beq hb
+  unfold localAnswer
+  rw [heq]
+
 -- ============================================================
 -- Loop trace soundness (uses step_implies_spec)
 -- ============================================================
