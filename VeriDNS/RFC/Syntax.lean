@@ -135,6 +135,22 @@ private def stripPlural (w : String) : String :=
   else if s.endsWith "s" && !s.endsWith "ss" && s.length > 2 then dropLast s 1
   else s
 
+/-- e-final verb roots, whose past participle adds bare "-d"
+    ("cached" → "cache"). Morphological lexicon for participle stemming. -/
+private def eFinalVerbRoots : Array String :=
+  #["cache", "retrieve", "store", "locate", "ignore", "include", "require",
+    "release", "update", "combine", "remove", "receive", "serve", "use"]
+
+/-- Stem an "-ed" past participle to its verb root: "stored" → "store",
+    "returned" → "return", "cached" → "cache", "tried" → "try". -/
+private def participleStem (w : String) : String :=
+  let v := w.toLower
+  if v.endsWith "ied" && v.length > 4 then dropLast v 3 ++ "y"
+  else if v.endsWith "ed" && v.length > 3 then
+    let bare := dropLast v 2
+    if eFinalVerbRoots.contains (bare ++ "e") then bare ++ "e" else bare
+  else v
+
 private def capitalize (s : String) : String :=
   match s.toList with
   | [] => ""
@@ -811,6 +827,22 @@ structure ClassSpec where
   axioms : Array AxiomSpec
   deriving Repr, Inhabited
 
+/-- Transparent nouns defer to their "of" complement: "the EQUIVALENT of
+    a zone name" denotes a zone name, "some SORT OF absolute time" a
+    time. Returns the effective NPData when the head is transparent and
+    an of-complement exists. -/
+private def transparentOf (np : NLP.NounPhrase)
+    (pps : Array NLP.PrepPhrase := #[]) : Option NLP.NPData :=
+  if #["equivalent", "sort", "kind"].contains np.head.toLower then
+    (np.postMods.findSome? fun pm => match pm with
+      | .pp "of" npd => some npd
+      | _ => none) <|>
+    -- at clause level the complement may sit in the clause's PPs rather
+    -- than the object's postmodifiers
+    (pps.findSome? fun pp =>
+      if pp.prep == "of" then some pp.np.toData else none)
+  else none
+
 /-- Derive a method name from a verb and optional object.
     Multi-word idioms like "keeps" + "track" → "keepTrack". -/
 private def deriveMethodName (verb : String) (objHead : String) : String :=
@@ -826,7 +858,6 @@ private def deriveMethodName (verb : String) (objHead : String) : String :=
     else v
   -- Multi-word idiom detection: "keeps track" → "keepTrack"
   if (stem == "keep" || v == "keeps") && objHead.toLower == "track" then "keepTrack"
-  else if (stem == "include" || v == "includes") && objHead.toLower == "equivalent" then "zoneName"
   else stem
 
 /-- Resolve a noun phrase head to a type. Returns (typeName, isAbstract).
@@ -849,7 +880,7 @@ private def resolveNPType (head : String) (preAdjs : Array String)
   if h == "count" || h == "number" then return ("Nat", false)
   if h == "zone" then return ("ByteArray", false)
   if h == "guess" || h == "information" || h == "history" then return ("ByteArray", false)
-  if h == "track" || h == "equivalent" || h == "form" || h == "time" then return ("ByteArray", false)
+  if h == "track" || h == "form" || h == "time" then return ("ByteArray", false)
   if h == "match" then return ("Nat", false)
   -- Abstract: introduce type parameter
   let singularHead := if h.endsWith "s" && !h.endsWith "ss" then h.dropRight 1 else h
@@ -910,8 +941,21 @@ private def inferClassFromClauses (entryName : String) (clauses : Array NLP.Clau
               if vp.isCopula then continue
               -- Skip empty object heads
               if obj.head.isEmpty then continue
-              let methodName := deriveMethodName vp.verb obj.head
-              let (objTypeName, isAbstract) := resolveNPType obj.head obj.preAdjs obj.number env ns
+              -- Transparent-noun objects defer to their of-complement:
+              -- the method is named by the effective NP and typed from
+              -- its head ("includes the equivalent of a zone name" →
+              -- zoneName : ByteArray)
+              let (methodName, objTypeName, isAbstract, objNumber) :
+                  String × String × Bool × NLP.Number :=
+                match transparentOf obj pps with
+                | some eff =>
+                  let nm := toCamelCase
+                    ((eff.preAdjs.toList ++ [eff.head]).map (fun (w : String) => w.toLower))
+                  let (t, a) := resolveNPType eff.head eff.preAdjs eff.number env ns
+                  (nm, t, a, eff.number)
+                | none =>
+                  let (t, a) := resolveNPType obj.head obj.preAdjs obj.number env ns
+                  (deriveMethodName vp.verb obj.head, t, a, obj.number)
               -- Check if verb modifies Self: PP references the structure, OR verb is inherently state-modifying
               let verbIsStateful := let v := vp.verb.toLower
                 v == "stores" || v == "store" || v == "discard" || v == "discards" ||
@@ -935,7 +979,7 @@ private def inferClassFromClauses (entryName : String) (clauses : Array NLP.Clau
                     let (accessorName, _predicateDesc) := parseWhoseClause relText
                     predicates := predicates.push ⟨accessorName, objTypeName, "Nat", relText⟩
                 | _ => pure ()
-              let isPlural := obj.number == .plural
+              let isPlural := objNumber == .plural
               methods := methods.push ⟨methodName,
                 #[(objTypeName, isAbstract)], returnsSelf,
                 if returnsSelf then none
@@ -974,8 +1018,18 @@ private def inferClassFromClauses (entryName : String) (clauses : Array NLP.Clau
     | .svo _subj vp obj pps =>
       if vp.isCopula then continue
       if obj.head.isEmpty then continue
-      let methodName := deriveMethodName vp.verb obj.head
-      let (objTypeName, isAbstract) := resolveNPType obj.head obj.preAdjs obj.number env ns
+      -- Transparent-noun objects defer to their of-complement (see the
+      -- relClause branch above)
+      let (methodName, objTypeName, isAbstract) : String × String × Bool :=
+        match transparentOf obj pps with
+        | some eff =>
+          let nm := toCamelCase
+            ((eff.preAdjs.toList ++ [eff.head]).map (fun (w : String) => w.toLower))
+          let (t, a) := resolveNPType eff.head eff.preAdjs eff.number env ns
+          (nm, t, a)
+        | none =>
+          let (t, a) := resolveNPType obj.head obj.preAdjs obj.number env ns
+          (deriveMethodName vp.verb obj.head, t, a)
       let verbIsStateful' := let v := vp.verb.toLower
         v == "stores" || v == "store" || v == "discard" || v == "discards" ||
         v == "add" || v == "adds" || v == "update" || v == "updates"
@@ -1015,29 +1069,61 @@ private def inferClassFromClauses (entryName : String) (clauses : Array NLP.Clau
       deduped := deduped.push m
   methods := deduped
 
-  -- Temporal store derivation (e.g. §5.3.2 CACHE: "convert the interval
-  -- specified in arriving RRs to some sort of absolute time when the RR is
-  -- stored"): the store operation additionally takes an absolute time.
-  let rawLower := rawText.toLower
-  let sentenceContaining (marker : String) : String :=
-    (Property.splitSentences rawText).find? (fun s => hasSub s.toLower marker)
-      |>.getD marker
-  if hasSub rawLower "absolute time" && hasSub rawLower "stored" then
-    if let some storeM := methods.find? (·.name == "store") then
-      unless methods.any (·.name == "storeAt") do
-        methods := methods.push { storeM with
-          name := "storeAt"
-          args := storeM.args.push ("UInt32", false)
-          sourceClause := sentenceContaining "absolute time" }
-  -- Periodic sweep derivation ("discards them during periodic sweeps to
-  -- reclaim the memory consumed by old RRs"): a time-indexed sweep that only
-  -- removes entries (sweep_subset law).
-  if hasSub rawLower "periodic sweep" then
-    unless methods.any (·.name == "sweep") do
-      methods := methods.push ⟨"sweep", #[("UInt32", false)], true, none,
-        sentenceContaining "periodic sweep"⟩
-      axioms := axioms.push ⟨"sweep_subset",
-        "sweep only discards entries (no additions)", "sweep", some "entries"⟩
+  -- Temporal store derivation (§5.3.2 CACHE: "convert the interval
+  -- specified in arriving RRs to some sort of absolute time when the RR
+  -- is stored"). The frame is parsed: the verb "convert" with a "to"-PP
+  -- whose NP — resolved through the transparent noun ("some SORT OF
+  -- absolute time") — is headed "time" with the premodifier "absolute",
+  -- plus a when-clause whose passive participle stems to an existing
+  -- Self-returning method: that method gains a time-indexed variant
+  -- (suffix "At", UInt32 absolute seconds).
+  -- Periodic-event derivation ("discards them during periodic sweeps to
+  -- reclaim the memory ..."): a discarding verb with an anaphoric object
+  -- and a "during"-PP naming a recurring plural event — the event head
+  -- names a time-indexed Self-returning operation whose law is
+  -- removal-only.
+  for sentence in Property.splitSentences rawText do
+    let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+    for k in [:toks.size] do
+      if stripVerbInflection toks[k]!.word == "convert" then
+        let mut timeOk := false
+        let mut whenStem? : Option String := none
+        for j in [k:toks.size] do
+          if toks[j]!.word == "to" then
+            if let some (np, _) := NLP.parseNP toks (j + 1) then
+              let target : Option NLP.NPData := transparentOf np <|> some np.toData
+              if let some t := target then
+                if t.head == "time" && t.preAdjs.contains "absolute" then
+                  timeOk := true
+        for j in [k:toks.size] do
+          if toks[j]!.word == "when" then
+            for m in [j:toks.size] do
+              if whenStem?.isNone && toks[m]!.pos == .copula && m + 1 < toks.size &&
+                  (toks[m + 1]!.pos == .verb || toks[m + 1]!.pos == .adj) &&
+                  toks[m + 1]!.word.endsWith "ed" then
+                whenStem? := some (participleStem toks[m + 1]!.word)
+        if timeOk then
+          if let some stem := whenStem? then
+            if let some baseM := methods.find? (fun m =>
+                m.name == stem && m.returnsSelf) then
+              unless methods.any (·.name == stem ++ "At") do
+                methods := methods.push { baseM with
+                  name := stem ++ "At"
+                  args := baseM.args.push ("UInt32", false)
+                  sourceClause := sentence }
+      if stripVerbInflection toks[k]!.word == "discard" && k + 1 < toks.size &&
+          (toks[k + 1]!.word == "them" || toks[k + 1]!.word == "it") then
+        for j in [k:toks.size] do
+          if toks[j]!.word == "during" then
+            if let some (np, _) := NLP.parseNP toks (j + 1) then
+              if np.number == .plural then
+                let mName := stripPlural np.head
+                unless methods.any (·.name == mName) do
+                  methods := methods.push ⟨mName, #[("UInt32", false)], true,
+                    none, sentence⟩
+                  axioms := axioms.push ⟨s!"{mName}_subset",
+                    s!"{mName} only discards entries (no additions)",
+                    mName, some "entries"⟩
 
   -- Post-processing: generate implied getters + axioms for Self-returning methods
   let mut impliedMethods : Array MethodSpec := #[]
@@ -1450,7 +1536,7 @@ private def mkStructureCmd (structName : Ident) (fieldNames : Array Ident)
 private def elabCommandStr (s : String) : CommandElabM Unit := do
   match Lean.Parser.runParserCategory (← getEnv) `command s "<enum>" with
   | .ok stx => elabCommand stx
-  | .error e => throwError "parse error in generated code: {e}"
+  | .error e => throwError "parse error in generated code: {e}\n---\n{s}"
 
 /-- Generate a `class` command string for parsing via elabCommandStr.
     Classes are parameterized: `class Name (T₁ T₂ : Type) where field₁ : type₁; ...` -/
@@ -2847,21 +2933,8 @@ private def walkFieldPath (env : Environment) (typeName : Name) (targetField : S
 -- NLP extensions for sub-step guard derivation
 -- ============================================================
 
-/-- e-final verb roots, whose past participle adds bare "-d"
-    ("cached" → "cache"). Morphological lexicon for participle stemming. -/
-private def eFinalVerbRoots : Array String :=
-  #["cache", "retrieve", "store", "locate", "ignore", "include", "require",
-    "release", "update", "combine", "remove", "receive", "serve", "use"]
-
-/-- Stem an "-ed" past participle to its verb root: "stored" → "store",
-    "returned" → "return", "cached" → "cache", "tried" → "try". -/
-private def participleStem (w : String) : String :=
-  let v := w.toLower
-  if v.endsWith "ied" && v.length > 4 then dropLast v 3 ++ "y"
-  else if v.endsWith "ed" && v.length > 3 then
-    let bare := dropLast v 2
-    if eFinalVerbRoots.contains (bare ++ "e") then bare ++ "e" else bare
-  else v
+-- (participleStem and eFinalVerbRoots moved next to the other
+-- morphology helpers at the top of the file)
 
 -- ============================================================
 -- Entry-structure derivation from algorithm prose
@@ -5542,6 +5615,226 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
     let ns ← getCurrNamespace
     let prose := extractAllProse text
     let clausesWithSrc := NLP.parseProseClausesWithSrc prose
+    -- Tree-structure frame (RFC 1034 §3.1): a copular clause whose object NP
+    -- is headed "structure" with premodifier "tree" defines a recursive node
+    -- type — the lexical entry for "tree" carries the recursive-children
+    -- semantics, the way time-unit nouns carry seconds. Every other piece is
+    -- read from the surrounding clauses:
+    --  * term introduction ("uses the term ⟨"X"⟩ to refer to both") names
+    --    the node type from the quoted object head;
+    --  * possession ("Each ⟨node⟩ has a ⟨label⟩, which is ⟨lo⟩ to ⟨hi⟩
+    --    octets in length") contributes a ByteArray field, the size bound
+    --    read as a numeral range from the relative clause;
+    --  * correspondence ("Each ⟨node⟩ ... corresponds to a ⟨resource set⟩")
+    --    contributes a collection field: the collection head noun maps to
+    --    Array, the element premodifier resolves in the env or becomes an
+    --    abstract type parameter; the relative clause "may be empty" is a
+    --    modal permission, so no nonemptiness constraint is emitted;
+    --  * negated kinship possession ("⟨Brother⟩ nodes may not have the same
+    --    ⟨label⟩") yields pairwise label distinctness over one node's
+    --    children (brothers = children of a common parent);
+    --  * "null (zero length) ⟨label⟩ used for the ⟨root⟩" (token-level with
+    --    the parenthetical in place, like the A=a example rule) yields the
+    --    root's zero-size label;
+    --  * the path-definition copula ("The ⟨domain name⟩ of a ⟨node⟩ is the
+    --    list of the ⟨labels⟩ on the path from the ⟨node⟩ to the ⟨root⟩")
+    --    characterizes an abstract name function as the label projection
+    --    mapped over an abstract root path.
+    let treeTrigger? : Option String := Id.run do
+      for (c, src) in clausesWithSrc do
+        if let .svo _ vp obj _ := c then
+          if vp.isCopula && obj.head.toLower == "structure" &&
+              obj.preAdjs.any (·.toLower == "tree") then
+            return some src
+      return none
+    if let some treeSrc := treeTrigger? then
+      -- the quoted term that names the node type
+      let termInfo? : Option (String × String) := Id.run do
+        for (c, src) in clausesWithSrc do
+          if let .svo _ vp obj _ := c then
+            if #["uses", "use"].contains vp.verb.toLower &&
+                obj.preAdjs.any (·.toLower == "term") &&
+                obj.head.startsWith "\"" then
+              let w := String.ofList (obj.head.toList.filter Char.isAlpha)
+              if !w.isEmpty then return some (w.toLower, src)
+        return none
+      -- possession field: subject is the term, verb "has", not negated
+      let possession? : Option (String × Option (Nat × Nat) × String) := Id.run do
+        let some (term, _) := termInfo? | return none
+        for (c, src) in clausesWithSrc do
+          if let .svo subj vp obj _ := c then
+            if !vp.isCopula && #["has", "have"].contains vp.verb.toLower &&
+                vp.adv != some "not" && vp.adv != some "never" &&
+                subj.head.toLower == term then
+              -- numeral range + octet unit from the relative clause
+              let mut range : Option (Nat × Nat) := none
+              for pm in obj.postMods do
+                if let .relClause _ txt := pm then
+                  let toks := NLP.tagPOS (NLP.tokenize txt)
+                  for k in [:toks.size] do
+                    if range.isNone && k + 3 < toks.size &&
+                        toks[k + 1]!.word.toLower == "to" &&
+                        stripPlural toks[k + 3]!.word.toLower == "octet" then
+                      match NLP.numeralValue toks[k]!.word,
+                            NLP.numeralValue toks[k + 2]!.word with
+                      | some lo, some hi => range := some (lo, hi)
+                      | _, _ => pure ()
+              return some (obj.head.toLower, range, src)
+        return none
+      -- correspondence field: "corresponds to a ⟨elem⟩ ⟨set/list⟩"
+      let collectionHeads := #["set", "list", "sequence", "collection"]
+      let correspondence? : Option (String × String × String) := Id.run do
+        let some (term, _) := termInfo? | return none
+        for (c, src) in clausesWithSrc do
+          if let .svo subj vp _ pps := c then
+            if #["corresponds", "correspond"].contains vp.verb.toLower &&
+                subj.head.toLower == term then
+              for pp in pps do
+                if pp.prep.toLower == "to" &&
+                    collectionHeads.contains pp.np.head.toLower then
+                  if let some elem := pp.np.preAdjs.back? then
+                    let fieldName := toCamelCase
+                      (pp.np.preAdjs.toList.map (·.toLower) ++ [pp.np.head.toLower])
+                    return some (fieldName, elem.toLower, src)
+        return none
+      match termInfo?, possession?, correspondence? with
+      | some (term, termSrc), some (labelField, range?, labelSrc),
+        some (collField, elemWord, collSrc) =>
+        let mut treePropSrcs : Array (Name × String) := #[]
+        let nodeShort := capitalize term
+        let nodeId := mkIdent (Name.mkSimple nodeShort)
+        let nodeFull := ns ++ Name.mkSimple nodeShort
+        -- element type: environment lookup, else abstract type parameter
+        let env ← getEnv
+        let elemTyName := capitalize elemWord
+        let elemInEnv := (env.find? (ns ++ Name.mkSimple elemTyName)).isSome
+        let rLetter := if elemInEnv then elemTyName
+          else (String.singleton elemWord.front).toUpper
+        let rId := mkIdent (Name.mkSimple rLetter)
+        -- the recursive node type: ⟨labelField⟩ : ByteArray,
+        -- ⟨collField⟩ : Array R, children : Array (Node R)
+        elabCommand (← `(inductive $nodeId ($rId : Type) where
+          | mk : ByteArray → Array $rId → Array ($nodeId $rId) → $nodeId $rId))
+        addDocStringCore nodeFull
+          (s!"A node of the domain name space tree (RFC 1034 §3.1): " ++
+           s!"\"{treeSrc}\"\n\nThe term \"{term}\" covers interior nodes and " ++
+           s!"leaves alike: \"{termSrc}\"\n\nFields: `{labelField} : ByteArray` " ++
+           s!"(\"{labelSrc}\"), `{collField} : Array {rLetter}` (\"{collSrc}\"; " ++
+           (if elemInEnv then s!"the element type resolves in the environment)"
+            else s!"the element type is abstract — the prose does not fix it)") ++
+           s!", and `children : Array ({nodeShort} {rLetter})` — the recursive " ++
+           s!"field carried by the lexical semantics of \"tree structure\".")
+        treePropSrcs := treePropSrcs.push (nodeFull, treeSrc)
+        -- projections
+        let labelProj := mkIdent (Name.mkSimple nodeShort ++ Name.mkSimple labelField)
+        let collProj := mkIdent (Name.mkSimple nodeShort ++ Name.mkSimple collField)
+        let childrenProj := mkIdent (Name.mkSimple nodeShort ++ Name.mkSimple "children")
+        elabCommand (← `(def $labelProj {$rId : Type} (n : $nodeId $rId) : ByteArray :=
+          match n with | .mk l _ _ => l))
+        elabCommand (← `(def $collProj {$rId : Type} (n : $nodeId $rId) : Array $rId :=
+          match n with | .mk _ rs _ => rs))
+        elabCommand (← `(def $childrenProj {$rId : Type} (n : $nodeId $rId)
+            : Array ($nodeId $rId) :=
+          match n with | .mk _ _ cs => cs))
+        -- label size bound from the possession relative clause
+        if let some (_, hi) := range? then
+          let propName := Name.mkSimple s!"{term}_{labelField}_size"
+          let propId := mkIdent propName
+          let hiLit : TSyntax `term := ⟨Syntax.mkNumLit (toString hi)⟩
+          elabCommand (← `(def $propId ($rId : Type) : Prop :=
+            ∀ (n : $nodeId $rId), ($labelProj n).size ≤ $hiLit))
+          addDocStringCore (ns ++ propName)
+            (s!"Label length bound, range read from the relative clause: \"{labelSrc}\"")
+          treePropSrcs := treePropSrcs.push (ns ++ propName, labelSrc)
+        -- brother distinctness: negated kinship possession of "the same ⟨field⟩"
+        let kinship := #["brother", "sibling", "sister"]
+        for (c, src) in clausesWithSrc do
+          if let .svo subj vp obj _ := c then
+            if !vp.isCopula && #["has", "have"].contains vp.verb.toLower &&
+                (vp.adv == some "not" || vp.adv == some "never") &&
+                subj.preAdjs.any (fun a => kinship.contains (stripPlural a.toLower)) &&
+                stripPlural subj.head.toLower == term &&
+                obj.preAdjs.any (·.toLower == "same") &&
+                obj.head.toLower == labelField then
+              let propName := Name.mkSimple s!"{term}_brothers_distinct_{labelField}"
+              let propId := mkIdent propName
+              elabCommand (← `(def $propId ($rId : Type) : Prop :=
+                ∀ (n : $nodeId $rId) (i j : Fin ($childrenProj n).size),
+                  i ≠ j →
+                    $labelProj (($childrenProj n)[i]) ≠
+                    $labelProj (($childrenProj n)[j])))
+              addDocStringCore (ns ++ propName)
+                (s!"Pairwise distinctness of {labelField}s among one node's " ++
+                 s!"children (\"{subj.preAdjs[0]!}\" nodes are children of a " ++
+                 s!"common parent): \"{src}\"")
+              treePropSrcs := treePropSrcs.push (ns ++ propName, src)
+        -- root null label: token-level, parenthetical in place —
+        -- "null (zero length) ⟨label⟩ used/reserved for the ⟨root⟩"
+        for sentence in Property.splitSentences prose do
+          let toks := NLP.tagPOS (NLP.tokenize sentence)
+          for k in [:toks.size] do
+            if toks[k]!.word.toLower == "null" then
+              -- following: optional parenthetical, then the label field word,
+              -- then a participle, then "for" + NP (the site)
+              let mut j := k + 1
+              if j < toks.size && toks[j]!.word == "(" then
+                while j < toks.size && toks[j]!.word != ")" do
+                  j := j + 1
+                j := j + 1
+              if j < toks.size && toks[j]!.word.toLower == labelField then
+                let isPart := fun (t : NLP.Token) =>
+                  t.pos == .verb || (t.pos == .adj && t.word.toLower.endsWith "ed")
+                if j + 2 < toks.size && isPart toks[j + 1]! &&
+                    toks[j + 2]!.word.toLower == "for" then
+                  if let some (site, _) := NLP.parseNP toks (j + 3) then
+                    let siteW := site.head.toLower
+                    let propName := Name.mkSimple s!"{term}_{siteW}_{labelField}_null"
+                    let propId := mkIdent propName
+                    let siteId := mkIdent (Name.mkSimple siteW)
+                    elabCommand (← `(def $propId ($rId : Type)
+                        ($siteId : $nodeId $rId) : Prop :=
+                      ($labelProj $siteId).size = 0))
+                    addDocStringCore (ns ++ propName)
+                      (s!"The reserved null (zero length) {labelField} of the " ++
+                       s!"{siteW}: \"{trimStr sentence}\"")
+                    treePropSrcs := treePropSrcs.push
+                      (ns ++ propName, trimStr sentence)
+        -- path definition: copular clause, subject possessing an "of ⟨term⟩"
+        -- postmod, object "the list" + of/on/from/to PP chain
+        for (c, src) in clausesWithSrc do
+          if let .svo subj vp obj pps := c then
+            let subjOfTerm := subj.postMods.any fun pm =>
+              match pm with
+              | .pp "of" npd => npd.head.toLower == term
+              | _ => false
+            if vp.isCopula && subjOfTerm && obj.head.toLower == "list" then
+              let ppHead := fun (prep : String) => pps.findSome? fun pp =>
+                if pp.prep.toLower == prep then some pp.np.head.toLower else none
+              match ppHead "of", ppHead "on", ppHead "from", ppHead "to" with
+              | some ofW, some _, some fromW, some toW =>
+                if stripPlural ofW == labelField && fromW == term then
+                  let nameFn := toCamelCase
+                    (subj.preAdjs.toList.map (·.toLower) ++ [subj.head.toLower])
+                  let pathFn := "path" ++ "From" ++ capitalize fromW ++
+                    "To" ++ capitalize toW
+                  let propName := Name.mkSimple
+                    s!"{nameFn.toLower}_{labelField}s_on_path"
+                  let propId := mkIdent propName
+                  let nameFnId := mkIdent (Name.mkSimple nameFn)
+                  let pathFnId := mkIdent (Name.mkSimple pathFn)
+                  elabCommand (← `(def $propId ($rId : Type)
+                      ($nameFnId : $nodeId $rId → List ByteArray)
+                      ($pathFnId : $nodeId $rId → List ($nodeId $rId)) : Prop :=
+                    ∀ (n : $nodeId $rId), $nameFnId n = ($pathFnId n).map $labelProj))
+                  addDocStringCore (ns ++ propName)
+                    (s!"The {nameFn} of a {term} is the {labelField} projection " ++
+                     s!"mapped over the path from the {term} to the {toW}: \"{src}\"")
+                  treePropSrcs := treePropSrcs.push (ns ++ propName, src)
+              | _, _, _, _ => pure ()
+        return some (nodeShort, #[], treePropSrcs)
+      | _, _, _ =>
+        logInfo (s!"tree-structure frame: trigger matched (\"{treeSrc}\") but " ++
+          s!"term/possession/correspondence clauses incomplete; falling through")
     let structFieldsRaw := NLP.deriveStructFields prose
     -- MUST-match obligation (e.g. RFC 5452 §9.1): "MUST match responses to
     -- all of the following attributes" + "o ⟨attribute⟩" bullets +
@@ -5787,9 +6080,27 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
         matchObSrcs := matchObSrcs.push (credName, directiveSrc)
         matchObSrcs := matchObSrcs.push
           (credName ++ Name.mkSimple "atLeastAsTrustworthy", directiveSrc)
-    if hasSub prose.toLower "must match responses to all of the following attributes" then
-      -- Collect only the bullets immediately following the trigger sentence
-      -- (stop at the first non-blank, non-bullet line).
+    -- The trigger is the modal frame: "MUST" + verb "match" + object NP +
+    -- a "to" region carrying the CATAPHORIC premodifier "following" before
+    -- a plural noun — the cataphor points at the bullet list that the next
+    -- colon-terminated line introduces (format detection, like "where:").
+    let mustMatchSrc? : Option String := Id.run do
+      for sentence in Property.splitSentences prose do
+        let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+        for k in [:toks.size] do
+          if toks[k]!.word == "must" && k + 1 < toks.size &&
+              toks[k + 1]!.word == "match" then
+            if let some (_, afterObj) := NLP.parseNP toks (k + 2) (absorbPP := false) then
+              if afterObj < toks.size && toks[afterObj]!.word == "to" then
+                for j in [afterObj:toks.size] do
+                  if toks[j]!.word == "following" && j + 1 < toks.size &&
+                      toks[j + 1]!.pos == .nounPlural then
+                    return some sentence
+      return none
+    if let some mustMatchSrc := mustMatchSrc? then
+      -- Bullets: the "o  " lines after the colon-terminated introducer
+      -- (stop at the first non-blank, non-bullet line; a colon line with
+      -- no bullets after it is a false start).
       let bullets : Array String := Id.run do
         let lines := text.splitOn "\n"
         let mut out : Array String := #[]
@@ -5797,20 +6108,27 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
         for l in lines do
           let t := trimStr l
           if !inList then
-            if hasSub t.toLower "following attributes" then inList := true
+            if t.endsWith ":" then inList := true
           else
             if t.isEmpty then continue
             else if t.startsWith "o  " then
               out := out.push (trimStr ((t.drop 3).toString))
+            else if out.isEmpty then
+              inList := false
             else
               break
         return out
       if !bullets.isEmpty then
         let mut paramNames : Array String := #[]
         for b in bullets do
-          let core := (b.splitOn " against ").headD b
-          let words := core.toLower.splitOn " " |>.filter (!·.isEmpty)
-          let pn := match words with
+          -- the matcher is named from the bullet's tokens before the
+          -- comparative "against" (or all of them)
+          let btoks := NLP.tagPOS (NLP.tokenize b.toLower)
+          let mut words : Array String := #[]
+          for t in btoks do
+            if t.word == "against" then break
+            if t.pos != .punct then words := words.push t.word
+          let pn := match words.toList with
             | [] => "attr"
             | w :: ws => w ++ String.join (ws.map capitalize)
           -- dedup
@@ -5838,8 +6156,7 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
           addDocStringCore fullName
             (s!"Accepted responses satisfy every attribute matcher (one abstract " ++
              s!"predicate per bullet, in order: {String.intercalate ", " bullets.toList}): " ++
-             "\"MUST match responses to all of the following attributes of the query " ++
-             "... A mismatch and the response MUST be considered invalid.\"")
+             s!"\"{mustMatchSrc}\"")
           matchObSrcs := matchObSrcs.push (fullName, "all of the following attributes")
     -- Duration-cap rule (RFC 2308 §5): one sentence limits how long an
     -- entity may be cached ("… to limit for how long it will cache a
@@ -6317,11 +6634,14 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
     -- the anaphor's referent ("its" → the event's subject). The "until all
     -- other addresses have been tried" qualifier is the implementation's
     -- escape: a reset (retry cycle) may make it selectable again.
-    if hasSub prose.toLower "prevent " && hasSub prose.toLower " again" then
+    let hasPreventAgain := fun (s : String) =>
+      let st := NLP.tagPOS (NLP.tokenize s)
+      st.any (·.word == "prevent") && st.any (·.word == "again")
+    if hasPreventAgain prose.toLower then
       let mut preventSentence? : Option String := none
       for sentence in Property.splitSentences prose do
         let lowerS := sentence.toLower
-        if hasSub lowerS "prevent " && hasSub lowerS " again" then
+        if hasPreventAgain lowerS then
           preventSentence? := some lowerS
       if let some lowerS := preventSentence? then
         let tokens := NLP.tagPOS (NLP.tokenize lowerS)
