@@ -5470,16 +5470,35 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
         for j in [i+1:min sentences.size (i+3)] do
           let s1 := sentences[i]!.toLower
           let s2 := trimStr (sentences[j]!.toLower)
-          let marker? := if hasSub s1 "check to see that " then some "check to see that "
-            else if hasSub s1 "check that " then some "check that " else none
-          match marker? with
-          | some marker =>
-            if s2.startsWith "if not" then
-              -- strip RFC scare quotes before parsing
-              let condText := trimStr (String.join
-                (((s1.splitOn marker).getD 1 "").splitOn "\""))
+          let toks1 := NLP.tagPOS (NLP.tokenize s1)
+          let actTokens := NLP.tagPOS (NLP.tokenize s2)
+          -- the checking frame: verb "check" (+ optional infinitive
+          -- "to see") + complementizer "that" → the condition follows
+          let condStart? : Option Nat := Id.run do
+            for k in [:toks1.size] do
+              if toks1[k]!.word == "check" then
+                let mut m := k + 1
+                if m + 1 < toks1.size && toks1[m]!.word == "to" &&
+                    toks1[m + 1]!.word == "see" then
+                  m := m + 2
+                if m < toks1.size && toks1[m]!.word == "that" then
+                  return some (m + 1)
+            return none
+          match condStart? with
+          | some condStart =>
+            -- the consequent: sentence-initial anaphoric "if not"
+            if actTokens.size >= 2 && actTokens[0]!.word == "if" &&
+                actTokens[1]!.word == "not" then
+              -- non-punctuation words; scare-quote glyphs at token edges
+              -- are stripped so the quoted word itself survives
+              let condText := String.intercalate " "
+                ((toks1.extract condStart toks1.size).toList.filterMap fun t =>
+                  if t.pos == .punct then none
+                  else
+                    let w := String.ofList (t.word.toList.filter
+                      (fun c => c != '"' && c != '\''))
+                    if w.isEmpty then none else some w)
               let condClause := NLP.parseSentenceClause condText
-              let actTokens := NLP.tagPOS (NLP.tokenize s2)
               -- consequent subject: first NP after "if not,"
               let subjHead? : Option String := Id.run do
                 for k in [:actTokens.size] do
@@ -5516,6 +5535,7 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
                 propSrcs := propSrcs.push (fullName, s2)
               | _, _, _ =>
                 logInfo s!"check-that/if-not rule: no names derivable from \"{s1}\" / \"{s2}\""
+            else pure ()
           | none => pure ()
       return some (structName, #[], propSrcs)
     -- Prose-only section: derive structure + ∀ constraints from clause matching
@@ -6730,26 +6750,44 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
           addDocStringCore fullName s!"{structName}: prop {propIdx}\n```lean\n{fmt.pretty}\n```"
           propSrcs := propSrcs.push (fullName, src)
           propIdx := propIdx + 1
-      -- Discard-unrequested derivation (RFC 1035 §7.4: "When a resolver
-      -- receives unsolicited responses or RR data other than that requested,
-      -- it should discard it without caching it"): data that was not
-      -- requested must not be cached, over abstract requested/cached
-      -- predicates (the Spec cannot know what was asked or stored).
-      if hasSub prose "other than that requested" && hasSub prose "without caching" then
+      -- Discard-unrequested derivation (RFC 1035 §7.4: "... RR data other
+      -- than that requested, it should discard it without caching it"):
+      -- data that was not requested must not be cached, over abstract
+      -- predicates (the Spec cannot know what was asked or stored). The
+      -- frame is token-level: an exceptive postmodifier "other than
+      -- ⟨anaphor⟩ ⟨participle⟩" names the requested-predicate (the
+      -- participle) and a privative "without ⟨gerund⟩" names the
+      -- prevented predicate (the gerund's past form).
+      let mut discardFrame? : Option (String × String × String) := none
+      for sentence in Property.splitSentences prose do
+        if discardFrame?.isSome then continue
+        let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+        let mut exceptive? : Option String := none
+        let mut privative? : Option String := none
+        for i in [:toks.size] do
+          if exceptive?.isNone && i + 3 < toks.size && toks[i]!.word == "other" &&
+              toks[i + 1]!.word == "than" && toks[i + 2]!.word == "that" &&
+              toks[i + 3]!.word.endsWith "ed" then
+            exceptive? := some toks[i + 3]!.word
+          if privative?.isNone && i + 1 < toks.size && toks[i]!.word == "without" &&
+              toks[i + 1]!.word.endsWith "ing" then
+            privative? := some ((toks[i + 1]!.word.dropEnd 3).toString ++ "ed")
+        if exceptive?.isSome && privative?.isSome then
+          discardFrame? := some (exceptive?.getD "", privative?.getD "", sentence)
+      if let some (reqWord, cachWord, discardSrc) := discardFrame? then
         let dName := mkIdent (Name.mkSimple s!"{structName.toLower}_discard_unrequested")
         let rhoId := mkIdent (Name.mkSimple "ρ")
         let rId := mkIdent (Name.mkSimple "r")
-        let reqId := mkIdent (Name.mkSimple "requested")
-        let cachedId := mkIdent (Name.mkSimple "cached")
+        let reqId := mkIdent (Name.mkSimple reqWord)
+        let cachedId := mkIdent (Name.mkSimple cachWord)
         elabCommand (← `(def $dName ($rhoId : Type)
           ($reqId : $rhoId → Bool) ($cachedId : $rhoId → Bool) : Prop :=
           ∀ ($rId : $rhoId), $reqId $rId = false → $cachedId $rId = false))
         let fullName := ns ++ Name.mkSimple s!"{structName.toLower}_discard_unrequested"
         addDocStringCore fullName
-          ("Unrequested data must not be cached (abstract `requested`/`cached` " ++
-           "predicates): \"When a resolver receives unsolicited responses or RR " ++
-           "data other than that requested, it should discard it without caching it.\"")
-        propSrcs := propSrcs.push (fullName, "other than that requested")
+          (s!"Data not `{reqWord}` must not be `{cachWord}` (abstract " ++
+           s!"predicates): \"{discardSrc}\"")
+        propSrcs := propSrcs.push (fullName, "other than that")
       -- Generate numeric constants from extractConstraintValues
       let rawConstraints := extractConstraintValues prose
       for i in [:rawConstraints.size] do
