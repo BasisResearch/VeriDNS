@@ -5407,57 +5407,58 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
       let entrySrcs ← generateEntryStructure prose
       propSrcs := propSrcs ++ entrySrcs
       -- Recommendation derivation: modal partiality + superlative recommendation.
-      -- "It may be the case that ⟨C⟩" states the situation MAY occur (partiality
-      -- of the underlying operation); "the best is to ⟨action⟩" recommends the
-      -- reaction. C is a negated copula over an availability adjective →
-      -- abstract Bool predicate over an abstract state σ; the action's gerund +
-      -- "for the ⟨obj⟩" → abstract action predicate. Generates:
+      -- "It may be the case that ⟨C⟩" states the situation MAY occur
+      -- (partiality of the underlying operation) — found as the clause frame
+      -- modal "may" + expletive copula + "case" head + that-relClause whose
+      -- sub-clause is a negated adjectival predication (subject head +
+      -- adjective name the Bool predicate). "the ⟨superlative⟩ is to
+      -- ⟨action⟩" recommends the reaction — pole + copula + infinitive
+      -- tokens; the action's gerund and its "for" complement NP name the
+      -- abstract action predicate. Generates:
       --   ∀ s : σ, ⟨pred⟩ s = false → ⟨action⟩ s
-      if hasSub prose "the case that " && hasSub prose "the best is to " then
-        let comp := trimStr (((prose.splitOn "the case that ").getD 1 "").splitOn "."
-          |>.headD "")
-        let action := trimStr (((prose.splitOn "the best is to ").getD 1 "").splitOn "."
-          |>.headD "")
-        let compWords := comp.toLower.splitOn " " |>.filter (!·.isEmpty) |>.toArray
-        let isNegated := compWords.contains "not"
-        let copIdx? := compWords.findIdx? (fun w => w == "is" || w == "are")
-        match copIdx?, compWords.back? with
-        | some ci, some adjWord =>
-          if isNegated && ci > 0 then
-            let subjHead := compWords[ci - 1]!
-            let predName := s!"{subjHead}{capitalize adjWord}"
-            let actWords := action.toLower.splitOn " " |>.filter (!·.isEmpty) |>.toArray
-            let gerIdx? := actWords.findIdx? (fun w => w.endsWith "ing" && w.length > 4)
-            match gerIdx? with
-            | some gi =>
-              let stem := (actWords[gi]!.dropEnd 3).toString
-              -- object: first non-determiner word after a following "for"
-              let objWord? : Option String := Id.run do
-                for j in [gi + 1:actWords.size] do
-                  if actWords[j]! == "for" then
-                    for k in [j + 1:actWords.size] do
-                      if !#["the", "a", "an"].contains actWords[k]! then
-                        return some actWords[k]!
-                    return none
-                return none
-              if let some objWord := objWord? then
-                let actName := s!"{stem}{capitalize objWord}"
-                let recName := mkIdent (Name.mkSimple s!"recommendation_{predName}")
-                let sigmaId := mkIdent (Name.mkSimple "σ")
-                let sId := mkIdent (Name.mkSimple "s")
-                let predId := mkIdent (Name.mkSimple predName)
-                let actId := mkIdent (Name.mkSimple actName)
-                elabCommand (← `(def $recName ($sigmaId : Type)
-                  ($predId : $sigmaId → Bool) ($actId : $sigmaId → Prop) : Prop :=
-                  ∀ ($sId : $sigmaId), $predId $sId = false → $actId $sId))
-                let fullName := ns ++ Name.mkSimple s!"recommendation_{predName}"
-                addDocStringCore fullName
-                  (s!"Recommendation (modal \"may\" marks `{predName}` as partial; " ++
-                   s!"\"the best is to\" recommends `{actName}` when it fails): " ++
-                   s!"\"It may be the case that {comp}. The best is to {action}.\"")
-                propSrcs := propSrcs.push (fullName, comp)
-            | none => pure ()
-        | _, _ => pure ()
+      let mut recPartial? : Option (String × String) := none
+      let mut recAction? : Option String := none
+      for sentence in Property.splitSentences prose do
+        let toks := NLP.tagPOS (NLP.tokenize sentence)
+        if recPartial?.isNone then
+          if let .svo _ vp obj _ := NLP.parseClause toks then
+            if vp.adv == some "may" && vp.isCopula && obj.head.toLower == "case" then
+              for pm in obj.postMods do
+                if let .relClause _ relText := pm then
+                  if let .svAdj subj _ comp _ := NLP.parseSentenceClause relText then
+                    if comp.adv == some "not" && recPartial?.isNone then
+                      recPartial? := some (subj.head ++ capitalize comp.adj, relText)
+        if recAction?.isNone then
+          for k in [:toks.size] do
+            if recAction?.isNone && (NLP.superlativePole toks[k]!.word).isSome &&
+                k + 2 < toks.size && toks[k + 1]!.pos == .copula &&
+                toks[k + 2]!.word.toLower == "to" then
+              let action := toks.extract (k + 3) toks.size
+              for g in [:action.size] do
+                if recAction?.isNone && action[g]!.word.toLower.endsWith "ing" &&
+                    action[g]!.word.length > 4 then
+                  for j in [g + 1:action.size] do
+                    if recAction?.isNone && action[j]!.word.toLower == "for" then
+                      if let some (np, _) := NLP.parseNP action (j + 1) then
+                        let stem := (action[g]!.word.toLower.dropEnd 3).toString
+                        recAction? := some (stem ++ capitalize np.head)
+      match recPartial?, recAction? with
+      | some (predName, predSrc), some actName =>
+        let recName := mkIdent (Name.mkSimple s!"recommendation_{predName}")
+        let sigmaId := mkIdent (Name.mkSimple "σ")
+        let sId := mkIdent (Name.mkSimple "s")
+        let predId := mkIdent (Name.mkSimple predName)
+        let actId := mkIdent (Name.mkSimple actName)
+        elabCommand (← `(def $recName ($sigmaId : Type)
+          ($predId : $sigmaId → Bool) ($actId : $sigmaId → Prop) : Prop :=
+          ∀ ($sId : $sigmaId), $predId $sId = false → $actId $sId))
+        let fullName := ns ++ Name.mkSimple s!"recommendation_{predName}"
+        addDocStringCore fullName
+          (s!"Recommendation (modal \"may\" marks `{predName}` as partial; " ++
+           s!"the superlative recommendation names `{actName}` for when it " ++
+           s!"fails): \"may be the case that {predSrc}\".")
+        propSrcs := propSrcs.push (fullName, predSrc)
+      | _, _ => pure ()
       -- "should check (to see) that ⟨condition⟩. ... If not, ⟨np⟩ ...
       -- should be ⟨participle⟩." (§5.3.3 delegation validation): the
       -- anaphoric "not" negates the checked condition; the consequent is
@@ -6156,16 +6157,32 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
     let env ← getEnv
     -- Minimum-of-two-fields derivation (RFC 2308 §3: "The TTL of this record
     -- is set from the minimum of the MINIMUM field of the SOA record and the
-    -- TTL of the SOA itself, and indicates how long a resolver may cache the
-    -- negative answer"): the negative TTL computation is an abstract function
-    -- constrained to the min of the resolved field and the record's TTL.
-    if hasSub prose.toLower "minimum of the " && hasSub prose.toLower " field of the "
-        && hasSub prose.toLower "ttl of the " then
-      let lower := prose.toLower
-      let fieldWord := trimStr (((lower.splitOn "minimum of the ").getD 1 "").splitOn " field"
-        |>.headD "")
-      let structWord := trimStr (((lower.splitOn " field of the ").getD 1 "").splitOn " record"
-        |>.headD "")
+    -- TTL of the SOA itself ..."): the negative TTL computation is an
+    -- abstract function constrained to the min of the resolved field and the
+    -- record's TTL. The frame is parsed: the min-operator NP (head
+    -- "minimum" with its "of" complement) governs a coordinated pair —
+    -- the first operand NP names the field (its premodifier) of the record
+    -- struct (its of-PP's premodifier), and the second operand must be the
+    -- record's own TTL ("the TTL of the ⟨SOA⟩ itself").
+    let mut minFrame? : Option (String × String × String) := none
+    for sentence in Property.splitSentences prose do
+      if minFrame?.isSome then continue
+      let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+      for i in [:toks.size] do
+        if minFrame?.isNone && toks[i]!.word == "minimum" && i + 2 < toks.size &&
+            toks[i + 1]!.word == "of" then
+          if let some (op1, after1) := NLP.parseNP toks (i + 2) (absorbPP := false) then
+            if op1.head == "field" then
+              if let some fieldW := op1.preAdjs.back? then
+                if let some (pp, afterPP) := NLP.parsePP toks after1 then
+                  if pp.prep == "of" then
+                    if afterPP < toks.size && toks[afterPP]!.pos == .conj then
+                      if let some (op2, _) := NLP.parseNP toks (afterPP + 1)
+                          (absorbPP := false) then
+                        if op2.head == "ttl" then
+                          let structW := pp.np.preAdjs.back?.getD pp.np.head
+                          minFrame? := some (fieldW, structW, sentence)
+    if let some (fieldWord, structWord, minSrc) := minFrame? then
       -- Resolve the record struct anywhere under the namespace (generated
       -- RDATA structs live in nested namespaces, e.g. RData.Soa.SoaRdata)
       let findStruct (cand : String) : Option Name :=
@@ -6194,30 +6211,53 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
           let fullName := ns ++ Name.mkSimple s!"{structName.toLower}_negative_ttl"
           addDocStringCore fullName
             (s!"The negative-answer TTL is the minimum of {recStructFull}.{fieldWord} and " ++
-             "the record's own TTL: \"The TTL of this record is set from the minimum " ++
-             "of the MINIMUM field of the SOA record and the TTL of the SOA itself, " ++
-             "and indicates how long a resolver may cache the negative answer.\"")
+             s!"the record's own TTL: \"{minSrc}\"")
           matchObSrcs := matchObSrcs.push (fullName, "minimum of the")
     -- "X is indicated by ⟨conditions⟩" derivation (RFC 2308 §2.2: "NODATA is
     -- indicated by an answer with the RCODE set to NOERROR and no relevant
-    -- answers in the answer section"): each conjunct resolves to an enum
-    -- field equation ("RCODE set to ⟨ctor⟩") or an empty-section condition
-    -- ("no ⟨X⟩s in the ⟨F⟩ section").
-    if hasSub prose.toLower " is indicated by " then
-      let lower := prose.toLower
-      let pre := (lower.splitOn " is indicated by ").headD ""
-      let subjWord := (pre.splitOn " " |>.filter (!·.isEmpty)).getLastD "response"
-      let condText := trimStr (((lower.splitOn " is indicated by ").getD 1 "").splitOn "."
-        |>.headD "")
+    -- answers in the answer section"). The frame is structural: copula +
+    -- participle "indicated" + the "by" region; the subject is the NP
+    -- ending at the copula; conjuncts split at conjunction tokens. Each
+    -- conjunct resolves to an enum field equation (participle "set" + "to"
+    -- + the constructor NP) or an empty-section condition (negative
+    -- determiner "no" + an NP resolving to a Format section).
+    let mut indicatedFrame? : Option (String × Array (Array NLP.Token) × String) := none
+    for sentence in Property.splitSentences prose do
+      if indicatedFrame?.isSome then continue
+      let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+      for k in [:toks.size] do
+        if indicatedFrame?.isNone && toks[k]!.pos == .copula && k + 2 < toks.size &&
+            toks[k + 1]!.word == "indicated" && toks[k + 2]!.word == "by" then
+          let mut subjW := "response"
+          for j in [:k] do
+            if let some (np, after) := NLP.parseNP toks j then
+              if after == k then subjW := np.head
+          let region := toks.extract (k + 3) toks.size
+          let mut parts : Array (Array NLP.Token) := #[]
+          let mut cur : Array NLP.Token := #[]
+          for t in region do
+            if t.pos == .conj && t.word == "and" then
+              parts := parts.push cur
+              cur := #[]
+            else if t.pos != .punct then
+              cur := cur.push t
+          parts := parts.push cur
+          indicatedFrame? := some (subjW, parts, sentence)
+    if let some (subjWord, condParts, condSrc) := indicatedFrame? then
       let contextTypes := collectContextTypes env ns
       let respId := mkIdent (Name.mkSimple "resp")
       let mut conjuncts : Array (TSyntax `term) := #[]
-      for clause in condText.splitOn " and " do
-        let words := clause.splitOn " " |>.filter (!·.isEmpty) |>.toArray
-        -- "set to ⟨ctor⟩": enum constructor after "set to"
-        if hasSub clause "set to " then
-          let ctorWord := trimStr (((clause.splitOn "set to ").getD 1 "").splitOn " "
-            |>.headD "")
+      for part in condParts do
+        let words := part.map (·.word)
+        -- participle "set" + "to" + constructor NP → enum field equation
+        let mut setIdx? : Option Nat := none
+        for i in [:part.size] do
+          if setIdx?.isNone && part[i]!.word == "set" && i + 1 < part.size &&
+              part[i + 1]!.word == "to" then
+            setIdx? := some i
+        if let some si := setIdx? then
+          let ctorWord := (NLP.parseNP part (si + 2)).map (·.1.head)
+            |>.getD (words.getD (si + 2) "")
           if let some (indName, ctor) := resolveNPToEnumCtor #[ctorWord] env contextTypes then
             if let some chain := traceFieldChain env indName contextTypes then
               if chain[0]!.1.components.getLast!.toString == "Format" then
@@ -6229,7 +6269,8 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
                 let ctorId := mkIdent (Name.mkSimple (indName.components.getLast!.toString)
                   ++ Name.mkSimple (ctor.components.getLast!.toString))
                 conjuncts := conjuncts.push (← `($acc = $ctorId))
-        -- "no ⟨X⟩s ...": stem resolves to an Array field of Format → size = 0
+        -- negative determiner "no" + NP: head's stem resolves to an
+        -- Array field of Format → size = 0
         else if words.contains "no" then
           let fmtName := ns ++ Name.mkSimple "Format"
           if let some si := Lean.getStructureInfo? env fmtName then
@@ -6248,7 +6289,7 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
         elabCommand (← `(def $dName ($respId : $fmtId) : Prop := $body))
         let fullName := ns ++ Name.mkSimple s!"{subjWord}_indicated"
         addDocStringCore fullName
-          s!"{subjWord.toUpper} detection, derived from \"{subjWord} is indicated by {condText}\""
+          s!"{subjWord.toUpper} detection, derived from \"{condSrc}\""
         matchObSrcs := matchObSrcs.push (fullName, "is indicated by")
     -- "⟨np⟩ is ⟨participle⟩ and the state should be altered to prevent its
     -- ⟨nominalization⟩ again ..." (RFC 1035 §7.2 server selection): after
