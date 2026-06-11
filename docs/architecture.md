@@ -25,9 +25,11 @@ VeriDNS/
     Cache.lean    -- RFC 1034 §5.3.2 + RFC 1035 §7.4, §6.1.3: Cache constraints + timer
     Resolver.lean -- RFC 1034 §5.3.2-3: Resolver state (glossary) + algorithm (numbered steps) + SlistEntry
     NegativeCache.lean -- RFC 2308: negative caching props + NegativeCacheSpec/NegativeAuthoritySpec
-    Credibility.lean   -- RFC 2181 §5.4.1: Trustworthiness enum + answerability obligation
+    Credibility.lean   -- RFC 2181 §5.4.1: Trustworthiness enum + TrustworthinessSpec + answerability obligation
     Resilience.lean    -- RFC 5452 §9.1-2: response matching + unpredictability obligations
     Server.lean   -- RFC 1035 §6.2, §7.3: Server query processing + UdpSocket typeclass
+  Test/
+    Loop.lean     -- Mock-socket compile-time (#guard) verification of serveOne/resolveWithIO
   Impl/
     Parsec.lean         -- DnsParser/DnsSerializer monads + byte-level primitives
     BitPacking.lean     -- Sub-byte field pack/unpack (Header flags)
@@ -739,14 +741,32 @@ interval ... to some sort of absolute time when the RR is stored"),
 law fields `store_mem`/`storeAt_mem` (membership) and `sweep_subset`
 (removal-only) — emitted as the law statements themselves, so instances must
 prove them (previously `store_mem : Prop` was discharged with `True`).
-`CacheLookup` stays manual only for the keyed positive lookup signature
-(name/qtype/qclass join the search-state glossary entries with the CACHE
-entry — a two-entry assembly the generator does not yet perform) and the
-RFC 2181 ranked store/answer-path lookup (the §5.4.1 prose is in
-Spec/Credibility.lean, where the §5.3.2 absolute-time convention is not in
-scope; cross-file assembly would need an env extension like
-`rfcEnumDescriptions`). The RFC 2308 negative-cache operations are
-GENERATED — see "Negative-Cache Typeclass Generation" below.
+The manual `CacheLookup` class is gone entirely:
+
+- **`CacheSpec.lookup`** is assembled cross-ENTRY within the §5.3.2 block:
+  the intro prose names the operation ("converted to a general LOOKUP
+  function" — participle "converted" + "to" PP, the premodifier before
+  "function"); the search-state entries supply the key in glossary order
+  (an entry whose description uses the "search" lexeme contributes a
+  component — ALL-CAPS references resolve through a context struct's wire
+  field, "the QTYPE of the search request" → `Question.qtype : BitVec 16`,
+  else the entry's own resolved type, SNAME → `ByteArray`); the entry
+  whose class already has the temporal store and whose description
+  encounters stored items "in the course of a search" hosts the method,
+  time-indexed.
+- **`TrustworthinessSpec`** (`acceptRrset`, `answers`) is generated
+  cross-FILE in Spec/Credibility.lean from the §5.4.1 sentences: the
+  deliberated verb + object NP ("whether to ACCEPT an RRSET ... should
+  consider the ... trustworthiness") give the ranked store; the possessive
+  anaphor "already in ITS CACHE" resolves to the generated `CacheSpec`
+  (glossary naming convention), whose keyed time-indexed retrieval — read
+  via forall-telescope — fixes the key and time arguments; the negated
+  passive's "as" complement ("returned as ANSWERS to a received query")
+  names the answer-path accessor. This required flipping the import:
+  Spec/Credibility.lean now imports Spec/Resolver.lean (CacheSpec must be
+  in the env), and Resolver no longer needs Credibility.
+  The RFC 2308 negative-cache operations are also generated — see
+  "Negative-Cache Typeclass Generation" below.
 
 `DnsCache` (Impl/Cache.lean) wires the TTL machinery into the instances and
 proves all laws; Proof/Cache.lean adds `store_absolute_expiry` (§6.1.3),
@@ -1258,6 +1278,28 @@ with 2s timeout → `close`, returning `Option ByteArray`; `none` on timeout),
 exposed via `@[extern]` with simple Lean types (`UInt32` for fd, `ByteArray`
 for 6-byte encoded addresses). No external socket library dependency —
 avoids Alloy/socket.lean version incompatibility with Lean 4.31.
+
+### IO-Shim Verification (Test/Loop.lean)
+
+`serveOne`/`resolveWithIO`/`ioResumeLoop` are parametric over `UdpSocket`,
+so the full serving loop runs in pure `StateM MockState` over a scripted
+mock socket (per-exchange handlers `ByteArray → Option ByteArray`; an
+exhausted script is a timeout). Five end-to-end behaviors are checked by
+`#guard` AT COMPILE TIME — the build fails on regression:
+
+1. **Direct answer**: exactly one datagram to the client, client's ID
+   restored, QR=1/RA=1/AA=0/Z=0, the answer delivered, question echoed.
+2. **RFC 5452 spoof rejection**: a forged-ID response never reaches the
+   client (no answer data; non-NOERROR after the script runs dry).
+3. **Iterative delegation**: a referral (NS + glue, closer match count) is
+   chased — two upstream exchanges, final answer correct.
+4. **RFC 2308 negative caching**: NXDOMAIN cached from an A query answers
+   a subsequent AAAA query with an EMPTY script (qtype invariance, no
+   upstream), the §6 SOA served in the authority both times.
+5. **Query hygiene**: RD=0 is REFUSED before any upstream work.
+
+Only the C FFI layer (ffi/recvfrom.c) sits outside this boundary; it is
+exercised live with `dig`.
 
 ### Server Proofs (Proof/Server.lean)
 

@@ -1,16 +1,19 @@
 import VeriDNS.RFC.Macro
-import VeriDNS.Spec.Message
+import VeriDNS.Spec.Resolver
 
 namespace VeriDNS.Spec
 
 -- RFC 2181 §5.4.1: data ranking. The ranked-list rule ("in order from most
--- to least:" + "+"-bullets) generates the ordered `Credibility` enum (ctor
--- order = rank; `toCode` is the rank, 0 most trustworthy), the
--- `Credibility.atLeastAsTrustworthy` order relation, and — from "should not
--- be cached in such a way that they would ever be returned as answers" —
+-- to least:" + "+"-bullets) generates the ordered `Trustworthiness` enum
+-- (ctor order = rank; `toCode` is the rank, 0 most trustworthy), the
+-- `Trustworthiness.atLeastAsTrustworthy` order relation, and — from "should
+-- not be cached in such a way that they would ever be returned as answers" —
 -- `obligation_untrustworthyNotAnswerable`: max-rank data is never served as
--- an answer. Instantiated by the cache's credibility tagging
--- (Impl/Cache.lean, proven in Proof/Cache.lean).
+-- an answer. The same sentences also generate `TrustworthinessSpec`
+-- (acceptRrset / answers): the "its cache" anaphor resolves to the generated
+-- CacheSpec (hence this file imports Spec.Resolver), whose keyed retrieval
+-- fixes the key and time arguments. Instantiated by the cache's credibility
+-- tagging (Impl/Cache.lean, proven in Proof/Cache.lean).
 include_rfc [2181][343:384] {
 5.4.1. Ranking data
 

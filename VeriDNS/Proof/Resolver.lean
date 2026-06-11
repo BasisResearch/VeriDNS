@@ -7,7 +7,7 @@ open VeriDNS.Impl.Resolver
 
 variable {S C NS RR : Type}
     [SlistSpec S NS] [SlistFromNS S NS]
-    [CacheSpec C RR] [CacheLookup C RR] [NegativeAuthoritySpec C RR] [RRParse RR]
+    [CacheSpec C RR] [TrustworthinessSpec C RR] [NegativeAuthoritySpec C RR] [RRParse RR]
     [Inhabited S] [Inhabited C]
 
 -- ============================================================
@@ -630,7 +630,7 @@ def answerInLocal (s : State S C NS RR) : Prop :=
   ∃ q qu, s.lastQuery = some q ∧ q.question[0]? = some qu ∧
     ((NegativeCacheSpec.retrieveNegative s.resources.cache
         s.resources.sname qu.qtype qu.qclass s.now).isSome
-     ∨ (CacheLookup.lookupAnswerable s.resources.cache
+     ∨ (TrustworthinessSpec.answers s.resources.cache
         s.resources.sname qu.qtype qu.qclass s.now : Array RR).isEmpty = false)
 
 /-- Honest instantiation of the generated step-1 obligation
@@ -667,7 +667,7 @@ theorem impl_obligation_checkAnswer :
     · have hla : localAnswer (C := C) (RR := RR) s.resources.cache qu.qtype qu.qclass
           s.now (7 + 1) s.resources.sname s.cnameChain
           = .answerHit s.resources.sname s.cnameChain
-              (CacheLookup.lookupAnswerable s.resources.cache s.resources.sname
+              (TrustworthinessSpec.answers s.resources.cache s.resources.sname
                 qu.qtype qu.qclass s.now) := by
         unfold localAnswer
         rw [hneg]

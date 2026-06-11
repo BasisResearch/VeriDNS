@@ -229,6 +229,7 @@ instance : CacheSpec DnsCache ResourceRecord where
   storeAt := DnsCache.store
   sweep := DnsCache.sweep
   entries c := c.records.map (·.rr)
+  lookup := DnsCache.lookup
   store_mem c rr := store_mem_aux c rr 0
   storeAt_mem := store_mem_aux
   sweep_subset c t y hy := by
@@ -236,10 +237,9 @@ instance : CacheSpec DnsCache ResourceRecord where
     obtain ⟨e, he, hrr⟩ := Array.mem_map.mp hy
     exact Array.mem_map.mpr ⟨e, (Array.mem_filter.mp he).1, hrr⟩
 
-instance : CacheLookup DnsCache ResourceRecord where
-  lookup := DnsCache.lookup
-  storeRanked := DnsCache.storeChecked
-  lookupAnswerable := DnsCache.lookupAnswerable
+instance : TrustworthinessSpec DnsCache ResourceRecord where
+  acceptRrset := DnsCache.storeChecked
+  answers := DnsCache.lookupAnswerable
 
 /-- Attach a SOA record to the matching fresh negative entry (the one just
     stored with the same key and expiry). Implements the generated

@@ -43,3 +43,4 @@ import VeriDNS.Proof.Message
 import VeriDNS.Proof.Resolver
 import VeriDNS.Proof.Server
 import VeriDNS.Proof.Cache
+import VeriDNS.Test.Loop

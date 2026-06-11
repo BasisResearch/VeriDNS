@@ -1494,7 +1494,11 @@ private def generateGlossaryClass (spec : ClassSpec) : CommandElabM Name := do
   elabCommandStr classStr
 
   let fullName := ns ++ Name.mkSimple spec.className
-  addDocStringCore fullName s!"Abstract spec for {spec.className} derived from RFC glossary NLP"
+  -- Docstring leads with the generated definition itself: the hover on the
+  -- glossary entry is the only place the reader can see the class.
+  addDocStringCore fullName
+    (s!"```lean\n{classStr}\n```\n\n" ++
+     s!"Abstract spec for {spec.className} derived from RFC glossary NLP")
 
   -- Add docstrings to fields
   for m in spec.methods do
@@ -1512,6 +1516,21 @@ private def generateGlossaryClass (spec : ClassSpec) : CommandElabM Name := do
 -- ============================================================
 -- Code generation
 -- ============================================================
+
+/-- Append `text` below `name`'s existing docstring (or set it if absent).
+    Used by callers that add prose to a type whose docstring already leads
+    with the rendered definition. -/
+private def appendDocBelow (name : Name) (text : String) : CommandElabM Unit := do
+  if text.isEmpty then return
+  let env ← getEnv
+  let old := (← findDocString? env name).getD ""
+  addDocStringCore name (if old.isEmpty then text else s!"{old}\n\n{text}")
+
+/-- Render an enum definition as a fenced code block for hover docstrings:
+    the inductive with one constructor per line, annotated with its code. -/
+private def enumDefBlock (typeName : String) (values : Array EnumValue) : String :=
+  let ctorLines := values.map fun v => s!"  | {v.name} -- {v.code}"
+  s!"```lean\ninductive {typeName} where\n{"\n".intercalate ctorLines.toList}\n```"
 
 /-- Generate toCode, ofCode, value lemmas, and roundtrip theorem for an enum type. -/
 private def generateEnumFunctions (fullName : Name) (typeName : String)
@@ -1549,6 +1568,9 @@ private def generateEnum (fieldName : String) (values : Array EnumValue)
 
   elabCommand <| mkInductiveCmd typeIdent ctorIdents #[`Repr, `BEq, `Inhabited]
 
+  -- Type docstring: the rendered definition (hover is the only window
+  -- into generated types)
+  addDocStringCore fullName (enumDefBlock typeName values)
   -- Add docstrings to constructors
   for v in values do
     let ctorFullName := fullName ++ Name.mkSimple v.name
@@ -1567,6 +1589,9 @@ private def generateValueListType (typeName : String) (values : Array EnumValue)
   let fullName := ns ++ Name.mkSimple typeName
   let ctorIdents := values.map fun v => mkIdent (Name.mkSimple v.name)
   elabCommand <| mkInductiveCmd typeIdent ctorIdents #[`Repr, `BEq, `Inhabited]
+  -- Type docstring: the rendered definition; callers append prose below
+  -- via appendDocBelow rather than overwriting.
+  addDocStringCore fullName (enumDefBlock typeName values)
   for v in values do
     let ctorFullName := fullName ++ Name.mkSimple v.name
     (addDocStringCore ctorFullName s!"{v.code}: {v.description}" : CommandElabM Unit)
@@ -1588,9 +1613,16 @@ private def generateStructure (name : String) (docstring : String)
   let derivClasses := if hasVariableField then #[`BEq, `Inhabited] else #[`Repr, `BEq, `Inhabited]
   elabCommand <| mkStructureCmd structIdent fieldIdents fieldTypes derivClasses
 
-  -- Add struct-level docstring
-  if !docstring.isEmpty then
-    addDocStringCore fullName docstring
+  -- Struct-level docstring leads with the rendered definition: the hover on
+  -- the section title / diagram is the only place the generated type is
+  -- visible, so show the fields before the RFC prose.
+  let mut fieldLines : Array String := #[]
+  for i in [:fields.size] do
+    let tyFmt ← liftCoreM (ppTerm fieldTypes[i]!)
+    fieldLines := fieldLines.push s!"  {fields[i]!.name.toLower} : {tyFmt.pretty}"
+  let defBlock := s!"```lean\nstructure {name} where\n{"\n".intercalate fieldLines.toList}\n```"
+  addDocStringCore fullName
+    (if docstring.isEmpty then defBlock else s!"{defBlock}\n\n{docstring}")
 
   -- Add field-level docstrings
   for i in [:fields.size] do
@@ -2875,10 +2907,18 @@ private def generateEntryStructure (prose : String)
   elabCommand (mkStructureCmd (mkIdent structName) fieldNames fieldTypes
     #[``BEq, ``Inhabited])
   let fullName := ns ++ structName
+  -- Docstring leads with the rendered definition (hover is the only window
+  -- into the generated type), then the derivation notes and field sources.
+  let mut defLines : Array String := #[]
+  for i in [:fieldNames.size] do
+    let tyFmt ← liftCoreM (ppTerm fieldTypes[i]!)
+    defLines := defLines.push s!"  {fieldNames[i]!.getId} : {tyFmt.pretty}"
+  let defBlock := s!"```lean\nstructure {structShort} where\n{"\n".intercalate defLines.toList}\n```"
   let fieldLines := String.join (fields.toList.map fun f =>
     s!"- `{f.name}`{if f.optional then " (partial)" else ""}: \"{f.src}\"\n")
   addDocStringCore fullName
-    (s!"Per-entry structure of {target}, derived from the algorithm prose: " ++
+    (s!"{defBlock}\n\n" ++
+     s!"Per-entry structure of {target}, derived from the algorithm prose: " ++
      s!"a membership imperative fixes the entry identity, a possessive-anaphor " ++
      s!"imperative adds a per-entry field, modal partiality (\"may ... not ...\") " ++
      s!"wraps a field in `Option`, and a keep-track purpose adds a counter.\n\n" ++
@@ -4927,6 +4967,79 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
               allTypeParams := allTypeParams.push (letter, concept)
               seenParamLetters := seenParamLetters.push letter
 
+      -- Cross-entry search-lookup derivation. Three pieces of evidence,
+      -- each read grammatically, assemble one keyed method:
+      --  * the intro prose names the operation: participle "converted" +
+      --    "to" PP whose NP head is "function" — the operation is the
+      --    premodifier before "function" ("a general LOOKUP function");
+      --  * the search-state entries supply the key, in glossary order: an
+      --    entry whose description uses the "search" lexeme contributes a
+      --    component — an ALL-CAPS reference resolves through a context
+      --    struct's wire field ("the QTYPE of the search request" →
+      --    Question.qtype : BitVec 16), otherwise the entry's own resolved
+      --    type ("the domain name we are searching for" → ByteArray);
+      --  * the entry whose class already carries the temporal store and
+      --    whose description encounters stored items during the search
+      --    ("ignores or discards OLD RRs ... in the course of a search")
+      --    hosts the method, time-indexed (UInt32, the storeAt convention).
+      let searchLexeme (w : String) : Bool :=
+        w == "search" || w == "searching" || w == "searched"
+      let lookupName? : Option String := Id.run do
+        let toks := NLP.tagPOS (NLP.tokenize
+          (extractProseBeforeGlossary text glossaryEntries).toLower)
+        for k in [:toks.size] do
+          if (toks[k]!.pos == .verb || toks[k]!.pos == .adj) &&
+              toks[k]!.word == "converted" then
+            if let some (pp, _) := NLP.parsePP toks (k + 1) then
+              if pp.prep == "to" && pp.np.head == "function" then
+                if let some op := pp.np.preAdjs.back? then
+                  if op != "general" then return some op
+        return none
+      if let some lookupName := lookupName? then
+        let searchContextTypes := collectContextTypes env ns
+        let mut keyArgs : Array (String × Bool) := #[]
+        let mut keySrcs : Array String := #[]
+        for entry in glossaryEntries do
+          let toks := NLP.tagPOS (NLP.tokenize entry.description)
+          unless toks.any (fun t => searchLexeme t.word.toLower) do continue
+          -- skip the hosting structure entry itself (it has a class)
+          if classSpecs.any (fun (n, _) => n == entry.name) then continue
+          -- ALL-CAPS reference → context struct field's wire type
+          let mut fieldTy? : Option String := none
+          for t in toks do
+            if fieldTy?.isNone && isAllCapsRef t.word then
+              if let some (_, some projName) :=
+                  resolveNPToField t.word env ns searchContextTypes then
+                if let some pi := env.find? projName then
+                  if let .forallE _ _ fbody _ := pi.type then
+                    let stx ← liftTermElabM (Lean.PrettyPrinter.delab fbody)
+                    fieldTy? := some (← liftCoreM (ppTerm stx)).pretty
+          match fieldTy? with
+          | some ty => keyArgs := keyArgs.push (ty, false)
+          | none =>
+            let resolved := resolvedTypes.find? (fun (n, _) => n == entry.name)
+              |>.bind (·.2) |>.map (toString ·.components.getLast!) |>.getD "ByteArray"
+            keyArgs := keyArgs.push (resolved, false)
+          keySrcs := keySrcs.push s!"{entry.name}: \"{entry.description}\""
+        if !keyArgs.isEmpty then
+          -- host: the temporal class whose entry mentions the search
+          for i in [:classSpecs.size] do
+            let (entryName, spec) := classSpecs[i]!
+            let hostEntry? := glossaryEntries.find? (fun e => e.name == entryName)
+            let hostMentionsSearch := hostEntry?.any fun e =>
+              (NLP.tagPOS (NLP.tokenize e.description)).any
+                (fun t => searchLexeme t.word.toLower)
+            if spec.methods.any (·.name == "storeAt") && hostMentionsSearch &&
+                !spec.methods.any (·.name == lookupName) then
+              let rrLetter := spec.typeParams[0]?.map (·.1) |>.getD "RR"
+              let lookupMethod : MethodSpec :=
+                ⟨lookupName, keyArgs.push ("UInt32", false), false,
+                 some (s!"Array {rrLetter}", true),
+                 "a general " ++ lookupName ++ " function, keyed by the search state; " ++
+                 String.intercalate "; " keySrcs.toList⟩
+              classSpecs := classSpecs.set! i (entryName, { spec with
+                methods := spec.methods.push lookupMethod })
+
       -- Phase 2: Generate class declarations
       for (entryName, spec) in classSpecs do
         let fullName ← generateGlossaryClass spec
@@ -5259,10 +5372,11 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
           values := values.push ⟨i, name, trimStr bullets[i]!⟩
         let credName ← generateValueListType typeNm values
         let short := credName.components.getLast!.toString
-        -- Type-level docstring: the ranked tier list, so the hover on the
-        -- ordering-directive sentence shows the full generated enum.
+        -- Tier descriptions below the rendered definition (set by
+        -- generateValueListType), so the hover on the ordering-directive
+        -- sentence shows the enum and what each rank means.
         let tierLines := values.map fun v => s!"{v.code}. `{v.name}` — {v.description}"
-        addDocStringCore credName
+        appendDocBelow credName
           (s!"Ranked tiers from the ordering directive (rank 0 = the " ++
            s!"most-trustworthy pole):\n\n" ++ "\n".intercalate tierLines.toList)
         -- order relation: a is at least as trustworthy as b  ⟺  rank a ≤ rank b
@@ -5311,6 +5425,111 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
           matchObSrcs := matchObSrcs.push
             (ns ++ Name.mkSimple "obligation_untrustworthyNotAnswerable",
              "returned as answers")
+        -- Ranked-store class. Three grammatical pieces assemble it:
+        --  * "When considering WHETHER to ACCEPT an RRSet in a reply, or
+        --    retain an RRSet already in its cache instead, a server should
+        --    consider the ... ⟨directive subject⟩ of the various data" —
+        --    the deliberated verb + its object NP give the store method,
+        --    which takes the ranked quantity;
+        --  * the possessive anaphor "ITS CACHE" resolves to the generated
+        --    cache class (glossary naming convention ⟨Entry⟩Spec); its
+        --    keyed, time-indexed retrieval (read via forall-telescope)
+        --    fixes the key and the time argument;
+        --  * the negated passive's "as" object ("returned as ANSWERS to a
+        --    received query") names the answer-path accessor over that key.
+        let acceptInfo? : Option (String × String × String) := Id.run do
+          for sentence in Property.splitSentences prose do
+            let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+            unless toks.any (fun t => t.word == typeNm.toLower) do continue
+            for k in [:toks.size] do
+              if toks[k]!.word == "whether" && k + 2 < toks.size &&
+                  toks[k + 1]!.word == "to" && toks[k + 2]!.pos == .verb then
+                if let some (obj, _) := NLP.parseNP toks (k + 3) then
+                  return some (toks[k + 2]!.word, obj.head, sentence)
+          return none
+        let answersName? : Option String := Id.run do
+          for sentence in Property.splitSentences prose do
+            let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+            unless toks.any (fun t =>
+              t.word == "not" || t.word == "never") do continue
+            for k in [:toks.size] do
+              -- "returned AS ⟨NP⟩": "as" is a closed-class function word
+              -- the prep lexicon doesn't carry; read its complement NP
+              if toks[k]!.pos == .verb && toks[k]!.word == "returned" &&
+                  k + 1 < toks.size && toks[k + 1]!.word == "as" then
+                if let some (np, _) := NLP.parseNP toks (k + 2) then
+                  return some np.head
+          return none
+        match acceptInfo?, answersName? with
+        | some (acceptVerb, acceptObj, acceptSrc), some answersName =>
+          let curEnv ← getEnv
+          -- "its ⟨cache⟩" anaphor → the generated ⟨Cache⟩Spec class
+          let cacheCls? : Option Name := Id.run do
+            for sentence in Property.splitSentences prose do
+              let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+              for k in [:toks.size] do
+                if toks[k]!.word == "its" && k + 1 < toks.size then
+                  let cand := ns ++ Name.mkSimple
+                    (capitalize toks[k + 1]!.word ++ "Spec")
+                  if (curEnv.find? cand).isSome then return some cand
+            return none
+          if let some cacheCls := cacheCls? then
+            -- the cache's keyed retrieval: a projection with ≥ 3 explicit
+            -- argument domains beyond self, returning an Array
+            let keyTime? : Option (Array String × Bool) ←
+              match Lean.getStructureInfo? curEnv cacheCls with
+              | none => pure none
+              | some psi => do
+                let mut found : Option (Array String × Bool) := none
+                for f in psi.fieldNames do
+                  if found.isSome then continue
+                  let some pi := curEnv.find? (cacheCls ++ f) | continue
+                  let info ← liftTermElabM <|
+                    Lean.Meta.forallTelescope pi.type fun args body => do
+                      let mut doms : Array String := #[]
+                      for a in args do
+                        if (← a.fvarId!.getBinderInfo) == .default then
+                          let d ← Lean.Meta.inferType a
+                          let stx ← Lean.PrettyPrinter.delab d
+                          doms := doms.push (← ppTerm stx).pretty
+                      let isArrayRet := body.isApp &&
+                        body.getAppFn.constName? == some ``Array
+                      return (doms, isArrayRet)
+                  let (doms, isArrayRet) := info
+                  if isArrayRet && doms.size >= 4 then
+                    let hasTime := doms.back? == some "UInt32"
+                    let keyEnd := if hasTime then doms.size - 1 else doms.size
+                    found := some (doms.extract 1 keyEnd, hasTime)
+                pure found
+            if let some (keyTypes, hasTime) := keyTime? then
+              let clsName := short ++ "Spec"
+              if (curEnv.find? (ns ++ Name.mkSimple clsName)).isNone then
+                let keyStr := " → ".intercalate keyTypes.toList
+                let timePart := if hasTime then "UInt32 → " else ""
+                let acceptM := stripVerbInflection acceptVerb ++
+                  capitalize acceptObj
+                let classStr :=
+                  s!"class {clsName} (C RR : Type) where\n" ++
+                  s!"  {acceptM} : C → RR → {short} → {timePart}C\n" ++
+                  s!"  {answersName} : C → {keyStr} → {timePart}Array RR"
+                elabCommandStr classStr
+                let clsFull := ns ++ Name.mkSimple clsName
+                addDocStringCore clsFull
+                  (s!"```lean\n{classStr}\n```\n\n" ++
+                   s!"Ranked cache operations: `{acceptM}` stores data tagged " ++
+                   s!"with its `{short}` tier (\"{acceptSrc}\"); `{answersName}` " ++
+                   s!"is the answer-path retrieval over the cache's search key " ++
+                   s!"(the \"its cache\" anaphor fixes the key and time " ++
+                   s!"arguments), gated by the generated " ++
+                   s!"`obligation_untrustworthyNotAnswerable`.")
+                addDocStringCore (clsFull ++ Name.mkSimple acceptM)
+                  (s!"\"{acceptSrc}\"")
+                addDocStringCore (clsFull ++ Name.mkSimple answersName)
+                  ("\"should not be cached in such a way that they would ever " ++
+                   "be returned as answers to a received query\" — the " ++
+                   "answer-path retrieval, which must exclude the max rank.")
+                matchObSrcs := matchObSrcs.push (clsFull, "whether to accept")
+        | _, _ => pure ()
         -- The ordering-directive sentence is the source of both the ranked
         -- enum and its order relation; the enum claims the hover and the
         -- relation rides along in its docstring (claimHover collision rule).
@@ -5565,13 +5784,15 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
                       ++ capitalize (targetWords.headD "authority") ++ "Spec"
                     if (curEnv.find? (ns ++ Name.mkSimple clsName)).isNone &&
                         storeM != serveM then
-                      elabCommandStr
-                        (s!"class {clsName} (C RR : Type) extends {parentName} C where\n" ++
-                         s!"  {storeM} : C → {keyStr} → RR → {timePart}C\n" ++
-                         s!"  {serveM} : C → {keyStr} → {timePart}Array RR")
+                      let classStr :=
+                        s!"class {clsName} (C RR : Type) extends {parentName} C where\n" ++
+                        s!"  {storeM} : C → {keyStr} → RR → {timePart}C\n" ++
+                        s!"  {serveM} : C → {keyStr} → {timePart}Array RR"
+                      elabCommandStr classStr
                       let clsFull := ns ++ Name.mkSimple clsName
                       addDocStringCore clsFull
-                        (s!"Authority companion to `{parentName}` (the when-clause's " ++
+                        (s!"```lean\n{classStr}\n```\n\n" ++
+                         s!"Authority companion to `{parentName}` (the when-clause's " ++
                          s!"\"cached negative response\" anaphor): the `{storeObj}` is " ++
                          s!"stored with the negative entry and served back in the " ++
                          s!"`{serveM}` for the same key, `{transformName}`. Derived " ++
@@ -6044,8 +6265,9 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
                 if (env.find? (ns ++ Name.mkSimple className)).isNone then
                   let storeSig := s!"C → {keyStr} → {enumStr} → {timePart}C"
                   let retrSig := s!"C → {keyStr} → {timePart}Option {enumStr}"
-                  elabCommandStr (mkClassString className #["C"]
-                    #[storeM, retrM] #[storeSig, retrSig])
+                  let classStr := mkClassString className #["C"]
+                    #[storeM, retrM] #[storeSig, retrSig]
+                  elabCommandStr classStr
                   let classFull := ns ++ Name.mkSimple className
                   let sanitize (s : String) : String := String.ofList
                     (s.toList.map fun c =>
@@ -6053,7 +6275,8 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
                   let srcsStr := " / ".intercalate
                     (negSrcs.toList.map (fun s => "\"" ++ sanitize s ++ "\""))
                   addDocStringCore classFull
-                    (s!"Negative-cache store/retrieve operations, keyed by the " ++
+                    (s!"```lean\n{classStr}\n```\n\n" ++
+                     s!"Negative-cache store/retrieve operations, keyed by the " ++
                      s!"union of the tuple fields across the keyed sentences, " ++
                      s!"parameterized by the resolved answer class `{enumStr}`" ++
                      (if hasCountdown then
@@ -6272,7 +6495,7 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
       let fullName ← generateValueListType enumName valueEntries
       storeEnumDescriptions fullName valueEntries
       let sectionHeader := extractSectionHeader text |>.getD ""
-      addDocStringCore fullName sectionHeader
+      appendDocBelow fullName sectionHeader
       return some (enumName, #[], #[])
     -- Fallback: no fields derived, just extract numeric constants.
     -- Still return the limit sources so the constants are hover-reachable

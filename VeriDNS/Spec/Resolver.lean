@@ -4,7 +4,7 @@ import VeriDNS.Spec.Message
 import VeriDNS.Spec.RRType
 import VeriDNS.Spec.RRClass
 import VeriDNS.Spec.ResourceRecord
-import VeriDNS.Spec.Credibility
+
 
 namespace VeriDNS.Spec
 
@@ -254,29 +254,13 @@ than the average predicted value to allow for variance in response.
 -- that the addresses are not available" / "keep track of previous
 -- transmissions") — see `deriveEntryStructure` in VeriDNS.RFC.Syntax.
 
--- Manual remainder of the cache interface. The time-aware operations
--- (storeAt, sweep) and their laws are NLP-generated on CacheSpec from the
--- §5.3.2 prose; the RFC 2308 negative-cache operations are generated as
--- NegativeCacheSpec / NegativeAuthoritySpec in Spec/NegativeCache.lean.
--- Still manual, and why:
---  * `lookup` — the keyed signature joins the §5.3.2 search-state glossary
---    (SNAME/STYPE/SCLASS) with the CACHE entry's "in the course of a
---    search"; the generator does not yet assemble one method from two
---    glossary entries.
---  * `storeRanked`/`lookupAnswerable` — the §5.4.1 sentences (in
---    Spec/Credibility.lean) license trust-tagged store and an answer-path
---    lookup, but the absolute-time argument comes from the §5.3.2 storeAt
---    convention, which is not in scope in that file. Generating these needs
---    cross-file assembly (an env extension, like `rfcEnumDescriptions`).
-class CacheLookup (C RR : Type) extends CacheSpec C RR where
-  lookup : C → ByteArray → BitVec 16 → BitVec 16 → UInt32 → Array RR
-  /-- RFC 2181 §5.4.1 credibility-aware store: cache an RR tagged with its
-      trust tier (the generated `Trustworthiness`), retaining
-      strictly-more-trustworthy same-key data in preference. -/
-  storeRanked : C → RR → Trustworthiness → UInt32 → C
-  /-- RFC 2181 §5.4.1 answer-path lookup: like `lookup` but excludes data at
-      the least-trustworthy rank, which must never be returned as an answer. -/
-  lookupAnswerable : C → ByteArray → BitVec 16 → BitVec 16 → UInt32 → Array RR
+-- The cache interface is fully generated: `lookup` is assembled onto
+-- CacheSpec from the §5.3.2 intro ("converted to a general lookup
+-- function") + the search-state glossary entries (the key) + the CACHE
+-- entry's "in the course of a search" (the time-indexed host); the
+-- RFC 2308 negative-cache operations are NegativeCacheSpec /
+-- NegativeAuthoritySpec (Spec/NegativeCache.lean); the RFC 2181 §5.4.1
+-- ranked store / answer-path lookup are generated in Spec/Credibility.lean.
 
 -- Manual: batch SLIST creation from NS names. The licensing prose exists —
 -- "Copy the names into SLIST" / "Set up their addresses using local data"

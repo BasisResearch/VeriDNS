@@ -3,6 +3,7 @@ import VeriDNS.Impl.ResourceRecord
 import VeriDNS.Impl.DomainName
 import VeriDNS.Spec.Resolver
 import VeriDNS.Spec.NegativeCache
+import VeriDNS.Spec.Credibility
 
 namespace VeriDNS.Impl.Resolver
 
@@ -11,7 +12,7 @@ open VeriDNS.Impl
 
 variable {S C NS RR : Type}
     [SlistSpec S NS] [SlistFromNS S NS]
-    [CacheSpec C RR] [CacheLookup C RR] [NegativeAuthoritySpec C RR] [RRParse RR]
+    [CacheSpec C RR] [TrustworthinessSpec C RR] [NegativeAuthoritySpec C RR] [RRParse RR]
     [Inhabited S] [Inhabited C]
 
 structure State (S C NS RR : Type) [SlistSpec S NS] [CacheSpec C RR] where
@@ -140,17 +141,17 @@ def credAdditional : Trustworthiness := .additionalAuthoritative
 
 /-- Cache RRs at a §5.4.1 credibility tier (credibility-checked store —
     more-trustworthy same-key data is retained). -/
-def cacheRRs [CacheLookup C RR] [RRParse RR] (cache : C) (raws : Array ByteArray)
+def cacheRRs [TrustworthinessSpec C RR] [RRParse RR] (cache : C) (raws : Array ByteArray)
     (cred : Trustworthiness) (now : UInt32) : C :=
   raws.foldl (fun c bytes =>
     match RRParse.parseRaw (RR := RR) bytes with
-    | some rr => CacheLookup.storeRanked c rr cred now | none => c) cache
+    | some rr => TrustworthinessSpec.acceptRrset c rr cred now | none => c) cache
 
 /-- Cache response RRs at credibility `cred` unless the response is
     truncated. RFC 1035 §7.4: "When a response is truncated, and a resolver
     doesn't know whether it has a complete set, it should not cache a
     possibly partial set of RRs." -/
-def cacheUnlessTruncated [CacheLookup C RR] [RRParse RR] (cache : C) (resp : Format)
+def cacheUnlessTruncated [TrustworthinessSpec C RR] [RRParse RR] (cache : C) (resp : Format)
     (raws : Array ByteArray) (cred : Trustworthiness) (now : UInt32) : C :=
   if resp.header.tc == 1 then cache
   else cacheRRs (RR := RR) cache raws cred now
@@ -210,7 +211,7 @@ inductive LocalResult (RR : Type) where
     CNAME processing "restarts the query at the canonical name") when the
     query key itself misses. Lookups come FIRST at each name, so a direct
     hit is never shadowed by an alias; the chase is fuel-bounded. -/
-def localAnswer [CacheLookup C RR] [NegativeAuthoritySpec C RR] [RRParse RR] (cache : C)
+def localAnswer [TrustworthinessSpec C RR] [NegativeAuthoritySpec C RR] [RRParse RR] (cache : C)
     (qtype qclass : BitVec 16) (now : UInt32)
     : Nat → ByteArray → Array ByteArray → LocalResult RR
   | 0, sname, chain => .miss sname chain
@@ -220,11 +221,11 @@ def localAnswer [CacheLookup C RR] [NegativeAuthoritySpec C RR] [RRParse RR] (ca
       .negative rc (NegativeAuthoritySpec.authoritySection cache sname qtype qclass now)
     | none =>
       -- answer path: only answer-grade data may be served (RFC 2181 §5.4.1)
-      let rrs : Array RR := CacheLookup.lookupAnswerable cache sname qtype qclass now
+      let rrs : Array RR := TrustworthinessSpec.answers cache sname qtype qclass now
       if rrs.isEmpty then
         if qtype == (5 : BitVec 16) then .miss sname chain
         else
-          match (CacheLookup.lookupAnswerable cache sname (5 : BitVec 16) qclass now
+          match (TrustworthinessSpec.answers cache sname (5 : BitVec 16) qclass now
               : Array RR)[0]? with
           | some crr =>
             localAnswer cache qtype qclass now fuel
@@ -283,7 +284,7 @@ def stepFindServers (s : State S C NS RR) : StepResult S C NS RR :=
       -- Look up A records (type 1) in cache for each NS name to get glue addresses
       let aType : BitVec 16 := BitVec.ofNat 16 1
       let glue : Array (ByteArray × BitVec 32) := nsNames.filterMap fun nsName =>
-        let aRRs : Array RR := CacheLookup.lookup s.resources.cache nsName aType inClass s.now
+        let aRRs : Array RR := CacheSpec.lookup s.resources.cache nsName aType inClass s.now
         aRRs.findSome? fun rr =>
           let rd := RRParse.rrRdata rr
           if rd.size == 4 then
@@ -307,7 +308,7 @@ where
       : Nat → Option (Array ByteArray × Nat)
     | 0 => none
     | fuel + 1 =>
-      let rrs : Array RR := CacheLookup.lookup cache name nsType inClass now
+      let rrs : Array RR := CacheSpec.lookup cache name nsType inClass now
       if rrs.isEmpty then
         match DomainName.parentDomainWire name with
         | some parent => walkNs parent cache nsType inClass now fuel

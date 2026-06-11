@@ -130,7 +130,7 @@ theorem storeNegative_bounded (c : DnsCache) (name : ByteArray)
 
 /-- A truncated response contributes nothing to the cache (at any
     credibility rank). -/
-theorem truncated_not_cached {C RR : Type} [CacheLookup C RR] [RRParse RR]
+theorem truncated_not_cached {C RR : Type} [TrustworthinessSpec C RR] [RRParse RR]
     (cache : C) (resp : Format) (raws : Array ByteArray) (cred : Trustworthiness)
     (now : UInt32) (h : resp.header.tc = 1) :
     cacheUnlessTruncated (RR := RR) cache resp raws cred now = cache := by

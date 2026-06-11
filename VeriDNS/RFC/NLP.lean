@@ -396,6 +396,20 @@ private def disambiguate (tokens : Array Token) : Array Token := Id.run do
              result[i - 2]!.word.toLower == "refuses" ||
              result[i - 2]!.word.toLower == "refuse") then
       result := result.set! i { tokens[i]! with pos := .verb }
+    -- finite-verb form after "as" is a nominal complement ("returned as
+    -- ANSWERS to a query"); participles stay verbal ("as described in")
+    else if tokens[i]!.pos == .verb && i > 0 &&
+            result[i - 1]!.word.toLower == "as" &&
+            !tokens[i]!.word.toLower.endsWith "ed" &&
+            !tokens[i]!.word.toLower.endsWith "ing" then
+      result := result.set! i { tokens[i]! with
+        pos := if tokens[i]!.word.toLower.endsWith "s" then .nounPlural else .noun }
+    -- infinitive after the complementizer "whether" → verb
+    -- ("considering whether to accept an RRSet")
+    else if (tokens[i]!.pos == .noun || tokens[i]!.pos == .nounPlural) && i >= 2 &&
+            result[i - 1]!.word.toLower == "to" &&
+            result[i - 2]!.word.toLower == "whether" then
+      result := result.set! i { tokens[i]! with pos := .verb }
     -- nominal after negated auxiliary "does not"/"do not" → verb
     -- ("does not support the requested kind of query")
     else if (tokens[i]!.pos == .noun || tokens[i]!.pos == .nounPlural) && i >= 2 &&
