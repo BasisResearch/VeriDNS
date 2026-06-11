@@ -79,8 +79,13 @@ a request identifier of some sort.  This step has several fine points:
 }
 
 /-- Abstract UDP socket operations. Parametric over monad M, socket type Sock,
-    and address type Addr. Follows the CacheLookup pattern: manual typeclass
-    extending NLP-generated transport specs. -/
+    and address type Addr. Manual by design: this is the Spec/Impl IO
+    boundary, not RFC content — RFC 1035 §4.2 describes transport FRAMING
+    (generated in Spec/Transport.lean), not a socket API. The members
+    instantiate generated specs rather than being derivable as signatures:
+    `now` feeds the §5.3.2 absolute-time convention (storeAt), `randomId`
+    and `exchange` discharge the RFC 5452 §9.1/§9.2 obligations generated
+    in Spec/Resilience.lean. -/
 class UdpSocket (M : Type → Type) (Sock Addr : Type) [Monad M] where
   recvFrom : Sock → Nat → M (ByteArray × Addr)
   sendTo : Sock → ByteArray → Addr → M Unit

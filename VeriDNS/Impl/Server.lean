@@ -191,9 +191,9 @@ def delegationShapedB (resp : Format) : Bool :=
     zone) strictly exceeds the SLIST's. An SLIST with no servers compares
     closer trivially (there are no servers to be closer than). -/
 def delegationCloserB (slist : DnsSList) (sname : ByteArray) (resp : Format) : Bool :=
-  !SlistFromNS.hasServers (NS := ServerEntry) slist
+  !SlistFromNS.hasServers (NS := SlistEntry) slist
     || decide (Resolver.delegationMatchCount (RR := ResourceRecord)
-        resp.authority sname > SlistFromNS.matchCount (NS := ServerEntry) slist)
+        resp.authority sname > SlistFromNS.matchCount (NS := SlistEntry) slist)
 
 /-- §5.3.3: "the resolver should check to see that the delegation is
     'closer' to the answer than the servers in SLIST are ... If not, the
@@ -327,7 +327,7 @@ variable {M : Type → Type} {Sock : Type} [Monad M] [UdpSocket M Sock ByteArray
     looking for the addresses" — by sub-resolving an NS name's A record
     (sequentially; `depth` bounds glueless nesting). -/
 private def ioResumeLoop (sbelt : DnsSList)
-    (state : Resolver.State DnsSList DnsCache ServerEntry ResourceRecord)
+    (state : Resolver.State DnsSList DnsCache SlistEntry ResourceRecord)
     (deadline : UInt32) (depth fuel : Nat) : M (Except String Format × DnsCache) :=
   match fuel with
   | 0 => pure (.error "resolveWithIO: max IO rounds", state.resources.cache)
@@ -347,8 +347,8 @@ private def ioResumeLoop (sbelt : DnsSList)
           s!"glueless: resolving address of {nameToString nsName} (depth {depth'})"
         let addrQuery := mkAddressQuery nsName
         let (subResult, subCache) ←
-          match @Resolver.resolve DnsSList DnsCache ServerEntry ResourceRecord
-              _ _ _ _ _ _ _ addrQuery sbelt 64 state.now DnsCache.empty with
+          match @Resolver.resolve DnsSList DnsCache SlistEntry ResourceRecord
+              _ _ _ _ _ _ _ _ addrQuery sbelt 64 state.now DnsCache.empty with
           | .ok (.done resp) => pure (.ok resp, state.resources.cache)
           | .ok (.paused st) =>
             let (r, _) ← ioResumeLoop sbelt st deadline depth' fuel'
@@ -438,7 +438,7 @@ private def ioResumeLoop (sbelt : DnsSList)
               { state with resources := { state.resources with
                   slist := state.resources.slist.removeServer entry.name } }
             else state
-            let resumed : Except String (Resolver.ResolveYield DnsSList DnsCache ServerEntry ResourceRecord) :=
+            let resumed : Except String (Resolver.ResolveYield DnsSList DnsCache SlistEntry ResourceRecord) :=
               Resolver.resume state resp 64
             match resumed with
             | .ok (.done finalResp) => pure (.ok finalResp, state.resources.cache)
@@ -460,8 +460,8 @@ def resolveWithIO (query : Format) (sbelt : DnsSList)
     (cache : DnsCache := DnsCache.empty) (now : UInt32 := 0)
     (fuel : Nat := 40) (depth : Nat := 6) (budget : UInt32 := 5)
     : M (Except String Format × DnsCache) := do
-  match @Resolver.resolve DnsSList DnsCache ServerEntry ResourceRecord
-      _ _ _ _ _ _ _ query sbelt 64 now cache with
+  match @Resolver.resolve DnsSList DnsCache SlistEntry ResourceRecord
+      _ _ _ _ _ _ _ _ query sbelt 64 now cache with
   | .ok (.done resp) => pure (.ok resp, cache)
   | .ok (.paused state) => ioResumeLoop (Sock := Sock) sbelt state (now + budget) depth fuel
   | .error msg => pure (.error msg, cache)

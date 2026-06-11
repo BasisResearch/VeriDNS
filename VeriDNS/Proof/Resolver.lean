@@ -7,7 +7,7 @@ open VeriDNS.Impl.Resolver
 
 variable {S C NS RR : Type}
     [SlistSpec S NS] [SlistFromNS S NS]
-    [CacheSpec C RR] [CacheLookup C RR] [RRParse RR]
+    [CacheSpec C RR] [CacheLookup C RR] [NegativeAuthoritySpec C RR] [RRParse RR]
     [Inhabited S] [Inhabited C]
 
 -- ============================================================
@@ -628,7 +628,7 @@ theorem impl_obligation_answerOrError :
     untrustworthy data is not an answer) — for the current query key. -/
 def answerInLocal (s : State S C NS RR) : Prop :=
   ∃ q qu, s.lastQuery = some q ∧ q.question[0]? = some qu ∧
-    ((CacheLookup.lookupNegative (RR := RR) s.resources.cache
+    ((NegativeCacheSpec.retrieveNegative s.resources.cache
         s.resources.sname qu.qtype qu.qclass s.now).isSome
      ∨ (CacheLookup.lookupAnswerable s.resources.cache
         s.resources.sname qu.qtype qu.qclass s.now : Array RR).isEmpty = false)
@@ -650,12 +650,12 @@ theorem impl_obligation_checkAnswer :
   rw [h8]
   -- the condition holds at the FIRST name, so one unfolding of the
   -- cached-CNAME chase suffices (lookups precede the alias hop)
-  cases hneg : CacheLookup.lookupNegative (RR := RR) s.resources.cache
+  cases hneg : NegativeCacheSpec.retrieveNegative s.resources.cache
       s.resources.sname qu.qtype qu.qclass s.now with
   | some rc =>
     have hla : localAnswer (C := C) (RR := RR) s.resources.cache qu.qtype qu.qclass
         s.now (7 + 1) s.resources.sname s.cnameChain
-        = .negative rc (CacheLookup.lookupNegativeSoa s.resources.cache
+        = .negative rc (NegativeAuthoritySpec.authoritySection s.resources.cache
             s.resources.sname qu.qtype qu.qclass s.now) := by
       unfold localAnswer
       rw [hneg]

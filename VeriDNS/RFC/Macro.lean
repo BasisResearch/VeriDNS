@@ -520,9 +520,15 @@ def elabIncludeRfc : CommandElab := fun stx => do
     -- position-based matching (infoForSyntax) can't link parser idents to definitions.
     -- NOTE: When modifying this code, delete .lake/build/literate/ before rebuilding
     -- docs — the literate cache is NOT invalidated by lake build.
-    -- Prose sentence idents are linked to their generated props first; consumed
-    -- idents are excluded from the generic struct-hover fallback below.
-    let consumed ← VeriDNS.RFC.Syntax.pushProseHoverInfo propSrcs rfcArgs
+    -- All pushers share one claims map (ident position → hover target):
+    -- SubVerso renders a single TermInfo per token, so the first definition
+    -- to claim an ident owns its hover and later ones are appended to the
+    -- owner's docstring ("Also generated from this passage"). Order =
+    -- priority: prose props, then per-sentence props, then example props,
+    -- then the generic struct/field fallback on whatever remains unclaimed.
+    let mut claims ← VeriDNS.RFC.Syntax.pushProseHoverInfo propSrcs rfcArgs
+    claims ← VeriDNS.RFC.Syntax.pushSentenceHoverInfo structName rfcArgs mergedFields claims
+    claims ← VeriDNS.RFC.Syntax.generateExampleProps structName userText mergedFields rfcArgs claims
     -- Filter: only pass field name + title/diagram idents to pushHoverInfoFromIdents.
     -- Sentence idents (after field names) are handled exclusively by pushSentenceHoverInfo.
     let fieldNameSet := mergedFields.map (·.name.toUpper)
@@ -531,7 +537,7 @@ def elabIncludeRfc : CommandElab := fun stx => do
     for arg in rfcArgs do
       if !arg.isIdent then continue
       if let some pos := arg.getPos? then
-        if consumed.contains pos.byteIdx then continue
+        if claims.contains pos.byteIdx then continue
       match arg with
       | .ident _ rawVal _ _ =>
         if fieldNameSet.contains rawVal.toString.toUpper then
@@ -541,7 +547,5 @@ def elabIncludeRfc : CommandElab := fun stx => do
           structIdents := structIdents.push arg
       | _ => continue
     VeriDNS.RFC.Syntax.pushHoverInfoFromIdents structName structIdents
-    VeriDNS.RFC.Syntax.pushSentenceHoverInfo structName rfcArgs mergedFields
-    VeriDNS.RFC.Syntax.generateExampleProps structName userText mergedFields rfcArgs
 
 end VeriDNS.RFC

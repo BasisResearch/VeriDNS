@@ -951,9 +951,20 @@ def analyzeField (fieldName inlineDesc prose : String) : Array SectionProp := Id
         let prop := deriveSectionProp fieldName clause
         props := props.push prop
 
-  -- 4. Add .someEmpty if prose contains "some of which are empty"
-  if hasSub prose.toLower "some of which are empty" then
-    props := props.push .someEmpty
+  -- 4. Partitive relative predicating emptiness over the members
+  --    ("... sections (some of which are empty ...)"): quantifier + "of" +
+  --    relative pronoun + copula + adjective "empty"
+  for part in allParts do
+    let tokens := tagPOS (tokenize part)
+    for i in [:tokens.size] do
+      if i + 4 < tokens.size &&
+          tokens[i]!.pos == .quant &&
+          tokens[i + 1]!.pos == .prep && tokens[i + 1]!.word.toLower == "of" &&
+          tokens[i + 2]!.pos == .relPron &&
+          tokens[i + 3]!.pos == .copula &&
+          tokens[i + 4]!.word.toLower == "empty" then
+        if !props.contains .someEmpty then
+          props := props.push .someEmpty
 
   return props
 
@@ -1454,35 +1465,34 @@ def analyzeExamples (text : String) (fieldNames : Array String) : Array ExampleP
 def reparseRelClause (text : String) : Array Clause := Id.run do
   -- Try parsing as-is first
   let tokens := tagPOS (tokenize text)
+  let mut usedTokens := tokens
   let mut clauses := parseClauses tokens |>.filter fun c =>
     match c with | .unparsed _ => false | _ => true
   -- If nothing parsed, prepend implicit subject "it" for verb-first relative clauses
   if clauses.isEmpty then
-    let withSubj := "it " ++ text
-    let tokens' := tagPOS (tokenize withSubj)
+    let tokens' := tagPOS (tokenize ("it " ++ text))
+    usedTokens := tokens'
     clauses := parseClauses tokens' |>.filter fun c =>
       match c with | .unparsed _ => false | _ => true
-  -- Post-process: split coordinated objects in SVO clauses
-  -- "it describes X and Y" → SVO for X only; split "and" portion into additional clause
+  -- Post-process: split coordinated objects in SVO clauses at TOKEN level:
+  -- a conjunction "and" right after the parsed object introduces another
+  -- object of the same verb ("describes X and Y" → two SVO clauses)
   let mut expanded : Array Clause := #[]
   for clause in clauses do
     expanded := expanded.push clause
     match clause with
-    | .svo subj vp obj pps =>
-      -- Check remaining text after the parsed object for "and" + another NP
-      -- Look for "and" in the raw text after obj.head
-      let afterObj := text.splitOn (obj.head)
-      if afterObj.length > 1 then
-        let remainder := afterObj[1]!
-        let andParts := remainder.splitOn " and "
-        for partIdx in [1:andParts.length] do
-          let part := andParts[partIdx]!.trim
-          if !part.isEmpty then
-            let partTokens := tagPOS (tokenize ("it " ++ vp.verb ++ " " ++ part))
-            let partClauses := parseClauses partTokens |>.filter fun c =>
-              match c with | .unparsed _ => false | _ => true
-            for pc in partClauses do
-              expanded := expanded.push pc
+    | .svo subj vp _ _ =>
+      if let some vi := usedTokens.findIdx?
+          (fun t => t.word.toLower == vp.verb.toLower) then
+        if let some (_, afterObj) := parseNP usedTokens (vi + 1) (absorbPP := false) then
+          let mut pos := afterObj
+          while pos + 1 < usedTokens.size && usedTokens[pos]!.pos == .conj &&
+              usedTokens[pos]!.word.toLower == "and" do
+            match parseNP usedTokens (pos + 1) (absorbPP := false) with
+            | some (np2, after2) =>
+              expanded := expanded.push (.svo subj vp np2 #[])
+              pos := after2
+            | none => pos := usedTokens.size
     | _ => pure ()
   return expanded
 

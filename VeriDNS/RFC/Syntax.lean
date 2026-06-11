@@ -537,9 +537,9 @@ def extractAllProse (text : String) : String := Id.run do
 
 /-- Extract numeric constraints from prose: "to N octets/bits" and "port N" patterns.
     Returns (value, unit) pairs. -/
-def extractConstraintValues (prose : String) : Array (Nat × String) := Id.run do
+def extractConstraintValues (prose : String) : Array (Nat × String × String) := Id.run do
   let words := prose.toLower.splitOn " " |>.toArray |>.filter (!·.isEmpty)
-  let mut result : Array (Nat × String) := #[]
+  let mut result : Array (Nat × String × String) := #[]
   for i in [:words.size] do
     if words[i]! == "to" && i + 2 < words.size then
       let unitWord := words[i + 2]!
@@ -547,16 +547,18 @@ def extractConstraintValues (prose : String) : Array (Nat × String) := Id.run d
          unitWord.startsWith "byte" then
         let unit := if unitWord.startsWith "bit" then "bits"
           else if unitWord.startsWith "byte" then "bytes" else "octets"
+        -- The literal matched phrase, for hover source matching
+        let srcPhrase := s!"to {words[i + 1]!} {unitWord}"
         if let some n := words[i + 1]!.toNat? then
-          result := result.push (n, unit)
+          result := result.push (n, unit, srcPhrase)
         else if let some n := wordToNum words[i + 1]! then
-          result := result.push (n, unit)
+          result := result.push (n, unit, srcPhrase)
     -- "port N" pattern
     if words[i]! == "port" && i + 1 < words.size then
       if let some n := words[i + 1]!.toNat? then
         -- Avoid duplicates (port may appear multiple times)
-        if !result.any (fun (v, u) => v == n && u == "port") then
-          result := result.push (n, "port")
+        if !result.any (fun (v, u, _) => v == n && u == "port") then
+          result := result.push (n, "port", s!"port {n}")
   return result
 
 -- ============================================================
@@ -684,6 +686,23 @@ def parseGlossaryList (text : String) : Array GlossaryEntry := Id.run do
     i := j
   return result
 
+/-- Detect a structural-identity cross-reference — "… of the same
+    ⟨form/format/structure⟩ as ⟨REF⟩ …" — and return REF (uppercased, as
+    glossary entries are keyed). The frame is parsed from the tagged
+    tokens: a "same" premodifier on a structural-identity noun, "as", then
+    the referent NP (chunked, so trailing punctuation and relative clauses
+    don't leak into the name). -/
+def sameFormReference (desc : String) : Option String := Id.run do
+  let toks := NLP.tagPOS (NLP.tokenize desc.toLower)
+  for i in [:toks.size] do
+    let h := toks[i]!.word
+    if (h == "form" || h == "format" || h == "structure") &&
+        i >= 1 && i + 1 < toks.size &&
+        toks[i - 1]!.word == "same" && toks[i + 1]!.word == "as" then
+      if let some (refNP, _) := NLP.parseNP toks (i + 2) then
+        return some refNP.head.toUpper
+  return none
+
 /-- Resolve glossary entry descriptions to Lean types via NLP keyword table + env lookup. -/
 def resolveGlossaryFieldTypes (entries : Array GlossaryEntry)
     (env : Environment) (ns : Name) : Array (String × Option Name) := Id.run do
@@ -704,18 +723,11 @@ def resolveGlossaryFieldTypes (entries : Array GlossaryEntry)
       else none  -- fallback ByteArray
     resolved := resolved.push (entry.name, fieldType)
     resolvedMap := resolvedMap.insert entry.name fieldType
-  -- Second pass: resolve "same form as X" cross-references
+  -- Second pass: resolve structural-identity cross-references
   for i in [:entries.size] do
-    let desc := entries[i]!.description.toLower
-    if hasSub desc "same form as" then
-      -- Extract the referenced name
-      let parts := desc.splitOn "same form as "
-      if parts.length > 1 then
-        let refWords := parts[1]!.splitOn " " |>.filter (!·.isEmpty)
-        if !refWords.isEmpty then
-          let refName := refWords[0]!.toUpper.splitOn "," |>.head! -- strip trailing comma
-          if let some refType := resolvedMap.get? refName then
-            resolved := resolved.set! i (entries[i]!.name, refType)
+    if let some refName := sameFormReference entries[i]!.description then
+      if let some refType := resolvedMap.get? refName then
+        resolved := resolved.set! i (entries[i]!.name, refType)
   return resolved
 
 /-- Extract prose text before the first glossary entry. -/
@@ -808,6 +820,7 @@ private def resolveNPType (head : String) (preAdjs : Array String)
     if (env.find? c).isSome then return (toString c, false)
   -- Known DNS domain type mappings
   if hasSub h "name" && preAdjs.any (· == "domain") then return ("ByteArray", false)
+  if h == "name" || h == "names" then return ("ByteArray", false)
   if h == "address" || h == "addresses" then return ("BitVec 32", false)
   if h == "count" || h == "number" then return ("Nat", false)
   if h == "zone" then return ("ByteArray", false)
@@ -1826,43 +1839,49 @@ private def clauseLabel : NLP.Clause → String
     Returns (isIff, hasResponseGuard, paramName). -/
 private def deriveComplementSemantics (sentence : String) : Option (Bool × Bool × String) :=
   Id.run do
-  let lower := sentence.toLower
-  let markers : List (String × Bool) :=
-    [("specifies that ", false), ("specifies whether ", true),
-     ("denotes that ", false), ("denotes whether ", true),
-     ("indicates that ", false), ("indicates whether ", true)]
-  for (m, isIff) in markers do
-    if hasSub lower m then
-      let parts := lower.splitOn m
-      let pre := parts[0]!
-      let comp := parts.getD 1 ""
-      let hasRespGuard := hasSub pre "response"
-      -- Complement head: clause parse first, text fallback after the copula.
-      -- Heads must be alphabetic words (parentheticals like "(0)" produce
-      -- junk heads otherwise).
-      let validHead (w : String) : Bool :=
-        w.length ≥ 3 && w.toList.all Char.isAlpha
-      let headWord? : Option String := Id.run do
-        let clauseHead? : Option String :=
-          match NLP.parseSentenceClause comp with
-          | .svAdj _ vp adj _ => if vp.isCopula then some adj.adj else none
-          | .svo _ vp obj _ => if vp.isCopula then some obj.head else none
-          | .svPassive _ part _ _ => some part
-          | _ => none
-        if let some hw := clauseHead? then
-          if validHead hw then return some hw
-        -- Fallback: first content word after a copula
-        for cop in [" is ", " are ", " was "] do
-          if hasSub comp cop then
-            let after := (comp.splitOn cop).getD 1 ""
-            let ws := after.splitOn " " |>.filter (fun w =>
-              !#["a", "an", "the", "not"].contains w && validHead w)
-            if let some w := ws.head? then return some w
+  let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+  -- The frame is found in the tagged tokens: an assertive verb (lexicon)
+  -- immediately followed by the complementizer. "that" yields an
+  -- implication, "whether" an iff.
+  let assertiveVerbs : Array String :=
+    #["specify", "specifies", "denote", "denotes", "indicate", "indicates"]
+  let mut ci? : Option (Nat × Bool) := none
+  for i in [:toks.size] do
+    if ci?.isNone && assertiveVerbs.contains toks[i]!.word && i + 1 < toks.size then
+      let nxt := toks[i + 1]!.word
+      if nxt == "that" then ci? := some (i + 1, false)
+      else if nxt == "whether" then ci? := some (i + 1, true)
+  let some (ci, isIff) := ci? | return none
+  -- guard: a "response" mention in the matrix clause (before the verb)
+  let hasRespGuard := (toks.extract 0 (ci - 1)).any
+    (fun t => t.word == "response" || t.word == "responses")
+  let compToks := toks.extract (ci + 1) toks.size
+  -- Complement head: clause parse first, then a token fallback after the
+  -- copula. Heads must be alphabetic words (parentheticals like "(0)"
+  -- produce junk heads otherwise).
+  let validHead (w : String) : Bool :=
+    w.length ≥ 3 && w.toList.all Char.isAlpha
+  let headWord? : Option String := Id.run do
+    let clauseHead? : Option String :=
+      match NLP.parseClause compToks with
+      | .svAdj _ vp adj _ => if vp.isCopula then some adj.adj else none
+      | .svo _ vp obj _ => if vp.isCopula then some obj.head else none
+      | .svPassive _ part _ _ => some part
+      | _ => none
+    if let some hw := clauseHead? then
+      if validHead hw then return some hw
+    -- Fallback: first valid content word after a copula token
+    for k in [:compToks.size] do
+      if compToks[k]!.pos == .copula then
+        for j in [k + 1:compToks.size] do
+          let w := compToks[j]!.word
+          if compToks[j]!.pos != .det && w != "not" && validHead w then
+            return some w
         return none
-      match headWord? with
-      | some head => return some (isIff, hasRespGuard, s!"is{capitalize head}")
-      | none => pure ()
-  return none
+    return none
+  match headWord? with
+  | some head => return some (isIff, hasRespGuard, s!"is{capitalize head}")
+  | none => return none
 
 /-- Generate `def {field}_prop_{i} : Prop := ∀ (h : T), ...` for each parsed
     clause (skipping clauses where no rule matches), plus
@@ -2610,7 +2629,7 @@ private def aliasDomainWordGuarded (head : String) : Option (String × Option (S
   | "query" => some ("Header", some ("qr", 0))
   | "message" => some ("Header", none)
   | "rr" | "record" => some ("Header", none)
-  | "server" | "servers" | "delegation" => some ("ServerEntry", none)
+  | "server" | "servers" | "delegation" => some ("SlistEntry", none)
   | _ => none
 
 /-- Simple alias without guard info, for backward compatibility. -/
@@ -2707,13 +2726,169 @@ private def stripVerbInflection (verb : String) : String :=
   else if v.endsWith "s" && v.length > 2 then dropLast v 1
   else v
 
-/-- Strip English plural: "servers" → "server", "entries" → "entry". -/
+/-- Strip English plural: "servers" → "server", "entries" → "entry".
+    The "-es" suffix is only stripped after sibilant stems (-ss, -x, -z,
+    -ch, -sh), where English requires it ("addresses" → "address",
+    "matches" → "match"); elsewhere the plural is plain "-s" on an
+    e-final stem ("names" → "name", "values" → "value"). -/
 private def stripPlural (w : String) : String :=
   let s := w.toLower
   if s.endsWith "ies" && s.length > 3 then dropLast s 3 ++ "y"
-  else if s.endsWith "es" && s.length > 3 then dropLast s 2
-  else if s.endsWith "s" && s.length > 2 then dropLast s 1
+  else if (s.endsWith "sses" || s.endsWith "xes" || s.endsWith "zes" ||
+           s.endsWith "ches" || s.endsWith "shes") && s.length > 4 then
+    dropLast s 2
+  else if s.endsWith "s" && !s.endsWith "ss" && s.length > 2 then dropLast s 1
   else s
+
+/-- e-final verb roots, whose past participle adds bare "-d"
+    ("cached" → "cache"). Morphological lexicon for participle stemming. -/
+private def eFinalVerbRoots : Array String :=
+  #["cache", "retrieve", "store", "locate", "ignore", "include", "require",
+    "release", "update", "combine", "remove", "receive", "serve", "use"]
+
+/-- Stem an "-ed" past participle to its verb root: "stored" → "store",
+    "returned" → "return", "cached" → "cache", "tried" → "try". -/
+private def participleStem (w : String) : String :=
+  let v := w.toLower
+  if v.endsWith "ied" && v.length > 4 then dropLast v 3 ++ "y"
+  else if v.endsWith "ed" && v.length > 3 then
+    let bare := dropLast v 2
+    if eFinalVerbRoots.contains (bare ++ "e") then bare ++ "e" else bare
+  else v
+
+-- ============================================================
+-- Entry-structure derivation from algorithm prose
+-- ============================================================
+
+/-- A per-entry field derived from algorithm prose. -/
+private structure EntryField where
+  name : String        -- field name (singular NP head, camelCased)
+  typeStr : String     -- resolved Lean type, as source text
+  optional : Bool      -- wrapped in Option (modal partiality)
+  src : String         -- source sentence for the docstring
+  deriving Repr, Inhabited
+
+/-- Is this word an ALL-CAPS structure reference (e.g. "SLIST")? -/
+private def isAllCapsRef (w : String) : Bool :=
+  w.length >= 2 && w.toList.all Char.isUpper
+
+/-- Derive a per-entry structure for an ALL-CAPS structure referenced in
+    algorithm prose (RFC 1034 §5.3.3). Grammar-driven, in sentence order:
+
+    1. **Membership imperative** — a verb-first clause whose plural object
+       moves "into" an ALL-CAPS structure ("Copy the names into SLIST") —
+       declares the structure's elements: entries identified by the object's
+       referent. The object head (singular) becomes the first entry field.
+    2. **Possessive-anaphor imperative** — a later imperative whose object
+       is determined by "their" ("Set up THEIR addresses …"), the anaphor
+       referring to the just-established entries — adds a per-entry field
+       from its object head.
+    3. **Modal partiality** — "may" + expletive copula + "case" head with a
+       that-relClause whose sub-clause negates an adjectival predication
+       over a known field's plural ("the addresses are not available") —
+       makes that field's knowledge partial: the type wraps in `Option`.
+    4. **Keep-track purpose** — "keep track of previous ⟨plural⟩"
+       ("… keep track of previous transmissions") — adds a per-entry `Nat`
+       counter for those past events, named `⟨singular⟩Count`. Detected at
+       token level because purpose-infinitive coordination ("to control …
+       and keep track …") is lossy at clause level.
+
+    Returns (target, fields) when a membership imperative anchored the
+    derivation, none otherwise. -/
+private def deriveEntryStructure (prose : String) (env : Environment) (ns : Name)
+    : Option (String × Array EntryField) := Id.run do
+  let sentences := Property.splitSentences prose
+  let emptyNP : NLP.NounPhrase := ⟨none, #[], "", .unknown, #[]⟩
+  let mut target : Option String := none
+  let mut fields : Array EntryField := #[]
+  for s in sentences do
+    let toks := NLP.tagPOS (NLP.tokenize s)
+    if toks.isEmpty then continue
+    -- Imperative passes (verb-first clause)
+    if toks[0]!.pos == .verb then
+      if let some (.svo _ _ obj pps) := NLP.parseImperativeClause toks emptyNP then
+        match target with
+        | none =>
+          -- 1: membership imperative
+          if obj.number == .plural then
+            if let some pp := pps.find? fun pp =>
+                pp.prep.toLower == "into" && isAllCapsRef pp.np.head then
+              target := some pp.np.head
+              let fname := stripPlural obj.head
+              let (tstr, _) := resolveNPType obj.head obj.preAdjs obj.number env ns
+              fields := fields.push ⟨fname, tstr, false, s⟩
+        | some _ =>
+          -- 2: possessive-anaphor imperative
+          if obj.det == some "their" && obj.number == .plural then
+            let fname := stripPlural obj.head
+            unless fields.any (·.name == fname) do
+              let (tstr, _) := resolveNPType obj.head obj.preAdjs obj.number env ns
+              fields := fields.push ⟨fname, tstr, false, s⟩
+    if target.isSome then
+      -- 3: modal partiality over a known field's plural
+      match NLP.parseClause toks with
+      | .svo _ vp obj _ =>
+        if vp.adv == some "may" && vp.isCopula && obj.head.toLower == "case" then
+          for pm in obj.postMods do
+            if let .relClause _ relText := pm then
+              if let .svAdj subj _ comp _ := NLP.parseSentenceClause relText then
+                if comp.adv == some "not" then
+                  fields := fields.map fun f =>
+                    if f.name == stripPlural subj.head then
+                      { f with optional := true, src := f.src ++ "\" / \"" ++ s }
+                    else f
+      | _ => pure ()
+      -- 4: keep-track counter (token-level: purpose coordination is lossy)
+      for i in [:toks.size] do
+        if i + 3 < toks.size && stripVerbInflection toks[i]!.word == "keep" &&
+            toks[i+1]!.word.toLower == "track" && toks[i+2]!.word.toLower == "of" then
+          if let some (np, _) := NLP.parseNP toks (i + 3) then
+            if np.number == .plural && np.preAdjs.any (·.toLower == "previous") then
+              let fname := stripPlural np.head ++ "Count"
+              unless fields.any (·.name == fname) do
+                fields := fields.push ⟨fname, "Nat", false, s⟩
+  match target with
+  | some t => if fields.isEmpty then none else some (t, fields)
+  | none => none
+
+/-- Generate the per-entry structure derived by `deriveEntryStructure`, with
+    docstrings citing the source sentences. Returns (name × srcSentence)
+    pairs for RFC-text hover linking. -/
+private def generateEntryStructure (prose : String)
+    : CommandElabM (Array (Name × String)) := do
+  let env ← getEnv
+  let ns ← getCurrNamespace
+  let some (target, fields) := deriveEntryStructure prose env ns | return #[]
+  let structShort := capitalize target.toLower ++ "Entry"
+  let structName := Name.mkSimple structShort
+  if (env.find? (ns ++ structName)).isSome then return #[]
+  let mut fieldNames : Array Ident := #[]
+  let mut fieldTypes : Array (TSyntax `term) := #[]
+  for f in fields do
+    let base : TSyntax `term ←
+      match Lean.Parser.runParserCategory env `term f.typeStr "<entry-field>" with
+      | .ok stx => pure ⟨stx⟩
+      | .error e => throwError "entry-field type parse error: {e}"
+    let t ← if f.optional then `(Option $base) else pure base
+    fieldNames := fieldNames.push (mkIdent (Name.mkSimple f.name))
+    fieldTypes := fieldTypes.push t
+  elabCommand (mkStructureCmd (mkIdent structName) fieldNames fieldTypes
+    #[``BEq, ``Inhabited])
+  let fullName := ns ++ structName
+  let fieldLines := String.join (fields.toList.map fun f =>
+    s!"- `{f.name}`{if f.optional then " (partial)" else ""}: \"{f.src}\"\n")
+  addDocStringCore fullName
+    (s!"Per-entry structure of {target}, derived from the algorithm prose: " ++
+     s!"a membership imperative fixes the entry identity, a possessive-anaphor " ++
+     s!"imperative adds a per-entry field, modal partiality (\"may ... not ...\") " ++
+     s!"wraps a field in `Option`, and a keep-track purpose adds a counter.\n\n" ++
+     fieldLines)
+  for f in fields do
+    addDocStringCore (fullName ++ Name.mkSimple f.name) s!"\"{f.src}\""
+  let mut srcs : Array (Name × String) := #[]
+  if let some f0 := fields[0]? then
+    srcs := srcs.push (fullName, f0.src)
+  return srcs
 
 /-- Search inductives in contextTypes for a constructor whose lowered name contains the candidate.
     Returns (inductiveName, ctorName). -/
@@ -4459,18 +4634,84 @@ private def normalizeForHoverMatch (s : String) : String := Id.run do
         lastSpace := false
   return trimStr out
 
+/-- Map from ident start byte position to the declaration whose hover claimed
+    that ident. SubVerso renders exactly ONE TermInfo per token, so every
+    pusher must consult this map: the first declaration to land on an ident
+    becomes its hover target, and later ones are appended to that primary's
+    docstring (see `appendSiblingDoc`) instead of being pushed and lost. -/
+abbrev HoverClaims := Std.HashMap Nat Name
+
+/-- Pretty-print a generated declaration for embedding in a hover docstring.
+    Zero-binder `Prop` defs show their body (the proposition is the payload;
+    the type `Prop` says nothing), parameterized defs and everything else
+    show their type, and inductives list their constructors in order. -/
+private def ppGeneratedDecl (name : Name) : CommandElabM (Option String) := do
+  let env ← getEnv
+  let some ci := env.find? name | return none
+  let short := name.components.getLast!.toString
+  match ci with
+  | .inductInfo ind =>
+    let ctors := ind.ctors.map (fun c => c.components.getLast!.toString)
+    return some s!"inductive {short}\n  | {"\n  | ".intercalate ctors}"
+  | .defnInfo d =>
+    if d.type.isProp then
+      let body ← liftCoreM <| MetaM.run' (Meta.ppExpr d.value)
+      return some s!"{short} : Prop :=\n  {body.pretty}"
+    else
+      let ty ← liftCoreM <| MetaM.run' (Meta.ppExpr d.type)
+      return some s!"{short} : {ty.pretty}"
+  | _ =>
+    let ty ← liftCoreM <| MetaM.run' (Meta.ppExpr ci.type)
+    return some s!"{short} : {ty.pretty}"
+
+/-- Append `sibling`'s rendered declaration to `primary`'s docstring under an
+    "Also generated from this passage" section, so a definition that lost the
+    one-hover-per-token race is still visible from the passage's hover. -/
+private def appendSiblingDoc (primary sibling : Name) : CommandElabM Unit := do
+  if primary == sibling then return
+  let some rendered ← ppGeneratedDecl sibling | return
+  let env ← getEnv
+  let old := (← findDocString? env primary).getD ""
+  let entry := s!"```lean\n{rendered}\n```"
+  if hasSub old entry then return
+  let sectionHeader := "**Also generated from this passage:**"
+  let base := if hasSub old sectionHeader then old
+    else if old.isEmpty then sectionHeader
+    else s!"{old}\n\n{sectionHeader}"
+  addDocStringCore primary s!"{base}\n{entry}"
+
+/-- Claim hover on `arg` (an ident starting at byte `pos`) for `target`.
+    First claimant pushes TermInfo; later claimants are folded into the
+    claimant's docstring. Returns the updated claims map. -/
+def claimHover (claims : HoverClaims) (arg : Syntax) (pos : Nat) (target : Name)
+    : CommandElabM HoverClaims := do
+  match claims.get? pos with
+  | some primary =>
+    appendSiblingDoc primary target
+    return claims
+  | none =>
+    pushInfoLeaf (.ofTermInfo {
+      elaborator := `VeriDNS.RFC.includeRfc
+      stx := arg
+      expr := .const target []
+      lctx := {}
+      expectedType? := none
+    })
+    return claims.insert pos target
+
 /-- Push hover info linking prose sentence idents to their generated props.
     Each (propName, srcSentence) pair is matched against parser ident text by
     normalized substring containment; the prop attaches to the first ident
     whose text contains its source sentence. Used by prose-only, algorithm,
     and glossary-intro sections where props derive from free prose rather
     than where-block field descriptions.
-    Returns the start byte positions of idents that received hover info, so
-    the caller can exclude them from the generic struct-hover fallback. -/
+    Returns the hover claims map (ident position → hover target) so later
+    pushers fold colliding hovers into docstrings and the generic
+    struct-hover fallback skips claimed idents. -/
 def pushProseHoverInfo (propSrcs : Array (Name × String)) (rfcNodeArgs : Array Syntax)
-    : CommandElabM (Array Nat) := do
+    : CommandElabM HoverClaims := do
   let env ← getEnv
-  let mut consumed : Array Nat := #[]
+  let mut claims : HoverClaims := {}
   for (propName, src) in propSrcs do
     if !(env.find? propName).isSome then continue
     let srcNorm := normalizeForHoverMatch src
@@ -4479,16 +4720,9 @@ def pushProseHoverInfo (propSrcs : Array (Name × String)) (rfcNodeArgs : Array 
       let .ident _ rawVal _ _ := arg | continue
       let some pos := arg.getPos? | continue
       if hasSub (normalizeForHoverMatch rawVal.toString) srcNorm then
-        pushInfoLeaf (.ofTermInfo {
-          elaborator := `VeriDNS.RFC.includeRfc
-          stx := arg
-          expr := .const propName []
-          lctx := {}
-          expectedType? := none
-        })
-        consumed := consumed.push pos.byteIdx
+        claims ← claimHover claims arg pos.byteIdx propName
         break
-  return consumed
+  return claims
 
 /-- Push hover info for parsed description sentences.
     Walks parser ident nodes: field-name idents set the current field,
@@ -4497,12 +4731,13 @@ def pushProseHoverInfo (propSrcs : Array (Name × String)) (rfcNodeArgs : Array 
     Sentence idents exist because rfcTextBodyFn splits descriptions at
     sentence boundaries via findSentenceSplitPoints. -/
 def pushSentenceHoverInfo (structName : String) (rfcNodeArgs : Array Lean.Syntax)
-    (fields : Array MergedField) : CommandElabM Unit := do
+    (fields : Array MergedField) (claims : HoverClaims) : CommandElabM HoverClaims := do
   let env ← getEnv
   let ns ← getCurrNamespace
   let fullStructName := ns ++ Name.mkSimple structName
-  if !(env.find? fullStructName).isSome then return
+  if !(env.find? fullStructName).isSome then return claims
   let fieldNames := fields.map (·.name.toUpper)
+  let mut claims := claims
   let mut currentField : Option MergedField := none
   let mut sentenceIdx : Nat := 0
   for arg in rfcNodeArgs do
@@ -4517,23 +4752,17 @@ def pushSentenceHoverInfo (structName : String) (rfcNodeArgs : Array Lean.Syntax
     -- If we have a current field, this is a sentence ident
     let some field := currentField | continue
     if field.description.isEmpty then continue
+    let some pos := arg.getPos? | continue
     let propName := ns ++ Name.mkSimple s!"{field.name.toLower}_prop_{sentenceIdx}"
-    -- Fall back to the complement-semantics def when no clause prop exists
-    -- (e.g. ra_semantics_0 from "denotes whether ..." sentences)
+    -- The complement-semantics def (e.g. ra_semantics_0 from "denotes
+    -- whether ..." sentences) may coexist with the clause prop; the prop
+    -- claims the hover and the semantics def rides along in its docstring.
     let semName := ns ++ Name.mkSimple s!"{field.name.toLower}_semantics_{sentenceIdx}"
-    let target? :=
-      if (env.find? propName).isSome then some propName
-      else if (env.find? semName).isSome then some semName
-      else none
-    if let some target := target? then
-      pushInfoLeaf (.ofTermInfo {
-        elaborator := `VeriDNS.RFC.includeRfc
-        stx := arg
-        expr := .const target []
-        lctx := {}
-        expectedType? := none
-      })
+    let targets := #[propName, semName].filter (env.find? · |>.isSome)
+    for target in targets do
+      claims ← claimHover claims arg pos.byteIdx target
     sentenceIdx := sentenceIdx + 1
+  return claims
 
 /-- Generate formal Prop definitions from example sentences in RFC text.
     Analyzes "For example" / "e.g." / "i.e." patterns via the NLP pipeline
@@ -4541,11 +4770,11 @@ def pushSentenceHoverInfo (structName : String) (rfcNodeArgs : Array Lean.Syntax
     Also pushes hover info linking trigger phrases to generated definitions. -/
 def generateExampleProps (structName : String) (text : String)
     (mergedFields : Array MergedField) (rfcNodeArgs : Array Lean.Syntax)
-    : CommandElabM Unit := do
+    (claims : HoverClaims) : CommandElabM HoverClaims := do
   let ns ← getCurrNamespace
   let fieldNames := mergedFields.map (·.name)
   let examples := NLP.analyzeExamples text fieldNames
-  if examples.isEmpty then return
+  if examples.isEmpty then return claims
   let structIdent := mkIdent (Name.mkSimple structName)
   let wIdent := mkIdent `w
   for idx in [:examples.size] do
@@ -4606,28 +4835,22 @@ def generateExampleProps (structName : String) (text : String)
     | _ => pure ()
   -- Push hover info on idents containing example triggers
   let exampleTriggers := ["e.g.", "i.e.", "For example", "for example"]
+  let mut claims := claims
   for arg in rfcNodeArgs do
     if !arg.isIdent then continue
     let .ident _ rawVal _ _ := arg | continue
-    let some _ := arg.getPos? | continue
+    let some pos := arg.getPos? | continue
     let rawText := rawVal.toString
     if exampleTriggers.any (fun t => hasSub rawText t) then
       let env ← getEnv
       -- Point hover to the first generated example prop if it exists
       let examplePropName := ns ++ Name.mkSimple s!"{structName.toLower}_example_0"
       let fullStructName := ns ++ Name.mkSimple structName
-      let hoverExpr := if (env.find? examplePropName).isSome
-        then Expr.const examplePropName []
-        else if (env.find? fullStructName).isSome
-        then Expr.const fullStructName []
-        else Expr.const ``True []
-      pushInfoLeaf (.ofTermInfo {
-        elaborator := `VeriDNS.RFC.includeRfc
-        stx := arg
-        expr := hoverExpr
-        lctx := {}
-        expectedType? := none
-      })
+      let target := if (env.find? examplePropName).isSome then examplePropName
+        else if (env.find? fullStructName).isSome then fullStructName
+        else ``True
+      claims ← claimHover claims arg pos.byteIdx target
+  return claims
 
 -- ============================================================
 -- Main pipeline
@@ -4691,14 +4914,8 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
 
       for entry in glossaryEntries do
         let desc := entry.description.toLower
-        if hasSub desc "same form as" then
-          -- Extract referenced entry name
-          let parts := desc.splitOn "same form as "
-          if parts.length > 1 then
-            let refWords := parts[1]!.splitOn " " |>.filter (!·.isEmpty)
-            if !refWords.isEmpty then
-              let refName := refWords[0]!.toUpper.splitOn "," |>.head!
-              sameFormRefs := sameFormRefs.push (entry.name, refName)
+        if let some refName := sameFormReference entry.description then
+          sameFormRefs := sameFormRefs.push (entry.name, refName)
         else if hasSub desc "structure" then
           -- Full NLP inference for structure descriptions
           let clauses := NLP.parseProseClauses entry.description
@@ -4840,6 +5057,13 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
               addDocStringCore fullName s!"Algorithm: prop {propIdx}\n```lean\n{fmt.pretty}\n```"
               propSrcs := propSrcs.push (fullName, src)
               propIdx := propIdx + 1
+      -- Entry-structure derivation: membership/possessive imperatives, modal
+      -- partiality, and keep-track purposes describe the per-entry contents
+      -- of an ALL-CAPS structure ("Copy the names into SLIST", "Set up their
+      -- addresses ...", "may ... the addresses are not available", "keep
+      -- track of previous transmissions") → structure SlistEntry.
+      let entrySrcs ← generateEntryStructure prose
+      propSrcs := propSrcs ++ entrySrcs
       -- Recommendation derivation: modal partiality + superlative recommendation.
       -- "It may be the case that ⟨C⟩" states the situation MAY occur (partiality
       -- of the underlying operation); "the best is to ⟨action⟩" recommends the
@@ -5035,6 +5259,12 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
           values := values.push ⟨i, name, trimStr bullets[i]!⟩
         let credName ← generateValueListType typeNm values
         let short := credName.components.getLast!.toString
+        -- Type-level docstring: the ranked tier list, so the hover on the
+        -- ordering-directive sentence shows the full generated enum.
+        let tierLines := values.map fun v => s!"{v.code}. `{v.name}` — {v.description}"
+        addDocStringCore credName
+          (s!"Ranked tiers from the ordering directive (rank 0 = the " ++
+           s!"most-trustworthy pole):\n\n" ++ "\n".intercalate tierLines.toList)
         -- order relation: a is at least as trustworthy as b  ⟺  rank a ≤ rank b
         elabCommandStr (s!"def {short}.atLeastAsTrustworthy (a b : {short}) : Prop := " ++
           s!"{short}.toCode a ≤ {short}.toCode b")
@@ -5081,8 +5311,13 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
           matchObSrcs := matchObSrcs.push
             (ns ++ Name.mkSimple "obligation_untrustworthyNotAnswerable",
              "returned as answers")
+        -- The ordering-directive sentence is the source of both the ranked
+        -- enum and its order relation; the enum claims the hover and the
+        -- relation rides along in its docstring (claimHover collision rule).
+        let directiveSrc := trimStr lines[markerLine]!
+        matchObSrcs := matchObSrcs.push (credName, directiveSrc)
         matchObSrcs := matchObSrcs.push
-          (credName ++ Name.mkSimple "atLeastAsTrustworthy", "ordering directive")
+          (credName ++ Name.mkSimple "atLeastAsTrustworthy", directiveSrc)
     if hasSub prose.toLower "must match responses to all of the following attributes" then
       -- Collect only the bullets immediately following the trigger sentence
       -- (stop at the first non-blank, non-bullet line).
@@ -5266,6 +5501,89 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
          s!"of `{targetCamel}`. Derived from the when-led MUST-{mainVerb} " ++
          s!"sentence: \"{sentence}\"")
       matchObSrcs := matchObSrcs.push (fullName, s!"must {mainVerb} the")
+      -- Keyed authority companion class: the when-clause's object ("a
+      -- CACHED NEGATIVE response") anaphorically references the keyed
+      -- negative-cache class — its premodifiers (participle + adjective)
+      -- reconstruct that class's name. The obligation's pieces then also
+      -- generate a companion class extending it: the object must first get
+      -- INTO the cache ("... the amount of time it was STORED in the
+      -- cache" → store method, keyed like the parent, taking the record),
+      -- and the "to"-target is served back for the same key ("add ... to
+      -- the authority section" → accessor returning the target collection,
+      -- transformed per the "with" participle).
+      let gWords := (npWords gObj).toArray
+      let parentName? : Option String := Id.run do
+        let mut adjW : Option String := none
+        let mut partW : Option String := none
+        for w in gWords.pop do  -- premodifiers only (drop the head)
+          if w.endsWith "ed" then partW := some (participleStem w)
+          else if adjW.isNone then adjW := some w
+        match adjW, partW with
+        | some a, some p => return some (capitalize a ++ capitalize p ++ "Spec")
+        | _, _ => return none
+      if let some parentName := parentName? then
+        let curEnv ← getEnv
+        let parentFull := ns ++ Name.mkSimple parentName
+        if (curEnv.find? parentFull).isSome then
+          if let some psi := Lean.getStructureInfo? curEnv parentFull then
+            if let some storeField := psi.fieldNames[0]? then
+              if let some pi := curEnv.find? (parentFull ++ storeField) then
+                -- explicit argument domains of the parent's store
+                -- projection: [self, key..., answer-class, time?]
+                let doms ← liftTermElabM <|
+                  Lean.Meta.forallTelescope pi.type fun args _ => do
+                    let mut acc : Array String := #[]
+                    for a in args do
+                      if (← a.fvarId!.getBinderInfo) == .default then
+                        let d ← Lean.Meta.inferType a
+                        let stx ← Lean.PrettyPrinter.delab d
+                        acc := acc.push (← ppTerm stx).pretty
+                    return acc
+                if doms.size >= 4 then
+                  let hasTime := doms.back? == some "UInt32"
+                  let coreEnd := if hasTime then doms.size - 1 else doms.size
+                  let key := doms.extract 1 (coreEnd - 1)
+                  let keyStr := " → ".intercalate key.toList
+                  let timePart := if hasTime then "UInt32 → " else ""
+                  -- the storage passive inside the "with" transform:
+                  -- participle governing a "in the cache" PP
+                  let storedPart? : Option String := Id.run do
+                    for k in [:toks.size] do
+                      if (toks[k]!.pos == .verb || toks[k]!.pos == .adj) &&
+                          toks[k]!.word.endsWith "ed" then
+                        if let some (pp, _) := NLP.parsePP toks (k + 1) then
+                          if pp.prep == "in" && pp.np.head == "cache" then
+                            return some toks[k]!.word
+                    return none
+                  if let some storedPart := storedPart? then
+                    let storeObj := toCamelCase
+                      (objWords.filter (fun w => !w.endsWith "ed"))
+                    let storeM := participleStem storedPart ++ capitalize storeObj
+                    let serveM := targetCamel
+                    let clsName := capitalize
+                        ((gWords.pop.filter (fun w => !w.endsWith "ed")).toList.headD "negative")
+                      ++ capitalize (targetWords.headD "authority") ++ "Spec"
+                    if (curEnv.find? (ns ++ Name.mkSimple clsName)).isNone &&
+                        storeM != serveM then
+                      elabCommandStr
+                        (s!"class {clsName} (C RR : Type) extends {parentName} C where\n" ++
+                         s!"  {storeM} : C → {keyStr} → RR → {timePart}C\n" ++
+                         s!"  {serveM} : C → {keyStr} → {timePart}Array RR")
+                      let clsFull := ns ++ Name.mkSimple clsName
+                      addDocStringCore clsFull
+                        (s!"Authority companion to `{parentName}` (the when-clause's " ++
+                         s!"\"cached negative response\" anaphor): the `{storeObj}` is " ++
+                         s!"stored with the negative entry and served back in the " ++
+                         s!"`{serveM}` for the same key, `{transformName}`. Derived " ++
+                         s!"from: \"{sentence}\"")
+                      addDocStringCore (clsFull ++ Name.mkSimple storeM)
+                        (s!"\"... the amount of time it was {storedPart} in the cache\" " ++
+                         s!"— the record enters the cache keyed like the parent's " ++
+                         s!"negative entry.")
+                      addDocStringCore (clsFull ++ Name.mkSimple serveM)
+                        (s!"\"{mainVerb} the {storeObj} to the {targetCamel} ... " ++
+                         s!"{transformName}\" — the served target collection for the key.")
+                      matchObSrcs := matchObSrcs.push (clsFull, s!"must {mainVerb} the")
     -- Insensitive-comparison rule (RFC 1035 §3.1): "… must compare
     -- ⟨objects⟩ in a ⟨X⟩-insensitive manner (i.e., A=a), assuming ASCII …
     -- Non-⟨alphabetic⟩ codes must match exactly." Three props, all from
@@ -5550,6 +5868,14 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
     -- tuple naming every field (NODATA) yields no invariance: skipped.
     if hasSub prose "<" then
       let tupContextTypes := collectContextTypes env ns
+      -- Aggregated across the keyed sentences, for the class generation
+      -- after the loop: tuple-field union, resolved answer enum, the
+      -- subject's premodifier, and the store/retrieve participle pair.
+      let mut negKeyComps : Array String := #[]
+      let mut negEnumName : Option Name := none
+      let mut negSubjAdj : Option String := none
+      let mut negOps : Option (String × String) := none
+      let mut negSrcs : Array String := #[]
       for sentence in Property.splitSentences prose do
         let tokens := NLP.tagPOS (NLP.tokenize sentence.toLower)
         let hasVerb := fun (w : String) =>
@@ -5577,6 +5903,32 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
                         env tupContextTypes then
                       return some c
             return none
+          -- Collect class-generation evidence from every keyed sentence
+          if let some tup := tuple? then
+            let tupText := String.ofList
+              (tup.toList.filter (fun c => c != '<' && c != '>'))
+            for comp in (tupText.splitOn ",").map trimStr do
+              if !comp.isEmpty && !negKeyComps.contains comp then
+                negKeyComps := negKeyComps.push comp
+            negSrcs := negSrcs.push sentence
+            -- subject premodifier ("a NEGATIVE answer ... should be cached")
+            if negSubjAdj.isNone then
+              if let some (np, _) := NLP.parseNP tokens 0 then
+                negSubjAdj := np.preAdjs[0]?
+            -- the operation pair: passive participles after "be" — main
+            -- clause ("should be CACHED") = store, complement ("can be
+            -- RETRIEVED and returned") = retrieve (first coordinate)
+            if negOps.isNone then
+              let mut parts : Array String := #[]
+              for k in [:tokens.size] do
+                if tokens[k]!.word == "be" && k + 1 < tokens.size &&
+                    tokens[k + 1]!.pos == .verb then
+                  parts := parts.push tokens[k + 1]!.word
+              if let (some p0, some p1) := (parts[0]?, parts[1]?) then
+                negOps := some (p0, p1)
+          if negEnumName.isNone then
+            if let some ctor := ctor? then
+              negEnumName := some ctor.getPrefix
           match tuple?, ctor? with
           | some tup, some ctor =>
             let marker := ctor.components.getLast!.toString
@@ -5641,6 +5993,80 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
                      s!"Derived from \"{sentence}\"")
                   matchObSrcs := matchObSrcs.push (fullName, "for the same <")
           | _, _ => pure ()
+      -- Negative-cache operations: the keyed cached/retrieved frame
+      -- generates a store/retrieve typeclass. The store key is the UNION
+      -- of the tuple fields across the keyed sentences (NXDOMAIN names
+      -- ⟨QNAME, QCLASS⟩, NODATA ⟨QNAME, QTYPE, QCLASS⟩ — the store must
+      -- carry the full key; the NXDOMAIN retrieval ignores QTYPE via the
+      -- invariance prop above). The answer class is the enum resolved from
+      -- the subject's relative clause ("resulted from a name error" →
+      -- Rcode); retrieval is partial — only "another query ... that
+      -- resulted in the cached negative response" hits. The TTL-countdown
+      -- sentence ("This TTL decrements ... upon reaching zero (0) ...
+      -- MUST NOT be used again") adds the absolute-time argument (the
+      -- §5.3.2 storeAt convention).
+      if !negKeyComps.isEmpty then
+        if let some enumFull := negEnumName then
+        if let some (storePart, retrPart) := negOps then
+          let adj := (negSubjAdj.getD "negative").toLower
+          let hasCountdown := Id.run do
+            for sentence in Property.splitSentences prose do
+              let toks := NLP.tagPOS (NLP.tokenize sentence.toLower)
+              for i in [:toks.size] do
+                if i + 1 < toks.size && toks[i]!.word == "ttl" &&
+                    stripVerbInflection toks[i + 1]!.word == "decrement" then
+                  return true
+            return false
+          let qStructName := ns ++ Name.mkSimple "Question"
+          if let some si := Lean.getStructureInfo? env qStructName then
+            let keyFields := si.fieldNames.filter fun f =>
+              negKeyComps.any (fun c => c.toLower == f.toString.toLower)
+            if keyFields.size == negKeyComps.size then
+              let mut keyTypeStrs : Array String := #[]
+              let mut ok := true
+              for f in keyFields do
+                match env.find? (qStructName ++ f) with
+                | some projInfo =>
+                  match projInfo.type with
+                  | .forallE _ _ fbody _ =>
+                    let tyStx ← liftTermElabM (Lean.PrettyPrinter.delab fbody)
+                    keyTypeStrs := keyTypeStrs.push (← liftCoreM (ppTerm tyStx)).pretty
+                  | _ => ok := false
+                | none => ok := false
+              if ok then
+                let enumStr := (enumFull.replacePrefix ns Name.anonymous).toString
+                let keyStr := " → ".intercalate keyTypeStrs.toList
+                let timePart := if hasCountdown then "UInt32 → " else ""
+                let storeM := participleStem storePart ++ capitalize adj
+                let retrM := participleStem retrPart ++ capitalize adj
+                let className := capitalize adj ++
+                  capitalize (participleStem storePart) ++ "Spec"
+                if (env.find? (ns ++ Name.mkSimple className)).isNone then
+                  let storeSig := s!"C → {keyStr} → {enumStr} → {timePart}C"
+                  let retrSig := s!"C → {keyStr} → {timePart}Option {enumStr}"
+                  elabCommandStr (mkClassString className #["C"]
+                    #[storeM, retrM] #[storeSig, retrSig])
+                  let classFull := ns ++ Name.mkSimple className
+                  let sanitize (s : String) : String := String.ofList
+                    (s.toList.map fun c =>
+                      if c == '<' then '⟨' else if c == '>' then '⟩' else c)
+                  let srcsStr := " / ".intercalate
+                    (negSrcs.toList.map (fun s => "\"" ++ sanitize s ++ "\""))
+                  addDocStringCore classFull
+                    (s!"Negative-cache store/retrieve operations, keyed by the " ++
+                     s!"union of the tuple fields across the keyed sentences, " ++
+                     s!"parameterized by the resolved answer class `{enumStr}`" ++
+                     (if hasCountdown then
+                       ", with an absolute-time argument from the TTL-countdown sentence"
+                      else "") ++ s!". Derived from {srcsStr}")
+                  addDocStringCore (classFull ++ Name.mkSimple storeM)
+                    (s!"\"should be {storePart} such that it can be {retrPart} " ++
+                     s!"and returned\" — the store side, keyed by the full union " ++
+                     s!"key, tagged with the `{enumStr}` answer class.")
+                  addDocStringCore (classFull ++ Name.mkSimple retrM)
+                    (s!"The retrieve side — partial: only a query for the same " ++
+                     s!"key \"that resulted in the {adj} response\" hits.")
+                  matchObSrcs := matchObSrcs.push (classFull, "for the same <")
     -- "either ⟨discard ...⟩, or limit all TTLs in the response to ⟨duration⟩"
     -- (RFC 1035 §7.3 TTL sanity). The sentence sanctions two behaviors;
     -- both are captured by one Option-valued process: a discarded response
@@ -5823,12 +6249,13 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
       -- Generate numeric constants from extractConstraintValues
       let rawConstraints := extractConstraintValues prose
       for i in [:rawConstraints.size] do
-        let (value, unit) := rawConstraints[i]!
+        let (value, unit, srcPhrase) := rawConstraints[i]!
         let constName := mkIdent (Name.mkSimple s!"{structName.toLower}_limit_{i}")
         let constVal := Syntax.mkNumLit (toString value)
         elabCommand (← `(def $constName : Nat := $constVal))
         let fullName := ns ++ Name.mkSimple s!"{structName.toLower}_limit_{i}"
         addDocStringCore fullName s!"{structName}: {value} {unit}"
+        propSrcs := propSrcs.push (fullName, srcPhrase)
       return some (structName, allStructFields, propSrcs)
     -- Sections that yielded only a MUST-match obligation (no struct):
     -- still return it for hover support
@@ -5847,15 +6274,22 @@ def processRfcText (text : String) (rfcNodeArgs : Array Syntax := #[])
       let sectionHeader := extractSectionHeader text |>.getD ""
       addDocStringCore fullName sectionHeader
       return some (enumName, #[], #[])
-    -- Fallback: no fields derived, just extract numeric constants
+    -- Fallback: no fields derived, just extract numeric constants.
+    -- Still return the limit sources so the constants are hover-reachable
+    -- from the sentences that produced them (the struct-hover and sentence
+    -- pushers no-op when no struct named `structName` exists).
     let rawConstraints := extractConstraintValues prose
+    let mut limitSrcs : Array (Name × String) := #[]
     for i in [:rawConstraints.size] do
-      let (value, unit) := rawConstraints[i]!
+      let (value, unit, srcPhrase) := rawConstraints[i]!
       let constName := mkIdent (Name.mkSimple s!"{structName.toLower}_limit_{i}")
       let constVal := Syntax.mkNumLit (toString value)
       elabCommand (← `(def $constName : Nat := $constVal))
       let fullName := ns ++ Name.mkSimple s!"{structName.toLower}_limit_{i}"
       addDocStringCore fullName s!"{structName}: max {value} {unit}"
+      limitSrcs := limitSrcs.push (fullName, srcPhrase)
+    if !limitSrcs.isEmpty then
+      return some (structName, #[], limitSrcs)
     return none
 
   let merged' := mergeFields diagramFields whereFields

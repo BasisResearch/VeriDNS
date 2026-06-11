@@ -1,6 +1,7 @@
 import VeriDNS.Spec.Resolver
 import VeriDNS.Spec.ResourceRecord
 import VeriDNS.Spec.Credibility
+import VeriDNS.Spec.NegativeCache
 import VeriDNS.Impl.ResourceRecord
 
 namespace VeriDNS.Impl.Cache
@@ -237,11 +238,29 @@ instance : CacheSpec DnsCache ResourceRecord where
 
 instance : CacheLookup DnsCache ResourceRecord where
   lookup := DnsCache.lookup
-  storeNegative := DnsCache.storeNegative
-  lookupNegative := DnsCache.lookupNegative
-  lookupNegativeSoa := DnsCache.lookupNegativeSoa
   storeRanked := DnsCache.storeChecked
   lookupAnswerable := DnsCache.lookupAnswerable
+
+/-- Attach a SOA record to the matching fresh negative entry (the one just
+    stored with the same key and expiry). Implements the generated
+    `NegativeAuthoritySpec.storeSoaRecord` ("... the amount of time it was
+    stored in the cache"). -/
+def DnsCache.setNegativeSoa (c : DnsCache) (name : ByteArray) (qtype qclass : BitVec 16)
+    (soa : ResourceRecord) (expiry : UInt32) : DnsCache :=
+  { c with negatives := c.negatives.map fun e =>
+      if nameEqCI e.name name && e.qtype == qtype && e.qclass == qclass
+          && e.expiry == expiry then
+        { e with soa := some soa }
+      else e }
+
+instance : NegativeCacheSpec DnsCache where
+  cacheNegative c name qtype qclass rc expiry :=
+    DnsCache.storeNegative c name qtype qclass rc none expiry
+  retrieveNegative := DnsCache.lookupNegative
+
+instance : NegativeAuthoritySpec DnsCache ResourceRecord where
+  storeSoaRecord := DnsCache.setNegativeSoa
+  authoritySection := DnsCache.lookupNegativeSoa
 
 instance : RRParse ResourceRecord where
   parseRaw bytes := match DnsParser.run VeriDNS.Impl.ResourceRecord.decode bytes with

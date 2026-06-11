@@ -296,11 +296,11 @@ theorem shim_obligation_replyIgnored :
 section Selection
 open VeriDNS.Impl.SList
 
-private theorem pickBest_foldl_min (l : List ServerEntry)
-    (acc : Option (ServerEntry × BitVec 32)) (e : ServerEntry) (ad : BitVec 32)
+private theorem pickBest_foldl_min (l : List SlistEntry)
+    (acc : Option (SlistEntry × BitVec 32)) (e : SlistEntry) (ad : BitVec 32)
     (h : l.foldl DnsSList.pickBest acc = some (e, ad)) :
-    (∀ b bd, acc = some (b, bd) → e.queryCount ≤ b.queryCount) ∧
-    (∀ o ∈ l, o.address.isSome = true → e.queryCount ≤ o.queryCount) := by
+    (∀ b bd, acc = some (b, bd) → e.transmissionCount ≤ b.transmissionCount) ∧
+    (∀ o ∈ l, o.address.isSome = true → e.transmissionCount ≤ o.transmissionCount) := by
   induction l generalizing acc with
   | nil =>
     simp only [List.foldl_nil] at h
@@ -319,7 +319,7 @@ private theorem pickBest_foldl_min (l : List ServerEntry)
       | none =>
         exact hacc b bd (by unfold DnsSList.pickBest; rw [hxa])
       | some xa =>
-        by_cases hlt : x.queryCount < b.queryCount
+        by_cases hlt : x.transmissionCount < b.transmissionCount
         · have := hacc x xa (by unfold DnsSList.pickBest; rw [hxa]; simp [hlt])
           omega
         · exact hacc b bd (by unfold DnsSList.pickBest; rw [hxa]; simp [hlt])
@@ -332,7 +332,7 @@ private theorem pickBest_foldl_min (l : List ServerEntry)
           omega
         | some p =>
           obtain ⟨b, bd⟩ := p
-          by_cases hlt : o.queryCount < b.queryCount
+          by_cases hlt : o.transmissionCount < b.transmissionCount
           · have := hacc o xa (by unfold DnsSList.pickBest; rw [hxa, hb]; simp [hlt])
             omega
           · have := hacc b bd (by unfold DnsSList.pickBest; rw [hxa, hb]; simp [hlt])
@@ -340,9 +340,9 @@ private theorem pickBest_foldl_min (l : List ServerEntry)
       · exact hrest o hmem hoaddr
 
 /-- `bestWithAddress` returns a least-queried addressed server. -/
-theorem bestWithAddress_min (s : DnsSList) (e : ServerEntry) (ad : BitVec 32)
+theorem bestWithAddress_min (s : DnsSList) (e : SlistEntry) (ad : BitVec 32)
     (h : DnsSList.bestWithAddress s = some (e, ad)) :
-    ∀ o ∈ s.servers, o.address.isSome = true → e.queryCount ≤ o.queryCount := by
+    ∀ o ∈ s.servers, o.address.isSome = true → e.transmissionCount ≤ o.transmissionCount := by
   unfold DnsSList.bestWithAddress at h
   rw [← Array.foldl_toList] at h
   intro o ho
@@ -350,17 +350,17 @@ theorem bestWithAddress_min (s : DnsSList) (e : ServerEntry) (ad : BitVec 32)
 
 /-- The §7.2 selection event: `a` was picked and the state altered
     (marked queried). -/
-def addressChosen (s : DnsSList) (a : ServerEntry) (s' : DnsSList) : Prop :=
+def addressChosen (s : DnsSList) (a : SlistEntry) (s' : DnsSList) : Prop :=
   (∃ ad, DnsSList.bestWithAddress s = some (a, ad)) ∧ s' = s.markQueried a.name
 
 /-- `a` is selected even though a strictly less-tried addressed competitor
     remains — the situation §7.2 forbids ("prevent its selection again
     until all other addresses have been tried"). -/
-def selectedOverLessTried (s : DnsSList) (a : ServerEntry) : Bool :=
+def selectedOverLessTried (s : DnsSList) (a : SlistEntry) : Bool :=
   match DnsSList.bestWithAddress s with
   | some (e, _) =>
     e.name == a.name
-      && s.servers.any fun o => o.address.isSome && o.queryCount < e.queryCount
+      && s.servers.any fun o => o.address.isSome && o.transmissionCount < e.transmissionCount
   | none => false
 
 /-- Instantiation of the generated `sendingthequeries_prevent_selection`:
@@ -371,7 +371,7 @@ def selectedOverLessTried (s : DnsSList) (a : ServerEntry) : Bool :=
     "until all other addresses have been tried" escape that yields
     retransmission. -/
 theorem slist_prevent_selection :
-    sendingthequeries_prevent_selection DnsSList ServerEntry
+    sendingthequeries_prevent_selection DnsSList SlistEntry
       addressChosen selectedOverLessTried := by
   intro s a s' _hev
   unfold selectedOverLessTried
@@ -386,7 +386,7 @@ theorem slist_prevent_selection :
     | true =>
       rw [Bool.true_and]
       cases hany : s'.servers.any
-          (fun o => o.address.isSome && o.queryCount < e.queryCount) with
+          (fun o => o.address.isSome && o.transmissionCount < e.transmissionCount) with
       | false => rfl
       | true =>
         exfalso

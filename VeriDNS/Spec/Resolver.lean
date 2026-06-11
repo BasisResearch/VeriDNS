@@ -249,36 +249,27 @@ been tried.  The timeout for each transmission should be 50-100% greater
 than the average predicted value to allow for variance in response.
 }
 
--- Manual: ServerEntry for SLIST (sub-structure detail not derivable from glossary NLP)
-structure ServerEntry where
-  name : ByteArray
-  address : Option (BitVec 32)
-  matchCount : Nat
-  queryCount : Nat
-  deriving BEq, Inhabited
+-- SlistEntry is generated from the §5.3.3 algorithm prose above ("Copy the
+-- names into SLIST" / "Set up their addresses ..." / "It may be the case
+-- that the addresses are not available" / "keep track of previous
+-- transmissions") — see `deriveEntryStructure` in VeriDNS.RFC.Syntax.
 
--- Manual: keyed cache lookup. The time-aware operations (storeAt, sweep) and
--- their laws are NLP-generated on CacheSpec from the §5.3.2 prose ("absolute
--- time when the RR is stored", "periodic sweeps"); only the lookup KEY
--- signature stays manual — name/qtype/qclass come from other RFC sections,
--- not the glossary sentence. `now` excludes expired entries per "the resolver
--- just ignores or discards old RRs when it runs across them in the course of
--- a search".
+-- Manual remainder of the cache interface. The time-aware operations
+-- (storeAt, sweep) and their laws are NLP-generated on CacheSpec from the
+-- §5.3.2 prose; the RFC 2308 negative-cache operations are generated as
+-- NegativeCacheSpec / NegativeAuthoritySpec in Spec/NegativeCache.lean.
+-- Still manual, and why:
+--  * `lookup` — the keyed signature joins the §5.3.2 search-state glossary
+--    (SNAME/STYPE/SCLASS) with the CACHE entry's "in the course of a
+--    search"; the generator does not yet assemble one method from two
+--    glossary entries.
+--  * `storeRanked`/`lookupAnswerable` — the §5.4.1 sentences (in
+--    Spec/Credibility.lean) license trust-tagged store and an answer-path
+--    lookup, but the absolute-time argument comes from the §5.3.2 storeAt
+--    convention, which is not in scope in that file. Generating these needs
+--    cross-file assembly (an env extension, like `rfcEnumDescriptions`).
 class CacheLookup (C RR : Type) extends CacheSpec C RR where
   lookup : C → ByteArray → BitVec 16 → BitVec 16 → UInt32 → Array RR
-  /-- RFC 2308 negative cache: record that (name, qtype, qclass) yielded the
-      given negative rcode, valid until the absolute expiry. The SOA record
-      that carried the negative TTL is stored alongside (§6 requires
-      returning it from the cache). -/
-  storeNegative : C → ByteArray → BitVec 16 → BitVec 16 → Rcode → Option RR → UInt32 → C
-  /-- RFC 2308 negative cache lookup: the cached negative rcode, if fresh. -/
-  lookupNegative : C → ByteArray → BitVec 16 → BitVec 16 → UInt32 → Option Rcode
-  /-- RFC 2308 §6: the authority section for a cached negative answer — the
-      stored SOA with its TTL decremented by the time spent in the cache
-      ("MUST add the cached SOA record to the authority section of the
-      response with the TTL decremented"; instantiates the generated
-      `obligation_addCachedSoaRecordToAuthoritySection`). -/
-  lookupNegativeSoa : C → ByteArray → BitVec 16 → BitVec 16 → UInt32 → Array RR
   /-- RFC 2181 §5.4.1 credibility-aware store: cache an RR tagged with its
       trust tier (the generated `Trustworthiness`), retaining
       strictly-more-trustworthy same-key data in preference. -/
@@ -287,17 +278,24 @@ class CacheLookup (C RR : Type) extends CacheSpec C RR where
       the least-trustworthy rank, which must never be returned as an answer. -/
   lookupAnswerable : C → ByteArray → BitVec 16 → BitVec 16 → UInt32 → Array RR
 
--- Manual: batch SLIST creation from NS names (not derivable from glossary NLP).
--- matchCount/hasServers expose §5.3.2's "match count of the number of labels
--- ... this is used as a measure of how 'close' the resolver is to SNAME" so
--- step 2 can prefer the closer SLIST.
+-- Manual: batch SLIST creation from NS names. The licensing prose exists —
+-- "Copy the names into SLIST" / "Set up their addresses using local data"
+-- read as OPERATIONS (the same sentences the generator reads as per-entry
+-- FIELDS for SlistEntry), and the §5.3.2 match-count copula for
+-- matchCount/hasServers — but the imperative→constructor derivation is not
+-- implemented yet; see the entry-structure rule in VeriDNS.RFC.Syntax for
+-- where it would attach.
 class SlistFromNS (S NS : Type) extends SlistSpec S NS where
   fromNsNames : Array ByteArray → Nat → S
   fromNsWithGlue : Array ByteArray → Array (ByteArray × BitVec 32) → Nat → S
   matchCount : S → Nat
   hasServers : S → Bool
 
--- Manual: RR field access + parsing from canonical wire bytes
+-- Manual: wire-format plumbing, not RFC semantics. RRs cross the Spec/Impl
+-- boundary as canonical wire bytes; these accessors expose decode/encode
+-- and field projections of the Impl's RR representation to the abstract
+-- resolver. The RFC describes the wire FORMAT (generated in
+-- Spec/ResourceRecord.lean), not this API.
 class RRParse (RR : Type) where
   parseRaw : ByteArray → Option RR
   rrType : RR → BitVec 16

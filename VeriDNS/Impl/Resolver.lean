@@ -2,6 +2,7 @@ import VeriDNS.Impl.Message
 import VeriDNS.Impl.ResourceRecord
 import VeriDNS.Impl.DomainName
 import VeriDNS.Spec.Resolver
+import VeriDNS.Spec.NegativeCache
 
 namespace VeriDNS.Impl.Resolver
 
@@ -10,7 +11,7 @@ open VeriDNS.Impl
 
 variable {S C NS RR : Type}
     [SlistSpec S NS] [SlistFromNS S NS]
-    [CacheSpec C RR] [CacheLookup C RR] [RRParse RR]
+    [CacheSpec C RR] [CacheLookup C RR] [NegativeAuthoritySpec C RR] [RRParse RR]
     [Inhabited S] [Inhabited C]
 
 structure State (S C NS RR : Type) [SlistSpec S NS] [CacheSpec C RR] where
@@ -209,14 +210,14 @@ inductive LocalResult (RR : Type) where
     CNAME processing "restarts the query at the canonical name") when the
     query key itself misses. Lookups come FIRST at each name, so a direct
     hit is never shadowed by an alias; the chase is fuel-bounded. -/
-def localAnswer [CacheLookup C RR] [RRParse RR] (cache : C)
+def localAnswer [CacheLookup C RR] [NegativeAuthoritySpec C RR] [RRParse RR] (cache : C)
     (qtype qclass : BitVec 16) (now : UInt32)
     : Nat → ByteArray → Array ByteArray → LocalResult RR
   | 0, sname, chain => .miss sname chain
   | fuel + 1, sname, chain =>
-    match CacheLookup.lookupNegative (RR := RR) cache sname qtype qclass now with
+    match NegativeCacheSpec.retrieveNegative cache sname qtype qclass now with
     | some rc =>
-      .negative rc (CacheLookup.lookupNegativeSoa cache sname qtype qclass now)
+      .negative rc (NegativeAuthoritySpec.authoritySection cache sname qtype qclass now)
     | none =>
       -- answer path: only answer-grade data may be served (RFC 2181 §5.4.1)
       let rrs : Array RR := CacheLookup.lookupAnswerable cache sname qtype qclass now

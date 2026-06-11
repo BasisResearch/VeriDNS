@@ -23,7 +23,10 @@ VeriDNS/
     RData.lean    -- RFC 1035 sections 3.3-3.4: RDATA formats (16 types)
     Transport.lean -- RFC 1035 section 4.2: UDP/TCP transport constraints
     Cache.lean    -- RFC 1034 §5.3.2 + RFC 1035 §7.4, §6.1.3: Cache constraints + timer
-    Resolver.lean -- RFC 1034 §5.3.2-3: Resolver state (glossary) + algorithm (numbered steps)
+    Resolver.lean -- RFC 1034 §5.3.2-3: Resolver state (glossary) + algorithm (numbered steps) + SlistEntry
+    NegativeCache.lean -- RFC 2308: negative caching props + NegativeCacheSpec/NegativeAuthoritySpec
+    Credibility.lean   -- RFC 2181 §5.4.1: Trustworthiness enum + answerability obligation
+    Resilience.lean    -- RFC 5452 §9.1-2: response matching + unpredictability obligations
     Server.lean   -- RFC 1035 §6.2, §7.3: Server query processing + UdpSocket typeclass
   Impl/
     Parsec.lean         -- DnsParser/DnsSerializer monads + byte-level primitives
@@ -397,8 +400,25 @@ props) are linked by **source-text matching** rather than index alignment:
 with its source sentence fragment, `processRfcText` returns
 `(propName × srcSentence)` pairs, and `pushProseHoverInfo` attaches each prop
 to the first ident whose normalized text (parentheticals dropped, whitespace
-collapsed, lowercased) contains the source fragment. Idents consumed this way
-are excluded from the generic struct-hover fallback.
+collapsed, lowercased) contains the source fragment. Numeric limit constants
+(`extractConstraintValues`) and ranked-list enums + their order relation
+record their matched source phrase the same way, including on the
+no-struct fallback path.
+
+**One hover per token — claim map.** SubVerso renders exactly one `TermInfo`
+per token, so when several definitions derive from the same sentence (a
+refined guard and its obligation, `{field}_prop_i` and `{field}_semantics_i`,
+a ranked enum and its order relation), only one can own the hover. All
+pushers thread a shared `HoverClaims` map (ident byte position → owning
+declaration) through `claimHover`: the first definition claims the ident,
+and every later definition landing on a claimed ident is appended to the
+owner's docstring under "**Also generated from this passage**" with its
+pretty-printed form (`ppGeneratedDecl`: zero-binder `Prop` defs show their
+body, parameterized defs their type, inductives their constructor list).
+Push order = priority: prose props → sentence props → example props →
+generic struct/field fallback on unclaimed idents only. Every generated
+definition is therefore reachable from some hover on the passage that
+produced it.
 
 **Stale-cache warning**: Verso HTML pages reference hover docstrings by
 sequential numeric id into a site-wide `-verso-docs.json` table. Pages and the
@@ -653,7 +673,7 @@ cannot handle:
   `recommendation_addressesAvailable (σ) (addressesAvailable : σ → Bool)
   (lookAddresses : σ → Prop) : Prop := ∀ s, addressesAvailable s = false →
   lookAddresses s`. The SLIST instantiates it (`slist_recommendation`):
-  partiality is `ServerEntry.address : Option`, and when servers exist with
+  partiality is `SlistEntry.address : Option`, and when servers exist with
   no known address, `DnsSList.addressTargets` is nonempty — the names the IO
   shim sub-resolves.
 
@@ -719,8 +739,14 @@ interval ... to some sort of absolute time when the RR is stored"),
 law fields `store_mem`/`storeAt_mem` (membership) and `sweep_subset`
 (removal-only) — emitted as the law statements themselves, so instances must
 prove them (previously `store_mem : Prop` was discharged with `True`).
-`CacheLookup` stays manual only for the keyed lookup signature
-(name/qtype/qclass are not in the glossary sentence) and is time-aware.
+`CacheLookup` stays manual only for the keyed positive lookup signature
+(name/qtype/qclass join the search-state glossary entries with the CACHE
+entry — a two-entry assembly the generator does not yet perform) and the
+RFC 2181 ranked store/answer-path lookup (the §5.4.1 prose is in
+Spec/Credibility.lean, where the §5.3.2 absolute-time convention is not in
+scope; cross-file assembly would need an env extension like
+`rfcEnumDescriptions`). The RFC 2308 negative-cache operations are
+GENERATED — see "Negative-Cache Typeclass Generation" below.
 
 `DnsCache` (Impl/Cache.lean) wires the TTL machinery into the instances and
 proves all laws; Proof/Cache.lean adds `store_absolute_expiry` (§6.1.3),
@@ -875,6 +901,71 @@ expired entry is ever returned), `capNegativeTtl_conforms` (Proof/Server:
 the generated §5 cap), and `negative_soa_in_authority` +
 `lookupNegativeSoa_serves_authority` (Proof/Cache: the generated §6
 obligation and the lookup serving exactly that authority).
+
+### Negative-Cache Typeclass Generation (RFC 2308 §5/§6)
+
+The manual `CacheLookup.storeNegative`/`lookupNegative`/`lookupNegativeSoa`
+methods were replaced by typeclasses generated from the same sentences that
+already generated the §5/§6 props:
+
+- **§5 (tuple-key rule, extended)**: the keyed cached/retrieved frame
+  ("should be cached such that it can be retrieved and returned ... for the
+  same ⟨TUPLE⟩") now also generates `NegativeCacheSpec (C : Type)` with
+  `cacheNegative : C → ByteArray → BitVec 16 → BitVec 16 → Rcode → UInt32 → C`
+  and `retrieveNegative : ... → Option Rcode`. The store key is the UNION of
+  the tuple fields across the keyed sentences (NXDOMAIN names ⟨QNAME,
+  QCLASS⟩, NODATA ⟨QNAME, QTYPE, QCLASS⟩); field types come from the
+  `Question` struct projections; the answer class is the enum resolved from
+  the subject's relative clause ("resulted from a name error" → `Rcode`);
+  the operation names come from the passive participles after "be"
+  (`participleStem`, with an e-final verb-root lexicon: "cached" → "cache");
+  the subject's premodifier supplies the suffix ("a NEGATIVE answer"). The
+  TTL-countdown sentence ("This TTL decrements ... upon reaching zero ...
+  MUST NOT be used again") adds the absolute-time argument.
+- **§6 (MUST-add rule, extended)**: the when-clause's object ("a CACHED
+  NEGATIVE response") anaphorically references the §5 class — its
+  premodifiers (participle + adjective) reconstruct the class name — so the
+  obligation's pieces also generate
+  `NegativeAuthoritySpec (C RR : Type) extends NegativeCacheSpec C` with
+  `storeSoaRecord` (from "... the amount of time it was STORED in the
+  cache") and `authoritySection` (the "to"-PP target served back for the
+  same key). The key is read off the parent's store projection via a
+  forall-telescope, so the two blocks stay independent.
+
+`DnsCache` instantiates both (`cacheNegative` = `storeNegative` with no SOA;
+`storeSoaRecord` = `DnsCache.setNegativeSoa`, attaching the SOA to the
+just-stored entry; `authoritySection` = `lookupNegativeSoa`); `localAnswer`
+consults the generated methods. The server-side one-shot
+`DnsCache.storeNegative` (rcode + SOA in one entry) remains the concrete
+composition of the two generated operations.
+
+### Entry-Structure Derivation (SlistEntry)
+
+The manual `ServerEntry` was replaced by `SlistEntry`, generated from the
+§5.3.3 algorithm prose by `deriveEntryStructure` (RFC/Syntax.lean), entirely
+from grammatical structure:
+
+1. **Membership imperative** — a verb-first clause whose plural object moves
+   "into" an ALL-CAPS structure ("Copy the names into SLIST") fixes the
+   entry identity → field `name : ByteArray`.
+2. **Possessive-anaphor imperative** — "Set up THEIR addresses ..." (the
+   determiner "their" refers to the just-established entries) → per-entry
+   field `address : BitVec 32`.
+3. **Modal partiality** — "It may be the case that the addresses are not
+   available" ("may" + expletive copula + "case" head with a that-relClause
+   negating an adjectival predication over a known field's plural) → the
+   field wraps in `Option`.
+4. **Keep-track purpose** — "keep track of previous transmissions" (token
+   level: purpose-infinitive coordination is lossy at clause level) →
+   `transmissionCount : Nat`.
+
+The per-entry `matchCount` of the old manual struct was dropped: §5.3.2 ties
+the match count to the SLIST itself (it remains on `DnsSList` and
+`SlistFromNS.matchCount`). Supporting NLP fixes: "their" joined the
+determiner lexicon, `parseImperativeClause` absorbs verb particles ("Set up"),
+the det-adj-verb sequence retags as a noun ("a negative ANSWER"), and
+`stripPlural` only strips "-es" after sibilant stems ("names" → "name",
+"addresses" → "address").
 
 ### Cache Bounds (FIFO eviction)
 
@@ -1041,6 +1132,15 @@ pairs. Main.lean configures 5 root servers (a-e.root-servers.net).
 
 ## Key Design Decisions
 
+- **Grammar over string anchors**: rules read RFC text through the
+  tokenizer/POS-tagger/chunker, never by matching literal phrases.
+  Notation (tuples, numerals, durations) is tokenized; frames are
+  detected over tagged tokens (assertive verb + complementizer for
+  "specifies that/whether", "same ⟨form⟩ as ⟨REF⟩" structural-identity
+  references, quantifier-partitive "some of which are ⟨adj⟩",
+  conjunction-token object coordination); content words come from parsed
+  NPs/clauses. Closed-class lexicons (determiners, particles, verb roots,
+  time units) are the only word lists.
 - **Line ranges over section numbers**: Line numbers are unambiguous and
   don't require section header parsing. If the RFC were re-formatted, line
   numbers would change but so would any other reference.
