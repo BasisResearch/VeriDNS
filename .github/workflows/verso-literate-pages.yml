@@ -50,16 +50,15 @@ jobs:
             - name: Purge stale literate cache
               run: rm -rf .lake/build/literate .lake/build/literate-html
 
-            # verso-literate re-elaborates each module under the interpreter;
-            # the recursive NLP parsers in VeriDNS/RFC/ overflow the default
-            # 8 MB stack on Linux runners (SIGSEGV, exit 139). Raise the
-            # limit for this step — macOS (where the build was developed)
-            # already runs with a larger effective stack.
+            # NOTE: a verso-literate exit 139 here is NOT a stack overflow
+            # (Lean threads size their stacks from LEAN_STACK_SIZE_KB, not
+            # ulimit; the 64-bit default is 1 GB). The one observed so far
+            # was MD4Lean's md4c wrapper corrupting the AST on inline raw
+            # HTML in a docstring (e.g. a bare `<word>`) — keep angle-bracket
+            # placeholders inside backticks in doc comments.
             - name: Build literate site
               id: build
-              run: |
-                ulimit -s unlimited
-                echo "path=$(lake query :literateHtml)" >> "$GITHUB_OUTPUT"
+              run: echo "path=$(lake query :literateHtml)" >> "$GITHUB_OUTPUT"
 
             - name: Upload Pages artifact
               uses: actions/upload-pages-artifact@v3

@@ -236,7 +236,8 @@ def tokenize (text : String) : Array Token := Id.run do
 -- ============================================================
 
 private def knownDeterminers : Array String :=
-  #["the", "a", "an", "this", "that", "these", "those", "each", "every", "its"]
+  #["the", "a", "an", "this", "that", "these", "those", "each", "every", "its",
+    "their"]
 
 private def knownCopula : Array String :=
   #["is", "are", "was", "were", "be"]
@@ -402,12 +403,16 @@ private def disambiguate (tokens : Array Token) : Array Token := Id.run do
             (result[i - 2]!.word.toLower == "does" ||
              result[i - 2]!.word.toLower == "do") then
       result := result.set! i { tokens[i]! with pos := .verb }
-    -- verb/verbPart immediately after determiner: a -ed form followed by
-    -- an adjective or nominal is a participial premodifier ("the cached
-    -- negative response", "the specified operation") → adj; otherwise a
-    -- nominal use ("the cache") → noun (det can't precede verbs)
+    -- verb/verbPart immediately after a determiner — or after an adjective
+    -- that itself follows a determiner/adjective ("a negative ANSWER") —
+    -- sits in a noun slot: a -ed form followed by an adjective or nominal
+    -- is a participial premodifier ("the cached negative response", "the
+    -- specified operation") → adj; otherwise a nominal use ("the cache",
+    -- "a negative answer") → noun (det can't govern verbs)
     else if (tokens[i]!.pos == .verb || tokens[i]!.pos == .verbPart) &&
-            i > 0 && result[i - 1]!.pos == .det then
+            i > 0 && (result[i - 1]!.pos == .det ||
+              (result[i - 1]!.pos == .adj && i > 1 &&
+               (result[i - 2]!.pos == .det || result[i - 2]!.pos == .adj))) then
       let nextIsModifiable := i + 1 < tokens.size &&
         (result[i + 1]!.pos == .adj || result[i + 1]!.pos == .noun ||
          result[i + 1]!.pos == .nounPlural || result[i + 1]!.pos == .propNoun)
@@ -1155,9 +1160,18 @@ private def isObjectPronoun (w : String) : Bool :=
   let wl := w.toLower
   wl == "it" || wl == "them" || wl == "they"
 
+/-- Verb particles: closed-class function words that combine with a verb into
+    a phrasal verb ("set up", "look out"). After a clause-initial verb they
+    belong to the verb, not the object NP. -/
+private def isVerbParticle (w : String) : Bool :=
+  let wl := w.toLower
+  wl == "up" || wl == "out" || wl == "off" || wl == "down" || wl == "away"
+
 /-- Parse an imperative clause ("return it to the client"): verb-first, no
     surface subject. An object pronoun resolves to `antecedent` (the NP it
-    refers back to). Returns an svo clause with an empty understood subject. -/
+    refers back to). A verb particle right after the verb attaches to the
+    verb phrase ("Set up their addresses" — object starts at "their").
+    Returns an svo clause with an empty understood subject. -/
 def parseImperativeClause (tokens : Array Token) (antecedent : NounPhrase)
     : Option Clause := Id.run do
   let filtered := tokens.filter fun t =>
@@ -1165,20 +1179,24 @@ def parseImperativeClause (tokens : Array Token) (antecedent : NounPhrase)
   if filtered.isEmpty then return none
   let t0 := filtered[0]!
   if t0.pos != .verb then return none
-  let vp : VerbPhrase := ⟨none, t0.word, false⟩
+  -- Phrasal verb: absorb a particle into the VP
+  let (vp, objStart) : VerbPhrase × Nat :=
+    if filtered.size > 1 && isVerbParticle filtered[1]!.word then
+      (⟨none, t0.word ++ " " ++ filtered[1]!.word, false⟩, 2)
+    else (⟨none, t0.word, false⟩, 1)
   -- Object: a pronoun is an anaphor for the antecedent; otherwise a full NP
   let (obj, afterObj) :=
-    if filtered.size > 1 && isObjectPronoun filtered[1]!.word then
-      (antecedent, 2)
-    else match parseNP filtered 1 (absorbPP := false) with
+    if filtered.size > objStart && isObjectPronoun filtered[objStart]!.word then
+      (antecedent, objStart + 1)
+    else match parseNP filtered objStart (absorbPP := false) with
       | some (np, after) => (np, after)
-      | none => (⟨none, #[], "", .unknown, #[]⟩, 1)
+      | none => (⟨none, #[], "", .unknown, #[]⟩, objStart)
   let (pps, _) := parsePPs filtered afterObj
   let emptySubj : NounPhrase := ⟨none, #[], "", .unknown, #[]⟩
   return some (.svo emptySubj vp obj pps)
 
 /-- Parse an imperative step with an anaphoric conditional:
-    "See if <condition>, and if so <action>."
+    "See if `<condition>`, and if so `<action>`."
     The "if" after the imperative verb is a complementizer introducing the
     condition clause; "so" in "if so" is an anaphor for that condition; an
     object pronoun in the action resolves to the condition's subject.
