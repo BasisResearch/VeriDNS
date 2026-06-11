@@ -64,6 +64,33 @@ private def findFieldSplitPoints (text : String) : Array (Nat × Nat) := Id.run 
     offset := offset + line.utf8ByteSize + 1
   return result
 
+/-- Find byte offset and length of glossary entry names (ALL-CAPS followed by 2+ spaces).
+    Mirrors Syntax.parseGlossaryList detection but returns positions for ident creation. -/
+private def findGlossarySplitPoints (text : String) : Array (Nat × Nat) := Id.run do
+  let lines := text.splitOn "\n"
+  let mut result : Array (Nat × Nat) := #[]
+  let mut offset : Nat := 0
+  for line in lines do
+    let trimmed := line.trimAscii.toString
+    if !trimmed.isEmpty then
+      let parts := trimmed.splitOn " " |>.filter (!·.isEmpty)
+      if parts.length >= 2 then
+        let name := parts[0]!
+        let isAllCaps := !name.isEmpty && name.toList.all (fun c => c.isUpper)
+        if isAllCaps && !(parts[1]!.toNat?.isSome) then
+          -- Check 2+ spaces between name and description
+          let leadingSpaces := line.toList.takeWhile (· == ' ') |>.length
+          let nameChars := line.toList.dropWhile (· == ' ') |>.takeWhile (· != ' ')
+          let afterName := line.toList.drop (leadingSpaces + nameChars.length)
+          let spacesAfterName := afterName.takeWhile (· == ' ') |>.length
+          if spacesAfterName >= 2 then
+            result := result.push (offset + leadingSpaces, name.utf8ByteSize)
+    offset := offset + line.utf8ByteSize + 1
+  -- Mirror Syntax.processRfcText: a single match is a column-header line
+  -- (e.g., "TYPE  value and meaning"), not a glossary.
+  if result.size < 2 then return #[]
+  return result
+
 /-- Find byte offset ranges of sentences within field descriptions.
     Given field name positions, finds ". " and ".\n" sentence boundaries
     in the description text between consecutive fields.
@@ -88,6 +115,58 @@ private def findSentenceSplitPoints (text : String) (fieldSplits : Array (Nat ×
       result := result.push (descStart + splits[j]!, splits[j + 1]! - splits[j]!)
     result := result.push (descStart + splits[splits.size - 1]!,
       descEnd - descStart - splits[splits.size - 1]!)
+  return result
+
+/-- Find byte offset ranges of sentences in prose paragraphs, for sections
+    without a where-block. Used to create idents that prose-derived props
+    (prose-clause rules, algorithm properties, glossary intro props) can
+    attach hover info to.
+    Sentences end at "." followed by a space or end-of-line; they never span
+    blank lines or diagram-ish lines (borders, scales). The first non-blank
+    line (the section title) is skipped — it gets its own split point.
+    Scanning stops at `stopAt` (byte offset of the first glossary or
+    value-list entry) so entry-name idents are not swallowed. -/
+private def findProseSentenceSplitPoints (text : String) (stopAt : Nat)
+    : Array (Nat × Nat) := Id.run do
+  let lines := text.splitOn "\n"
+  let mut result : Array (Nat × Nat) := #[]
+  let mut offset : Nat := 0
+  let mut seenTitle := false
+  let mut sentStart : Option Nat := none
+  let mut lastEnd : Nat := 0
+  for line in lines do
+    if offset >= stopAt then break
+    let trimmed := line.trimAscii.toString
+    let isBlank := trimmed.isEmpty
+    let isDiagramish := !isBlank && (
+      trimmed.startsWith "+" || trimmed.startsWith "|" || trimmed.startsWith "/" ||
+      trimmed.toList.all (fun c => c.isDigit || c == ' '))
+    if isBlank || isDiagramish then
+      -- Paragraph boundary: flush any open sentence
+      if let some s := sentStart then
+        if lastEnd > s then result := result.push (s, lastEnd - s)
+      sentStart := none
+    else if !seenTitle then
+      -- Skip the section title line (handled by findSectionTitlePosition)
+      seenTitle := true
+    else
+      -- Prose line: scan for sentence boundaries
+      let chars := line.toList
+      let mut b := offset
+      for j in [:chars.length] do
+        let c := chars[j]!
+        if c != ' ' then
+          if sentStart.isNone then sentStart := some b
+          lastEnd := b + c.utf8Size
+          if c == '.' && (j + 1 >= chars.length || chars[j + 1]! == ' ') then
+            if let some s := sentStart then
+              result := result.push (s, b + 1 - s)
+            sentStart := none
+        b := b + c.utf8Size
+    offset := offset + line.utf8ByteSize + 1
+  -- Flush trailing sentence at end of text / stopAt
+  if let some s := sentStart then
+    if lastEnd > s then result := result.push (s, lastEnd - s)
   return result
 
 /-- Create an atom with .original source info at the given byte range. -/
@@ -159,7 +238,7 @@ private def findDiagramPosition (text : String) : Option (Nat × Nat) := Id.run 
         break
     else
       if !trimmed.isEmpty then
-        if trimmed.toList[0]!.isDigit then
+        if trimmed.toList.all (fun c => c.isDigit || c == ' ') then
           if preScaleStart.isNone then
             preScaleStart := some offset
         else
@@ -168,6 +247,78 @@ private def findDiagramPosition (text : String) : Option (Nat × Nat) := Id.run 
   match startOffset with
   | some s => some (s, endOffset - s)
   | none => none
+
+/-- Find byte offset ranges of example trigger phrases using the NLP tokenizer.
+    Tokenizes the text, POS-tags it, finds `.discMarker` tokens, then merges
+    consecutive markers (e.g., "For" + "example") into single (offset, length) spans.
+    Returns array of (byteOffset, byteLength) pairs for each occurrence.
+    Note: offsets are character-based (matching the tokenizer), converted to byte
+    offsets via scanning the text. -/
+private def findExampleSplitPoints (text : String) : Array (Nat × Nat) := Id.run do
+  let tokens := VeriDNS.RFC.NLP.tagPOS (VeriDNS.RFC.NLP.tokenize text)
+  -- Collect discMarker token positions
+  let mut markers : Array (Nat × Nat) := #[]
+  for t in tokens do
+    if t.pos == .discMarker then
+      markers := markers.push (t.offset, t.word.length)
+  if markers.isEmpty then return #[]
+  -- Merge consecutive markers (e.g., "For" at 0 + "example" at 4 → (0, 11))
+  let mut merged : Array (Nat × Nat) := #[]
+  let mut curStart := markers[0]!.1
+  let mut curEnd := markers[0]!.1 + markers[0]!.2
+  for i in [1:markers.size] do
+    let (off, len) := markers[i]!
+    -- Consecutive if the gap between end of last and start of next is small (whitespace)
+    if off <= curEnd + 2 then
+      curEnd := off + len
+    else
+      merged := merged.push (curStart, curEnd - curStart)
+      curStart := off
+      curEnd := off + len
+  merged := merged.push (curStart, curEnd - curStart)
+  -- Convert character offsets to byte offsets
+  let chars := text.toList.toArray
+  -- Build char→byte offset mapping
+  let mut charToByteArr : Array Nat := #[]
+  let mut byteOff : Nat := 0
+  for c in chars do
+    charToByteArr := charToByteArr.push byteOff
+    byteOff := byteOff + c.utf8Size
+  let charToByte (charOff : Nat) : Nat :=
+    if charOff < charToByteArr.size then charToByteArr[charOff]!
+    else text.utf8ByteSize
+  let mut result : Array (Nat × Nat) := #[]
+  for (charOff, charLen) in merged do
+    let bStart := charToByte charOff
+    let bEnd := charToByte (charOff + charLen)
+    result := result.push (bStart, bEnd - bStart)
+  return result
+
+/-- Find byte offset ranges of value-list entry names (e.g., "A  1 ...", "NS  2 ...").
+    Only matches in sections without "where:" or "+--+" diagrams.
+    Returns array of (byteOffset, byteLength) pairs. -/
+private def findValueListSplitPoints (text : String) : Array (Nat × Nat) := Id.run do
+  let lines := text.splitOn "\n"
+  let hasWhere := lines.any (fun l => l.trimAscii.toString == "where:")
+  let hasDiagram := lines.any (fun l => (l.splitOn "+--+").length > 1)
+  if hasWhere || hasDiagram then return #[]
+  let mut result : Array (Nat × Nat) := #[]
+  let mut offset : Nat := 0
+  for line in lines do
+    let trimmed := line.trimAscii.toString
+    if !trimmed.isEmpty then
+      let leadingSpaces := line.toList.takeWhile (· == ' ') |>.length
+      if leadingSpaces < 8 then
+        let parts := trimmed.splitOn " " |>.filter (!·.isEmpty)
+        if parts.length >= 2 then
+          let name := parts[0]!
+          let isValidName := (name == "*") ||
+            (!name.isEmpty && name.toList.all (fun c => c.isUpper || c.isDigit || c == '-'))
+          if isValidName then
+            if let some _ := parts[1]!.toNat? then
+              result := result.push (offset + leadingSpaces, name.utf8ByteSize)
+    offset := offset + line.utf8ByteSize + 1
+  return result
 
 /-- Custom parser that reads RFC text between braces, splitting field names
     in the where block into separate atoms for SubVerso hover support.
@@ -200,8 +351,33 @@ private partial def rfcTextBodyFn : ParserFn := fun c s =>
       if let some pos := findDiagramPosition text then
         arr := arr.push pos
       return arr
+    let glossarySplits := findGlossarySplitPoints text
+    let valueListSplits := findValueListSplitPoints text
+    let exampleSplits := findExampleSplitPoints text
     let sentenceSplits := findSentenceSplitPoints text fieldSplits
-    let splits := (titleAndDiagram ++ fieldSplits ++ sentenceSplits).qsort (fun a b => a.1 < b.1)
+    -- Prose sentence splits for sections without a where-block, stopping
+    -- before the first glossary/value-list entry so their names stay idents.
+    let proseSentenceSplits :=
+      if fieldSplits.isEmpty then
+        let stopAt := match glossarySplits[0]?, valueListSplits[0]? with
+          | some g, some v => min g.1 v.1
+          | some g, none => g.1
+          | none, some v => v.1
+          | none, none => text.utf8ByteSize
+        findProseSentenceSplitPoints text stopAt
+      else #[]
+    -- Sort by offset, then deduplicate overlapping splits (prefer longer)
+    let allSplits := (titleAndDiagram ++ fieldSplits ++ glossarySplits ++ valueListSplits
+        ++ exampleSplits ++ sentenceSplits ++ proseSentenceSplits).qsort
+      (fun a b => a.1 < b.1 || (a.1 == b.1 && a.2 > b.2))
+    let splits := Id.run do
+      let mut result : Array (Nat × Nat) := #[]
+      let mut lastEnd : Nat := 0
+      for s in allSplits do
+        if s.1 >= lastEnd then
+          result := result.push s
+          lastEnd := s.1 + s.2
+      return result
     -- Phase 3: Build segmented atoms
     let atoms := Id.run do
       if splits.isEmpty then
@@ -212,6 +388,8 @@ private partial def rfcTextBodyFn : ParserFn := fun c s =>
       for (splitOffset, splitLen) in splits do
         let nameStart := base + splitOffset
         let nameEnd := nameStart + splitLen
+        -- Skip splits that overlap with already-processed regions
+        if nameStart < cursor then continue
         -- Segment before this field name
         if nameStart > cursor then
           result := result.push (mkOrigAtom input cursor nameStart)
@@ -334,21 +512,26 @@ def elabIncludeRfc : CommandElab := fun stx => do
   if noParse then
     return
 
-  if let some (structName, mergedFields) ← VeriDNS.RFC.Syntax.processRfcText userText then
+  let rfcArgs := rfcNode.getArgs
+  if let some (structName, mergedFields, propSrcs) ← VeriDNS.RFC.Syntax.processRfcText userText rfcArgs then
     -- Push TermInfo for parser ident nodes so SubVerso renders them with hover.
     -- Without this, all RFC text renders as `unknown token` because the generated
     -- struct syntax uses mkIdent/mkNode (synthetic, no source positions), so SubVerso's
     -- position-based matching (infoForSyntax) can't link parser idents to definitions.
     -- NOTE: When modifying this code, delete .lake/build/literate/ before rebuilding
     -- docs — the literate cache is NOT invalidated by lake build.
-    let allArgs := rfcNode.getArgs
+    -- Prose sentence idents are linked to their generated props first; consumed
+    -- idents are excluded from the generic struct-hover fallback below.
+    let consumed ← VeriDNS.RFC.Syntax.pushProseHoverInfo propSrcs rfcArgs
     -- Filter: only pass field name + title/diagram idents to pushHoverInfoFromIdents.
     -- Sentence idents (after field names) are handled exclusively by pushSentenceHoverInfo.
     let fieldNameSet := mergedFields.map (·.name.toUpper)
     let mut structIdents : Array Syntax := #[]
     let mut seenFieldName := false
-    for arg in allArgs do
+    for arg in rfcArgs do
       if !arg.isIdent then continue
+      if let some pos := arg.getPos? then
+        if consumed.contains pos.byteIdx then continue
       match arg with
       | .ident _ rawVal _ _ =>
         if fieldNameSet.contains rawVal.toString.toUpper then
@@ -358,6 +541,7 @@ def elabIncludeRfc : CommandElab := fun stx => do
           structIdents := structIdents.push arg
       | _ => continue
     VeriDNS.RFC.Syntax.pushHoverInfoFromIdents structName structIdents
-    VeriDNS.RFC.Syntax.pushSentenceHoverInfo structName allArgs mergedFields
+    VeriDNS.RFC.Syntax.pushSentenceHoverInfo structName rfcArgs mergedFields
+    VeriDNS.RFC.Syntax.generateExampleProps structName userText mergedFields rfcArgs
 
 end VeriDNS.RFC

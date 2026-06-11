@@ -41,3 +41,9 @@ QCLASS          a two octet code that specifies the class of the query.
 }
 
 end VeriDNS.Spec
+
+#print VeriDNS.Spec.Question
+
+
+
+

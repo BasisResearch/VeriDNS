@@ -6,3 +6,17 @@ build/
 *.trace
 *.hash
 .DS_Store
+
+# local tooling and session state
+node_modules/
+package.json
+package-lock.json
+_out/
+.claude/
+.mcp.json
+prompt.md
+
+# editor droppings
+\#*\#
+.\#*
+*~

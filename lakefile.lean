@@ -17,3 +17,11 @@ lean_lib VeriDNS where
 
 lean_exe «veri-dns» where
   root := `VeriDNS.Main
+
+extern_lib «veri-dns-ffi» (pkg) := do
+  let srcFile := pkg.dir / "ffi" / "recvfrom.c"
+  let oFile := pkg.buildDir / "ffi" / "recvfrom.o"
+  let srcJob ← inputTextFile srcFile
+  let inclDir ← getLeanIncludeDir
+  let oJob ← buildO oFile srcJob #["-I", inclDir.toString, "-fPIC"] #[]
+  buildStaticLib (pkg.buildDir / "lib" / "libveri-dns-ffi.a") #[oJob]
