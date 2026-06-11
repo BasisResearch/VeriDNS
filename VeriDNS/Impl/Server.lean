@@ -290,23 +290,56 @@ def ipv4ToAddr (ip : BitVec 32) (port : UInt16 := 53) : ByteArray :=
   ⟨#[b0, b1, b2, b3, p0, p1]⟩
 
 -- ============================================================
+-- RFC 5452 §9.1 datagram-level matching (decided in Lean)
+-- ============================================================
+
+/-- RFC 5452 §9.1 source/destination matching over the transport-reported
+    addressing metadata, decided HERE (the transport reports, Lean decides):
+
+    * the datagram's source must be the queried server — address (bytes
+      0–3) and port (bytes 4–5);
+    * the datagram's destination address must be the address the query
+      left from;
+    * the datagram's destination port (its delivery port) must be the
+      query's source port.
+
+    Each conjunct instantiates one matcher of the generated
+    `querymatchingrules_match_obligation` (`accept_match_obligation`,
+    Proof/Server.lean). -/
+def datagramMatches (queried : ByteArray) (d : Exchanged ByteArray) : Bool :=
+  d.source == queried
+    && d.destination.extract 0 4 == d.localAddr.extract 0 4
+    && d.destination.extract 4 6 == d.localAddr.extract 4 6
+
+/-- The §9.1 datagram gate: yield the payload only when every
+    source/destination matcher passes; "A mismatch and the response MUST
+    be considered invalid." -/
+def acceptExchanged (queried : ByteArray) (d : Exchanged ByteArray) : Option ByteArray :=
+  if datagramMatches queried d then some d.payload else none
+
+-- ============================================================
 -- Iterative resolution with IO
 -- ============================================================
 
 section
-variable {M : Type → Type} {Sock Addr : Type} [Monad M] [UdpSocket M Sock Addr]
+variable {M : Type → Type} {Sock : Type} [Monad M] [UdpSocket M Sock ByteArray]
 
 /-- Forward a query to a specific address and receive the response, on a
-    per-exchange connected socket (RFC 5452 §9.1/§9.2: kernel-enforced
-    source address/port match + unpredictable ephemeral local port). -/
-def forwardQuery (query : Format) (addr : Addr) : M (Option Format) := do
+    per-exchange unconnected socket (RFC 5452 §9.2: unpredictable ephemeral
+    local port). The §9.1 source/destination match is decided by
+    `acceptExchanged` — in Lean, on the transport-reported metadata — and a
+    mismatched datagram is treated like a timeout. -/
+def forwardQuery (query : Format) (addr : ByteArray) : M (Option Format) := do
   let encoded := Message.encode query
   match ← UdpSocket.exchange (M := M) (Sock := Sock) encoded addr with
   | none => pure none
-  | some bytes =>
-    match Message.decode bytes with
-    | .ok resp => pure (sanitizeTtls resp)  -- §7.3 TTL sanity
-    | .error _ => pure none
+  | some d =>
+    match acceptExchanged addr d with
+    | none => pure none  -- §9.1 mismatch: invalid, dropped before decode
+    | some bytes =>
+      match Message.decode bytes with
+      | .ok resp => pure (sanitizeTtls resp)  -- §7.3 TTL sanity
+      | .error _ => pure none
 
 end
 

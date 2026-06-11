@@ -147,7 +147,8 @@ theorem slist_recommendation :
     §9.1: "A resolver implementation MUST match responses to all of the
     following attributes of the query: ... Query ID, Query name, Query class
     and type. A mismatch and the response MUST be considered invalid."
-    (Source address/port matching is a socket-layer concern.) -/
+    (Source/destination matching is the DATAGRAM gate, `acceptExchanged`:
+    `exchanged_matches` below.) -/
 theorem acceptResponse_matches (sent resp r : Format)
     (h : acceptResponse sent resp = some r) :
     (r.header.id == sent.header.id) = true ∧
@@ -160,48 +161,87 @@ theorem acceptResponse_matches (sent resp r : Format)
     simpa [Bool.and_eq_true] using hcond
   · exact absurd h (by simp)
 
+/-- Every datagram the §9.1 gate accepts satisfies all three
+    source/destination matchers: source = the queried server (address and
+    port), destination address = the address the query left from, and
+    destination port = the query's source port. The transport only REPORTS
+    the addressing; this gate — Lean code — is what enforces it. -/
+theorem exchanged_matches (queried : ByteArray) (d : Exchanged ByteArray)
+    (bytes : ByteArray) (h : acceptExchanged queried d = some bytes) :
+    (d.source == queried) = true ∧
+    (d.destination.extract 0 4 == d.localAddr.extract 0 4) = true ∧
+    (d.destination.extract 4 6 == d.localAddr.extract 4 6) = true ∧
+    bytes = d.payload := by
+  unfold acceptExchanged at h
+  split at h
+  · rename_i hcond
+    unfold datagramMatches at hcond
+    rw [Bool.and_eq_true, Bool.and_eq_true] at hcond
+    exact ⟨hcond.1.1, hcond.1.2, hcond.2, (Option.some.inj h).symm⟩
+  · exact absurd h (by simp)
+
+/-- A rejected datagram is dropped entirely — the §9.1 "MUST be considered
+    invalid" direction: no payload from a mismatched source/destination
+    ever reaches `Message.decode` (see `forwardQuery`). -/
+theorem exchanged_mismatch_dropped (queried : ByteArray) (d : Exchanged ByteArray)
+    (h : datagramMatches queried d = false) :
+    acceptExchanged queried d = none := by
+  unfold acceptExchanged
+  rw [h]
+  rfl
+
 /-- RFC 5452 §9.2: outgoing queries carry the drawn unpredictable ID
     ("Use an unpredictable query ID for outgoing queries, utilizing the
     full range available (0-65535)"). -/
 theorem withRandomId_id (q : Format) (rid : UInt16) :
     (withRandomId q rid).header.id = VeriDNS.Impl.bv16OfUInt16 rid := rfl
 
-/-- The acceptance gate satisfies the generated §9.1 matching obligation
-    (`querymatchingrules_match_obligation`, derived from the MUST-match
-    bullet list in Spec/Resilience.lean) for the message-level attributes:
-    Query ID, Query name, Query class and type.
+/-- The full acceptance path satisfies the generated §9.1 matching
+    obligation (`querymatchingrules_match_obligation`, derived from the
+    MUST-match bullet list in Spec/Resilience.lean) — ALL SEVEN matchers
+    are real predicates over data, none delegated to the transport:
 
-    The first three matchers (source address, destination address,
-    destination port) are socket-layer attributes enforced below this gate by
-    `UdpSocket.exchange` (Impl/UdpSocket.lean + ffi `veri_dns_exchange`):
-    each upstream query runs on its own socket `connect(2)`-ed to the queried
-    server, so the kernel discards any datagram whose source address/port do
-    not match, and the fresh ephemeral local port is the (unpredictable)
-    destination port of the response. They are therefore instantiated as
-    `true` here — every datagram that reaches this gate already matches
-    them. -/
-theorem accept_match_obligation (sent : Format) :
-    querymatchingrules_match_obligation Format
-      (fun resp => (acceptResponse sent resp).isSome)
-      (fun _ => true)  -- source address: kernel-enforced by connect(2)
-      (fun _ => true)  -- destination address: kernel-enforced by connect(2)
-      (fun _ => true)  -- destination port: per-exchange ephemeral port
-      (fun resp => resp.header.id == sent.header.id)
-      (fun resp => questionMatches resp.question sent.question)
-      (fun resp => questionMatches resp.question sent.question) := by
-  intro resp hacc
+    * source address — the datagram came from the queried server
+      (`datagramMatches`, address+port);
+    * destination address — the datagram was delivered to the address the
+      query left from (destination-IP packet metadata vs. local binding);
+    * destination port — the datagram's delivery port is the query's
+      source port;
+    * query ID / name / class and type — the message-level gate
+      (`acceptResponse`).
+
+    The state is a (datagram, decoded response) pair; acceptance is the
+    conjunction of the datagram gate (`acceptExchanged`, which
+    `forwardQuery` applies BEFORE decode) and the message gate. -/
+theorem accept_match_obligation (sent : Format) (queried : ByteArray) :
+    querymatchingrules_match_obligation (Exchanged ByteArray × Format)
+      (fun p => (acceptExchanged queried p.1).isSome
+        && (acceptResponse sent p.2).isSome)
+      (fun p => p.1.source == queried)
+      (fun p => p.1.destination.extract 0 4 == p.1.localAddr.extract 0 4)
+      (fun p => p.1.destination.extract 4 6 == p.1.localAddr.extract 4 6)
+      (fun p => p.2.header.id == sent.header.id)
+      (fun p => questionMatches p.2.question sent.question)
+      (fun p => questionMatches p.2.question sent.question) := by
+  intro p hacc
+  obtain ⟨d, resp⟩ := p
+  rw [Bool.and_eq_true] at hacc
+  obtain ⟨hd, hr⟩ := hacc
+  -- datagram-level matchers from the datagram gate
+  obtain ⟨bytes, hb⟩ := Option.isSome_iff_exists.mp hd
+  obtain ⟨hsrc, hdip, hdport, _⟩ := exchanged_matches queried d bytes hb
+  -- message-level matchers from the message gate
   have hcond : (resp.header.id == sent.header.id
       && questionMatches resp.question sent.question) = true := by
-    cases hb : (resp.header.id == sent.header.id
+    cases hbq : (resp.header.id == sent.header.id
         && questionMatches resp.question sent.question) with
     | true => rfl
     | false =>
-      replace hacc : (acceptResponse sent resp).isSome = true := hacc
-      unfold acceptResponse at hacc
-      rw [hb] at hacc
-      simp at hacc
+      unfold acceptResponse at hr
+      rw [hbq] at hr
+      simp at hr
   rw [Bool.and_eq_true] at hcond
-  exact ⟨⟨⟨⟨⟨rfl, rfl⟩, rfl⟩, hcond.1⟩, hcond.2⟩, hcond.2⟩
+  exact ⟨⟨⟨⟨⟨hsrc, hdip⟩, hdport⟩, hcond.1⟩, hcond.2⟩, hcond.2⟩
 
 -- ============================================================
 -- RFC 1035 §4.1.1: RCODE use conditions (query hygiene)

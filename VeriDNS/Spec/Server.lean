@@ -78,6 +78,26 @@ a request identifier of some sort.  This step has several fine points:
      SLIST, and continue.
 }
 
+/-- A datagram received during a query exchange, together with the
+    addressing metadata the transport observed:
+
+    * `source` — where the datagram came from (recvfrom),
+    * `destination` — where it was delivered (destination address from
+      packet metadata; destination port is the delivery port of the
+      exchange socket),
+    * `localAddr` — the exchange socket's local binding when the query
+      was sent.
+
+    The transport only REPORTS these fields; every RFC 5452 §9.1 matching
+    DECISION over them is Lean code (`datagramMatches`, Impl/Server.lean),
+    proven against the generated `querymatchingrules_match_obligation`
+    (Proof/Server.lean). -/
+structure Exchanged (Addr : Type) where
+  payload : ByteArray
+  source : Addr
+  destination : Addr
+  localAddr : Addr
+
 /-- Abstract UDP socket operations. Parametric over monad M, socket type Sock,
     and address type Addr. Manual by design: this is the Spec/Impl IO
     boundary, not RFC content — RFC 1035 §4.2 describes transport FRAMING
@@ -93,11 +113,13 @@ class UdpSocket (M : Type → Type) (Sock Addr : Type) [Monad M] where
   now : M UInt32
   /-- Unpredictable query ID for outgoing queries (RFC 5452 resilience). -/
   randomId : M UInt16
-  /-- One connected query exchange (RFC 5452 §9.1/§9.2): a fresh socket per
-      exchange gives an unpredictable ephemeral local port, and connecting it
-      makes the kernel discard datagrams whose source address/port do not
-      match the queried server. Returns `none` on timeout. -/
-  exchange : ByteArray → Addr → M (Option ByteArray)
+  /-- One query exchange on a fresh UNCONNECTED socket (RFC 5452 §9.2: a
+      fresh socket per exchange gives an unpredictable ephemeral local
+      port). The transport does NOT filter by source: it returns the first
+      datagram with its observed addressing (`Exchanged`), and the §9.1
+      source/destination matching is decided by the Lean gate
+      (`datagramMatches`). Returns `none` on timeout. -/
+  exchange : ByteArray → Addr → M (Option (Exchanged Addr))
   /-- Diagnostic log hook (default: silent). -/
   log : String → M Unit := fun _ => pure ()
 

@@ -4804,10 +4804,33 @@ private def normalizeForHoverMatch (s : String) : String := Id.run do
     docstring (see `appendSiblingDoc`) instead of being pushed and lost. -/
 abbrev HoverClaims := Std.HashMap Nat Name
 
+/-- Pretty-print a def's body with its lambda binders opened under their
+    declared names, so the rendering matches the binder names shown in the
+    hover signature (e.g. `∀ (s : σ), … (credibility s) …`). -/
+private def ppDefBodyPretty (name : Name) : CommandElabM (Option String) := do
+  let env ← getEnv
+  let some (.defnInfo d) := env.find? name | return none
+  let fmt ← liftCoreM <| MetaM.run' <|
+    Meta.lambdaTelescope d.value fun _ body => Meta.ppExpr body
+  return some fmt.pretty
+
+/-- Append a "Definition" block with the def's body to `name`'s docstring,
+    unless it already embeds a Lean block (props generated with their body
+    inline). The hover popup shows signature + docstring, so without this a
+    parameterized `Prop` def showed its binders but never the proposition
+    itself. -/
+def appendDefBodyDoc (name : Name) : CommandElabM Unit := do
+  let env ← getEnv
+  let some body ← ppDefBodyPretty name | return
+  let old := (← findDocString? env name).getD ""
+  if hasSub old "```lean" then return
+  let block := s!"**Definition:**\n```lean\n:= {body}\n```"
+  addDocStringCore name (if old.isEmpty then block else s!"{old}\n\n{block}")
+
 /-- Pretty-print a generated declaration for embedding in a hover docstring.
-    Zero-binder `Prop` defs show their body (the proposition is the payload;
-    the type `Prop` says nothing), parameterized defs and everything else
-    show their type, and inductives list their constructors in order. -/
+    Defs show their type and body (for `Prop` defs the proposition is the
+    payload; the type alone says nothing), and inductives list their
+    constructors in order. -/
 private def ppGeneratedDecl (name : Name) : CommandElabM (Option String) := do
   let env ← getEnv
   let some ci := env.find? name | return none
@@ -4822,7 +4845,10 @@ private def ppGeneratedDecl (name : Name) : CommandElabM (Option String) := do
       return some s!"{short} : Prop :=\n  {body.pretty}"
     else
       let ty ← liftCoreM <| MetaM.run' (Meta.ppExpr d.type)
-      return some s!"{short} : {ty.pretty}"
+      let body? ← ppDefBodyPretty name
+      match body? with
+      | some body => return some s!"{short} : {ty.pretty} :=\n  {body}"
+      | none => return some s!"{short} : {ty.pretty}"
   | _ =>
     let ty ← liftCoreM <| MetaM.run' (Meta.ppExpr ci.type)
     return some s!"{short} : {ty.pretty}"

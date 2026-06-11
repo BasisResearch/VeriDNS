@@ -1150,6 +1150,26 @@ pairs. Main.lean configures 5 root servers (a-e.root-servers.net).
 - `step_implies_spec`: step function only produces StepSpec-allowed transitions
 - `step_analyzeResponse_coverage`: `responseHandled` implies no fallback error
 
+## #naturallanguage: NLP Pipeline Inspector
+
+`#naturallanguage { ⟨prose⟩ }` (Macro.lean) runs the pipeline on arbitrary
+text and reports what comes out:
+
+1. **NLP trace** — per sentence, the POS-tagged tokens (`word/TAG`, short
+   tags from `POS.short`) and every clause the chunker parses (compact
+   `Clause.render` notation: `SVO ⟨subj⟩ · verb · ⟨obj⟩ + PP(...)`).
+2. **Generated declarations** — the text is fed through the SAME
+   generation pipeline `include_rfc` runs after verifying its text (so
+   structures, classes, enums, and props are really elaborated into the
+   current namespace, with editor hovers on the block), and the report
+   lists every new declaration; defs concluding in `Prop` print their
+   value. "no declarations generated" is itself informative: it usually
+   means the text took a different generator path than expected
+   (diagram / glossary / algorithm / value-list / prose-only).
+
+Use it inside a scratch `namespace` to avoid name collisions with the
+real specs.
+
 ## Key Design Decisions
 
 - **Grammar over string anchors**: rules read RFC text through the

@@ -547,5 +547,114 @@ def elabIncludeRfc : CommandElab := fun stx => do
           structIdents := structIdents.push arg
       | _ => continue
     VeriDNS.RFC.Syntax.pushHoverInfoFromIdents structName structIdents
+    -- Hover shows signature + docstring; for parameterized Prop defs the
+    -- signature is just binders, so append each generated def's body to its
+    -- docstring (no-op for defs that already embed a ```lean block). Covers
+    -- both claim winners and siblings — the latter for editor hover.
+    for (_, target) in claims.toList do
+      VeriDNS.RFC.Syntax.appendDefBodyDoc target
+    for (name, _) in propSrcs do
+      VeriDNS.RFC.Syntax.appendDefBodyDoc name
+
+-- ============================================================
+-- #naturallanguage: NLP pipeline inspector
+-- ============================================================
+
+/-- Auxiliary names the env-diff report skips (constructors, recursors,
+    derived-instance machinery — the interesting declarations are the
+    structures/classes/inductives/defs themselves). -/
+private def isAuxDeclName (n : Name) : Bool :=
+  n.isInternalDetail ||
+  (match n.components.getLast? with
+   | some c =>
+     let s := c.toString
+     s == "mk" || s == "rec" || s == "recOn" || s == "casesOn" ||
+     s == "noConfusion" || s == "noConfusionType" || s == "below" ||
+     s == "brecOn" || s == "ibelow" || s == "binductionOn" ||
+     s == "toCtorIdx" || s == "ofNat" || s.startsWith "inst" ||
+     s.startsWith "_"
+   | none => true)
+
+/-- Does this type conclude in `Prop` (under any binders)? Such a def's
+    content is its VALUE, which the report prints. -/
+private partial def concludesProp : Lean.Expr → Bool
+  | .forallE _ _ b _ => concludesProp b
+  | e => e == .sort .zero
+
+/-- `#naturallanguage { ⟨prose⟩ }` — run the NLP pipeline and the property
+    rules on arbitrary text and show what comes out:
+
+    1. the trace — per sentence, the POS-tagged tokens and every clause
+       the chunker parses;
+    2. the generated declarations — the text is fed through the SAME
+       generation pipeline `include_rfc` runs after verifying its text
+       (so structures, classes, enums, and props are really elaborated
+       into the current namespace, with editor hovers on the block), and
+       the report lists every new declaration with its signature.
+
+    For inspecting and debugging rules: paste a candidate sentence,
+    see how it parses and what it generates. -/
+syntax (name := naturalLanguage) "#naturallanguage" " {" rfcTextContents "}" : command
+
+@[command_elab naturalLanguage]
+def elabNaturalLanguage : CommandElab := fun stx => do
+  let contents : Syntax := stx[2]
+  let rfcNode := contents[0]!
+  let userText := if rfcNode.isAtom then rfcNode.getAtomVal
+    else String.join (rfcNode.getArgs.toList.map getSyntaxText)
+  -- 1. NLP trace: tagged tokens + clause parses per sentence
+  let mut trace : Array String := #[]
+  for s in Property.splitSentences userText do
+    let toks := NLP.tagPOS (NLP.tokenize s)
+    if toks.isEmpty then continue
+    trace := trace.push (String.intercalate " "
+      (toks.toList.map fun t => s!"{t.word}/{t.pos.short}"))
+    for c in NLP.parseClauses toks do
+      trace := trace.push s!"  ⊢ {c.render}"
+  logInfo m!"NLP trace:\n{String.intercalate "\n" trace.toList}"
+  -- 2. Generation: same pipeline as include_rfc (minus file verification),
+  --    reporting the env diff
+  let before : NameSet := (← getEnv).constants.map₂.foldl
+    (fun s n _ => s.insert n) ∅
+  let rfcArgs := rfcNode.getArgs
+  if let some (structName, mergedFields, propSrcs) ←
+      VeriDNS.RFC.Syntax.processRfcText userText rfcArgs then
+    let mut claims ← VeriDNS.RFC.Syntax.pushProseHoverInfo propSrcs rfcArgs
+    claims ← VeriDNS.RFC.Syntax.pushSentenceHoverInfo structName rfcArgs mergedFields claims
+    claims ← VeriDNS.RFC.Syntax.generateExampleProps structName userText mergedFields rfcArgs claims
+    for (_, target) in claims.toList do
+      VeriDNS.RFC.Syntax.appendDefBodyDoc target
+    for (name, _) in propSrcs do
+      VeriDNS.RFC.Syntax.appendDefBodyDoc name
+  let after ← getEnv
+  let mut news : Array (Name × ConstantInfo) := #[]
+  for (n, ci) in after.constants.map₂.toList do
+    unless before.contains n || isAuxDeclName n do
+      match ci with
+      | .ctorInfo _ | .recInfo _ => pure ()
+      | _ => news := news.push (n, ci)
+  let sorted := news.qsort fun a b => a.1.toString < b.1.toString
+  if sorted.isEmpty then
+    logInfo "no declarations generated"
+  else
+    let mut report : Array String := #[]
+    for (n, ci) in sorted do
+      let kind := match ci with
+        | .inductInfo _ =>
+          if Lean.isClass after n then "class"
+          else if (Lean.getStructureInfo? after n).isSome then "structure"
+          else "inductive"
+        | .thmInfo _ => "theorem"
+        | _ => "def"
+      let tyFmt ← liftTermElabM (Lean.Meta.ppExpr ci.type)
+      -- a Prop-def's content is its VALUE; the type is just `Prop`
+      let body ← match ci with
+        | .defnInfo d =>
+          if concludesProp ci.type then
+            pure s!" :=\n  {(← liftTermElabM (Lean.Meta.ppExpr d.value)).pretty}"
+          else pure ""
+        | _ => pure ""
+      report := report.push s!"{kind} {n} : {tyFmt.pretty}{body}"
+    logInfo m!"generated:\n{String.intercalate "\n" report.toList}"
 
 end VeriDNS.RFC

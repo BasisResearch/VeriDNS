@@ -1510,11 +1510,55 @@ def reparseRelClause (text : String) : Array Clause := Id.run do
     | _ => pure ()
   return expanded
 
-/-- Split coordinated NPs joined by "and" into individual NP strings. -/
-def splitCoordinatedNP (text : String) : Array String :=
-  let parts := text.splitOn " and "
-  parts.foldl (init := #[]) fun acc part =>
-    let subParts := part.splitOn ", " |>.filter (!·.trim.isEmpty)
-    acc ++ subParts.toArray
+-- ============================================================
+-- Debug rendering (for the #naturallanguage command)
+-- ============================================================
+
+/-- Short POS tag for debug rendering. -/
+def POS.short : POS → String
+  | .det => "DET" | .noun => "N" | .nounPlural => "Ns" | .propNoun => "PN"
+  | .verb => "V" | .verbPart => "Vp" | .copula => "COP" | .adj => "ADJ"
+  | .adv => "ADV" | .prep => "P" | .conj => "CONJ" | .relPron => "REL"
+  | .punct => "·" | .quant => "Q" | .num => "NUM" | .discMarker => "DM"
+  | .subConj => "SUB" | .unknown => "?"
+
+def NPData.render (np : NPData) : String :=
+  let det := match np.det with | some d => d ++ " " | none => ""
+  let pre := String.join (np.preAdjs.toList.map (· ++ " "))
+  let num := match np.number with
+    | .plural => "/pl" | .singular => "/sg" | .unknown => ""
+  s!"⟨{det}{pre}{np.head}{num}⟩"
+
+def PostMod.render : PostMod → String
+  | .pp prep np => s!"PP({prep} {np.render})"
+  | .relClause pron text => s!"Rel({pron} \"{text}\")"
+  | .participle v obj pps =>
+    let o := match obj with | some np => " " ++ np.render | none => ""
+    let ps := String.join (pps.toList.map fun pp => s!" PP({pp.prep} {pp.np.render})")
+    s!"Part({v}{o}{ps})"
+  | .raw text => s!"Raw(\"{text}\")"
+
+def NounPhrase.render (np : NounPhrase) : String :=
+  let base := NPData.render np.toData
+  if np.postMods.isEmpty then base
+  else base ++ String.join (np.postMods.toList.map fun pm => " " ++ pm.render)
+
+def VerbPhrase.render (vp : VerbPhrase) : String :=
+  let adv := match vp.adv with | some a => a ++ " " | none => ""
+  s!"{adv}{vp.verb}{if vp.isCopula then "[cop]" else ""}"
+
+def Clause.render : Clause → String
+  | .svo subj vp obj pps =>
+    let ps := String.join (pps.toList.map fun pp => s!" + PP({pp.prep} {pp.np.render})")
+    s!"SVO {subj.render} · {vp.render} · {obj.render}{ps}"
+  | .svAdj subj vp comp pps =>
+    let ps := String.join (pps.toList.map fun pp => s!" + PP({pp.prep} {pp.np.render})")
+    let adv := match comp.adv with | some a => a ++ " " | none => ""
+    s!"SVAdj {subj.render} · {vp.render} · [{adv}{comp.adj}]{ps}"
+  | .svPassive subj part pps negated =>
+    let ps := String.join (pps.toList.map fun pp => s!" + PP({pp.prep} {pp.np.render})")
+    s!"SVPassive{if negated then "(neg)" else ""} {subj.render} · {part}{ps}"
+  | .npOnly np => s!"NP {np.render}"
+  | .unparsed text => s!"unparsed \"{text}\""
 
 end VeriDNS.RFC.NLP

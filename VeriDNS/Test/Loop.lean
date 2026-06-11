@@ -23,9 +23,16 @@ open VeriDNS.Impl.Server
 open VeriDNS.Impl.SList
 open VeriDNS.Impl.Cache
 
+/-- The mock exchange socket's local binding (delivery address of
+    well-behaved responses). -/
+def mockLocal : ByteArray := ⟨#[192, 168, 0, 2, 0xAB, 0xCD]⟩
+
 /-- Scripted-socket state: one inbound client datagram, a script of
     upstream exchange handlers (query ↦ response; an exhausted script is
-    a timeout), and everything the server sent back. -/
+    a timeout), and everything the server sent back. `spoofSource`
+    overrides the source address the transport reports for every scripted
+    response (off-path attacker); `spoofDest` overrides the reported
+    delivery address. -/
 structure MockState where
   inbox : ByteArray × ByteArray
   script : List (ByteArray → Option ByteArray)
@@ -33,6 +40,8 @@ structure MockState where
   exchanged : Array ByteArray := #[]
   clock : UInt32 := 100000
   nextId : UInt16 := 7777
+  spoofSource : Option ByteArray := none
+  spoofDest : Option ByteArray := none
 
 abbrev MockM := StateM MockState
 
@@ -44,13 +53,20 @@ instance : UdpSocket MockM Unit ByteArray where
     let s ← get
     set { s with nextId := s.nextId + 1 }
     pure s.nextId
-  exchange q _addr := do
+  exchange q addr := do
     let s ← get
     match s.script with
     | [] => pure none
     | h :: t =>
       set { s with script := t, exchanged := s.exchanged.push q }
-      pure (h q)
+      match h q with
+      | none => pure none
+      | some resp =>
+        -- the transport REPORTS addressing; the Lean gate decides.
+        pure (some { payload := resp
+                     source := s.spoofSource.getD addr
+                     destination := s.spoofDest.getD mockLocal
+                     localAddr := mockLocal })
 
 -- ## Wire helpers
 
@@ -173,6 +189,37 @@ def spoofRejected : Bool := Id.run do
     resp.header.id == 0x1234
 
 #guard spoofRejected
+
+-- ## 2b. RFC 5452 §9.1: a response from the wrong source address must be
+-- dropped by the Lean datagram gate (the transport does not filter)
+
+def wrongSourceRejected : Bool := Id.run do
+  let query := mkQuery exampleCom
+  let st0 : MockState := { inbox := (Message.encode query, clientAddr)
+                           script := [answerHandler]
+                           spoofSource := some ⟨#[6, 6, 6, 6, 0, 53]⟩ }
+  let (_, st) := (serveOne (M := MockM) (Sock := Unit) () sbelt DnsCache.empty).run st0
+  let some resp := sentResponse st | return false
+  -- the (correct-ID!) answer arrived from the wrong address: rejected,
+  -- upstream retried until fuel/servers exhausted, client gets SERVFAIL
+  return resp.answer.size == 0 && resp.header.rcode != Rcode.noError &&
+    resp.header.id == 0x1234
+
+#guard wrongSourceRejected
+
+-- ## 2c. RFC 5452 §9.1: a response delivered to the wrong destination
+-- address (delivery metadata ≠ the binding the query left from) is dropped
+
+def wrongDestRejected : Bool := Id.run do
+  let query := mkQuery exampleCom
+  let st0 : MockState := { inbox := (Message.encode query, clientAddr)
+                           script := [answerHandler]
+                           spoofDest := some ⟨#[10, 9, 9, 9, 0xAB, 0xCD]⟩ }
+  let (_, st) := (serveOne (M := MockM) (Sock := Unit) () sbelt DnsCache.empty).run st0
+  let some resp := sentResponse st | return false
+  return resp.answer.size == 0 && resp.header.rcode != Rcode.noError
+
+#guard wrongDestRejected
 
 -- ## 3. Iterative resolution: referral chased to the delegated server
 

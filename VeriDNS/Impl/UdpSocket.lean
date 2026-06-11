@@ -31,10 +31,15 @@ opaque nowRaw : IO UInt32
 @[extern "veri_dns_random_u16"]
 opaque randomU16 : IO UInt16
 
-/-- One connected query exchange (RFC 5452 §9.1/§9.2): fresh socket,
-    connect, send, recv with 2s timeout, close. `none` on timeout. -/
+/-- One UNCONNECTED query exchange (RFC 5452 §9.2: fresh socket per
+    exchange → unpredictable ephemeral local port). Returns the first
+    datagram with its observed addressing — (payload, source, destination,
+    local binding), each address 6 bytes — WITHOUT any source filtering:
+    the §9.1 matching decision is the Lean gate `datagramMatches`.
+    `none` on timeout. -/
 @[extern "veri_dns_exchange"]
-opaque exchangeRaw : @& ByteArray → @& ByteArray → IO (Option ByteArray)
+opaque exchangeRaw : @& ByteArray → @& ByteArray
+    → IO (Option (ByteArray × ByteArray × ByteArray × ByteArray))
 
 instance : UdpSocket IO UInt32 ByteArray where
   recvFrom fd maxBytes := recvFromRaw fd maxBytes.toUSize
@@ -42,6 +47,11 @@ instance : UdpSocket IO UInt32 ByteArray where
   now := nowRaw
   randomId := randomU16
   log msg := IO.eprintln s!"[veri-dns] {msg}"
-  exchange := exchangeRaw
+  exchange q addr := do
+    match ← exchangeRaw q addr with
+    | none => pure none
+    | some (payload, src, dst, loc) =>
+      pure (some { payload := payload, source := src
+                   destination := dst, localAddr := loc })
 
 end VeriDNS.Impl.UdpSocket
