@@ -6,11 +6,6 @@ namespace VeriDNS.Impl.Enum
 
 open VeriDNS.Spec
 
--- ============================================================
--- BitVec conversions (Opcode ↔ BitVec 4, Rcode ↔ BitVec 4)
--- toCode/ofCode are now auto-generated in VeriDNS.Spec.*
--- ============================================================
-
 def Opcode.toBV4 (o : Opcode) : BitVec 4 :=
   BitVec.ofNat 4 (Opcode.toCode o)
 

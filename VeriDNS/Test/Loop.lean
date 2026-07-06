@@ -1,21 +1,6 @@
 import VeriDNS.Impl.Server
 import VeriDNS.Impl.NameTree
 
-/-!
-# Compile-time verification of the IO shim
-
-`serveOne` / `resolveWithIO` / `ioResumeLoop` are parametric over the
-`UdpSocket` typeclass, so the whole serving loop runs in a pure `StateM`
-over a scripted mock socket — only the C FFI layer sits outside. Each
-`#guard` below evaluates at compile time: the build fails if the loop's
-end-to-end behavior regresses.
-
-Covered: direct answers (ID restoration, RFC 1035 §4.1.1 flag hygiene),
-spoofed-ID rejection (RFC 5452 §9.1), iterative delegation chase
-(RFC 1034 §5.3.3 4b), negative caching with qtype invariance and the §6
-SOA authority (RFC 2308), and query hygiene (REFUSED for RD=0).
--/
-
 namespace VeriDNS.Test.Loop
 
 open VeriDNS.Spec
@@ -24,16 +9,8 @@ open VeriDNS.Impl.Server
 open VeriDNS.Impl.SList
 open VeriDNS.Impl.Cache
 
-/-- The mock exchange socket's local binding (delivery address of
-    well-behaved responses). -/
 def mockLocal : ByteArray := ⟨#[192, 168, 0, 2, 0xAB, 0xCD]⟩
 
-/-- Scripted-socket state: one inbound client datagram, a script of
-    upstream exchange handlers (query ↦ response; an exhausted script is
-    a timeout), and everything the server sent back. `spoofSource`
-    overrides the source address the transport reports for every scripted
-    response (off-path attacker); `spoofDest` overrides the reported
-    delivery address. -/
 structure MockState where
   inbox : ByteArray × ByteArray
   script : List (ByteArray → Option ByteArray)
@@ -63,15 +40,12 @@ instance : UdpSocket MockM Unit ByteArray where
       match h q with
       | none => pure none
       | some resp =>
-        -- the transport REPORTS addressing; the Lean gate decides.
+
         pure (some { payload := resp
                      source := s.spoofSource.getD addr
                      destination := s.spoofDest.getD mockLocal
                      localAddr := mockLocal })
 
--- ## Wire helpers
-
-/-- ["example", "com"] → `7example3com0` wire bytes. -/
 def wireName (labels : List String) : ByteArray := Id.run do
   let mut out := ByteArray.empty
   for l in labels do
@@ -81,7 +55,8 @@ def wireName (labels : List String) : ByteArray := Id.run do
 
 def exampleCom : ByteArray := wireName ["example", "com"]
 def comName : ByteArray := wireName ["com"]
-def nsName : ByteArray := wireName ["ns1", "test"]
+
+def nsName : ByteArray := wireName ["ns1", "com"]
 def rootName : ByteArray := wireName ["a", "root-servers", "net"]
 def clientAddr : ByteArray := ⟨#[127, 0, 0, 1, 0x13, 0x88]⟩
 def aRdata : ByteArray := ⟨#[93, 184, 216, 34]⟩
@@ -100,9 +75,6 @@ def mkRR (name : ByteArray) (type_ : BitVec 16) (rdata : ByteArray)
     { name := name, type := type_, «class» := 1, ttl := ttl,
       rdlength := BitVec.ofNat 16 rdata.size, rdata := rdata })
 
--- ## Upstream handlers
-
-/-- Authoritative answer: echo id + question, one A record. -/
 def answerHandler (q : ByteArray) : Option ByteArray :=
   match Message.decode q with
   | .error _ => none
@@ -111,7 +83,6 @@ def answerHandler (q : ByteArray) : Option ByteArray :=
       header := { query.header with qr := 1, aa := 1, ancount := 1 }
       answer := #[mkRR query.question[0]!.qname 1 aRdata] }
 
-/-- Forged answer: correct content but the WRONG transaction ID. -/
 def spoofHandler (q : ByteArray) : Option ByteArray :=
   match Message.decode q with
   | .error _ => none
@@ -124,8 +95,6 @@ def spoofHandler (q : ByteArray) : Option ByteArray :=
                   ancount := 1 }
       answer := #[mkRR query.question[0]!.qname 1 aRdata] }
 
-/-- Referral: no answer; NS for `com` (closer than SBELT's root match
-    count) with glue for the delegated server. -/
 def referralHandler (q : ByteArray) : Option ByteArray :=
   match Message.decode q with
   | .error _ => none
@@ -135,12 +104,10 @@ def referralHandler (q : ByteArray) : Option ByteArray :=
       authority := #[mkRR comName 2 nsName]
       additional := #[mkRR nsName 1 ⟨#[10, 0, 0, 53]⟩] }
 
-/-- SOA rdata: MNAME + RNAME + serial/refresh/retry/expire + MINIMUM 60. -/
 def soaRdata : ByteArray :=
   wireName ["ns1", "test"] ++ wireName ["host", "test"] ++
   ⟨#[0, 0, 0, 1, 0, 0, 14, 16, 0, 0, 3, 132, 0, 9, 58, 128, 0, 0, 0, 60]⟩
 
-/-- NXDOMAIN carrying the RFC 2308 §3 SOA in the authority section. -/
 def nxdomainHandler (q : ByteArray) : Option ByteArray :=
   match Message.decode q with
   | .error _ => none
@@ -152,8 +119,6 @@ def nxdomainHandler (q : ByteArray) : Option ByteArray :=
                   rcode := Rcode.nameError
                   nscount := 1 }
       authority := #[mkRR comName 6 soaRdata (ttl := 60)] }
-
--- ## Harness
 
 def sbelt : DnsSList := DnsSList.mkSbelt #[(rootName, BitVec.ofNat 32 0x01010101)]
 
@@ -168,8 +133,6 @@ def sentResponse (st : MockState) : Option Format :=
     | .ok f => some f
     | .error _ => none
 
--- ## 1. Direct answer: ID restored, §4.1.1 flag hygiene, answer delivered
-
 def directAnswer : Bool := Id.run do
   let (_, st) := runServe (mkQuery exampleCom) [answerHandler]
   let some resp := sentResponse st | return false
@@ -181,8 +144,6 @@ def directAnswer : Bool := Id.run do
 
 #guard directAnswer
 
--- ## 2. RFC 5452: a forged-ID response must never reach the client
-
 def spoofRejected : Bool := Id.run do
   let (_, st) := runServe (mkQuery exampleCom) [spoofHandler]
   let some resp := sentResponse st | return false
@@ -191,9 +152,6 @@ def spoofRejected : Bool := Id.run do
 
 #guard spoofRejected
 
--- ## 2b. RFC 5452 §9.1: a response from the wrong source address must be
--- dropped by the Lean datagram gate (the transport does not filter)
-
 def wrongSourceRejected : Bool := Id.run do
   let query := mkQuery exampleCom
   let st0 : MockState := { inbox := (Message.encode query, clientAddr)
@@ -201,15 +159,11 @@ def wrongSourceRejected : Bool := Id.run do
                            spoofSource := some ⟨#[6, 6, 6, 6, 0, 53]⟩ }
   let (_, st) := (serveOne (M := MockM) (Sock := Unit) () sbelt DnsCache.empty).run st0
   let some resp := sentResponse st | return false
-  -- the (correct-ID!) answer arrived from the wrong address: rejected,
-  -- upstream retried until fuel/servers exhausted, client gets SERVFAIL
+
   return resp.answer.size == 0 && resp.header.rcode != Rcode.noError &&
     resp.header.id == 0x1234
 
 #guard wrongSourceRejected
-
--- ## 2c. RFC 5452 §9.1: a response delivered to the wrong destination
--- address (delivery metadata ≠ the binding the query left from) is dropped
 
 def wrongDestRejected : Bool := Id.run do
   let query := mkQuery exampleCom
@@ -222,8 +176,6 @@ def wrongDestRejected : Bool := Id.run do
 
 #guard wrongDestRejected
 
--- ## 3. Iterative resolution: referral chased to the delegated server
-
 def delegationChased : Bool := Id.run do
   let (_, st) := runServe (mkQuery exampleCom) [referralHandler, answerHandler]
   let some resp := sentResponse st | return false
@@ -232,13 +184,10 @@ def delegationChased : Bool := Id.run do
 
 #guard delegationChased
 
--- ## 4. RFC 2308: NXDOMAIN cached, qtype-invariant, §6 SOA served back
-
 def negativeCached : Bool := Id.run do
   let (cache1, st1) := runServe (mkQuery exampleCom) [nxdomainHandler]
   let some r1 := sentResponse st1 | return false
-  -- AAAA re-query answered ENTIRELY from cache (empty script = any
-  -- upstream exchange would time out), SOA still in the authority
+
   let (_, st2) := runServe (mkQuery exampleCom 28) [] cache1
   let some r2 := sentResponse st2 | return false
   return r1.header.rcode == Rcode.nameError && r1.authority.size == 1 &&
@@ -247,8 +196,6 @@ def negativeCached : Bool := Id.run do
 
 #guard negativeCached
 
--- ## 5. Query hygiene: RD=0 is REFUSED before any upstream work
-
 def refusedIterative : Bool := Id.run do
   let (_, st) := runServe (mkQuery exampleCom (rd := 0)) [answerHandler]
   let some resp := sentResponse st | return false
@@ -256,18 +203,10 @@ def refusedIterative : Bool := Id.run do
 
 #guard refusedIterative
 
--- ## 6. The semantic model, executable: a network derived from the
--- RFC 1034 §3.1 name tree answers per `treeLookup`, and the served
--- responses carry exactly the tree's verdicts — the data at the node the
--- query names, NXDOMAIN for missing nodes, the CNAME chase along tree
--- edges. This is the `ResponseConsistent` oracle instantiated by
--- construction (the handler cannot say anything the tree does not hold).
-
 section TreeNetwork
 
 open VeriDNS.Impl.NameTree
 
-/-- Raw label bytes (no length prefix — node labels, not wire names). -/
 def lab (s : String) : ByteArray := s.toUTF8
 
 def wwwExampleCom : ByteArray := wireName ["www", "example", "com"]
@@ -281,17 +220,12 @@ def cnameRR : ResourceRecord :=
   { name := wwwExampleCom, type := 5, «class» := 1, ttl := 300,
     rdlength := BitVec.ofNat 16 exampleCom.size, rdata := exampleCom }
 
-/-- The global tree:
-    `.` → `com` → `example` (A 93.184.216.34) → `www` (CNAME example.com) -/
 def theTree : Node ResourceRecord :=
   .mk ByteArray.empty #[] #[
     .mk (lab "com") #[] #[
       .mk (lab "example") #[aRR] #[
         .mk (lab "www") #[cnameRR] #[]]]]
 
-/-- A server that IS the tree: every query is answered with
-    `treeLookup`'s verdict. An NXDOMAIN carries the RFC 2308 SOA so the
-    resolver can negatively cache it. -/
 def treeHandler (q : ByteArray) : Option ByteArray :=
   match Message.decode q with
   | .error _ => none
@@ -326,8 +260,6 @@ def treeHandler (q : ByteArray) : Option ByteArray :=
           { query with header := h
                        authority := #[mkRR comName 6 soaRdata (ttl := 60)] }
 
-/-- The A record served for example.com is the tree's record at that
-    node, byte for byte. -/
 def treeAnswered : Bool := Id.run do
   let (_, st) := runServe (mkQuery exampleCom) [treeHandler]
   let some resp := sentResponse st | return false
@@ -337,10 +269,6 @@ def treeAnswered : Bool := Id.run do
 
 #guard treeAnswered
 
-/-- A name whose node is missing from the tree gets NXDOMAIN — and the
-    cached negative answers a re-query with no upstream exchange
-    (`treeLookup theTree missingName = .nameError` is the §3.1 meaning of
-    "the node does not exist"). -/
 def treeMissing : Bool := Id.run do
   let (cache1, st1) := runServe (mkQuery missingName) [treeHandler]
   let some r1 := sentResponse st1 | return false
@@ -349,16 +277,10 @@ def treeMissing : Bool := Id.run do
   return r1.header.rcode == Rcode.nameError &&
     r2.header.rcode == Rcode.nameError && st2.exchanged.isEmpty
 
--- The negative-caching path through the tree handler exceeds the
--- kernel's reduction stack under `#guard` (the positive-path guards
--- above reduce fine); checked natively instead — a regression still
--- fails the build, via the thrown error.
 #eval show IO Unit from do
   unless treeMissing do
     throw <| IO.userError "treeMissing regressed"
 
-/-- Case-insensitivity at the semantic level: the tree node for
-    `example.com` answers a query spelled `EXAMPLE.COM`. -/
 def treeCaseInsensitive : Bool := Id.run do
   let upper := wireName ["EXAMPLE", "COM"]
   let (_, st) := runServe (mkQuery upper) [treeHandler]
@@ -367,9 +289,6 @@ def treeCaseInsensitive : Bool := Id.run do
 
 #guard treeCaseInsensitive
 
-/-- The CNAME chase follows tree edges: www.example.com redirects to
-    example.com, the resolver re-queries, and the final answer carries
-    the full chain (CNAME + A), both of which are tree data. -/
 def treeChased : Bool := Id.run do
   let (_, st) := runServe (mkQuery wwwExampleCom) [treeHandler, treeHandler]
   let some resp := sentResponse st | return false
@@ -379,8 +298,6 @@ def treeChased : Bool := Id.run do
 
 #guard treeChased
 
-/-- NODATA: the node exists but holds no record of the queried type
-    (example.com MX) — NOERROR with an empty answer section. -/
 def treeNodata : Bool := Id.run do
   let (_, st) := runServe (mkQuery exampleCom 15) [treeHandler]
   let some resp := sentResponse st | return false

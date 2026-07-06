@@ -1,0 +1,34 @@
+/* veri-dns customisation of the generated documentation.
+ *
+ * This file is OWNED BY veri-dns: pseudoprint renders the RFC source/coverage
+ * pages with neutral defaults, and everything RFC-specific about how they look
+ * is controlled here. Edit freely. The stable hooks are:
+ *   .src-doc            the RFC text block (monospace, line-numbered)
+ *   .src-doc .ln        the line-number gutter
+ *   .src-doc .cov-green/.cov-blue/.cov-hollow   formalized lines, by status
+ *   .src-doc .scope-todo   imported-but-not-yet-formalized lines
+ *   .src-doc .scope-out    out-of-scope (excluded) lines
+ *   .src-cov / .src-cov-bar / .src-cov-label    the coverage meter
+ */
+
+/* RFC text: a touch denser, with a card-like frame. */
+.src-doc {
+  font-size: 0.78rem;
+  line-height: 1.45;
+  border-radius: 8px;
+  padding: 0.6rem 0;
+}
+
+/* Quieter line-number gutter. */
+.src-doc .ln {
+  width: 3.6rem;
+  opacity: 0.55;
+}
+
+/* Branded, slightly stronger highlight tints. */
+.src-doc .cov-green { background: rgba(46, 125, 50, 0.24); }
+.src-doc .cov-blue  { background: rgba(21, 101, 192, 0.24); }
+.src-doc .scope-out { opacity: 0.5; }
+
+/* Page headings use Verso's structural font for a consistent feel. */
+main.src-page h1 { font-family: var(--verso-structure-font-family); }

@@ -10,7 +10,7 @@ require batteries from git
   "https://github.com/leanprover-community/batteries" @ "main"
 
 require verso from git
-  "https://github.com/leanprover/verso.git" @ "v4.31.0-rc1"
+  "https://github.com/BasisResearch/verso" @ "main"
 
 @[default_target]
 lean_lib VeriDNS where

@@ -7,25 +7,100 @@ namespace VeriDNS.Proof.Primitives
 
 open VeriDNS.Impl
 
--- ============================================================
--- Test: concrete roundtrip works
--- ============================================================
+set_option linter.unusedSimpArgs false in
+/-- **16-bit byte-split round-trip, axiom-clean (`getLsbD` bit-blast, no `bv_decide` native LRAT axiom).**
+    Splitting a `BitVec 16` into its two bytes (high `x >>> 8`, low `x`) and reassembling via the decode
+    path (`setWidth 16` of each byte, high one `<<< 8`, OR'd) recovers `x`. Replaces `bv_decide` in the
+    codec value round-trips (type/class/rdlength/qtype/qclass) — shrinks the TCB toward kernel+FFI-only. -/
+theorem reassemble16 (x : BitVec 16) :
+    (UInt8.ofBitVec ((x >>> 8).setWidth 8)).toBitVec.setWidth 16 <<< 8 |||
+      (UInt8.ofBitVec (x.setWidth 8)).toBitVec.setWidth 16 = x := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp only [UInt8.toBitVec_ofBitVec, BitVec.getLsbD_or, BitVec.getLsbD_shiftLeft,
+    BitVec.getLsbD_setWidth, BitVec.getLsbD_ushiftRight]
+  by_cases h : i < 8
+  · simp only [h, hi, decide_true, Bool.true_and, Bool.and_true, decide_false,
+      Nat.not_le.mpr h, Bool.not_true, Bool.false_and, Bool.false_or]
+  · rw [show 8 + (i - 8) = i from by omega]
+    have c2 : i - 8 < 16 := by omega
+    have c3 : i - 8 < 8 := by omega
+    simp only [h, hi, c2, c3, decide_true, decide_false, Bool.true_and, Bool.and_true,
+      Bool.not_false, Bool.and_self, Bool.false_and, Bool.or_false]
 
-example : DnsParser.run DnsParser.readUInt8 ⟨#[42]⟩ 0 = .ok (42, 1) := by native_decide
+/-- **32-bit byte-split round-trip, axiom-clean** (the `ttl` analogue of `reassemble16`; four bytes). -/
+theorem reassemble32 (x : BitVec 32) :
+    (UInt8.ofBitVec ((x >>> 24).setWidth 8)).toBitVec.setWidth 32 <<< 24 |||
+      (UInt8.ofBitVec ((x >>> 16).setWidth 8)).toBitVec.setWidth 32 <<< 16 |||
+        (UInt8.ofBitVec ((x >>> 8).setWidth 8)).toBitVec.setWidth 32 <<< 8 |||
+          (UInt8.ofBitVec (x.setWidth 8)).toBitVec.setWidth 32 = x := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp only [UInt8.toBitVec_ofBitVec, BitVec.getLsbD_or, BitVec.getLsbD_shiftLeft,
+    BitVec.getLsbD_setWidth, BitVec.getLsbD_ushiftRight]
+  rcases Nat.lt_or_ge i 8 with h | h
+  · have a1 : ¬ (16:Nat) ≤ i := by omega
+    have a2 : ¬ (24:Nat) ≤ i := by omega
+    simp [hi, h, Nat.not_le.mpr h, a1, a2]
+  rcases Nat.lt_or_ge i 16 with h2 | h2
+  · rw [show 8 + (i - 8) = i from by omega]
+    have a1 : i < 24 := by omega
+    have a2 : ¬ i < 8 := by omega
+    have a3 : i - 8 < 32 := by omega
+    have a4 : i - 8 < 8 := by omega
+    simp [hi, a1, h2, a2, a3, a4]
+  rcases Nat.lt_or_ge i 24 with h3 | h3
+  · rw [show 16 + (i - 16) = i from by omega]
+    have a2 : ¬ i < 16 := by omega
+    have a2b : ¬ i < 8 := by omega
+    have a3 : i - 16 < 32 := by omega
+    have a4 : i - 16 < 8 := by omega
+    have a5 : ¬ i - 8 < 8 := by omega
+    simp [hi, h3, a2, a2b, a3, a4, a5]
+  · rw [show 24 + (i - 24) = i from by omega]
+    have a1 : ¬ i < 24 := by omega
+    have a2 : ¬ i < 16 := by omega
+    have a2b : ¬ i < 8 := by omega
+    have a3 : i - 24 < 32 := by omega
+    have a4 : i - 24 < 8 := by omega
+    have a5 : ¬ i - 8 < 8 := by omega
+    have a6 : ¬ i - 16 < 8 := by omega
+    simp [hi, a1, a2, a2b, a3, a4, a5, a6]
 
--- ============================================================
--- Serializer exec reductions (definitional)
--- ============================================================
+/-- `getLsbD` of the 16-bit `0xFF` mask: true exactly on the low byte. Axiom-clean; for `uint16_split`. -/
+theorem getLsbD_255_16 (i : Nat) : (255#16).getLsbD i = decide (i < 8) := by
+  rw [show (255#16) = BitVec.ofNat 16 (2^8 - 1) from rfl,
+    BitVec.getLsbD_ofNat, Nat.testBit_two_pow_sub_one]
+  rcases Nat.lt_or_ge i 8 with h | h
+  · simp [h, (by omega : i < 16)]
+  · simp only [decide_eq_false (show ¬ i < 8 from by omega), Bool.and_false]
+
+/-- **UInt16 byte-split round-trip, axiom-clean** (`getLsbD` bit-blast; the UInt16-op version of
+    `reassemble16`, with `&&& 255` mask and BitVec-amount shifts reduced to `Nat`-8 by `rfl`). -/
+theorem uint16_split (bv : BitVec 16) :
+    (({ toBitVec := bv } : UInt16) >>> 8).toUInt8.toUInt16 <<< 8 |||
+      (({ toBitVec := bv } : UInt16) &&& 255).toUInt8.toUInt16 = ({ toBitVec := bv } : UInt16) := by
+  apply UInt16.toBitVec_inj.mp
+  simp only [UInt16.toBitVec_or, UInt16.toBitVec_shiftLeft, UInt16.toBitVec_shiftRight,
+    UInt16.toBitVec_toUInt8, UInt8.toBitVec_toUInt16, UInt16.toBitVec_and, UInt16.toBitVec_ofNat,
+    BitVec.setWidth_setWidth,
+    show ∀ (y : BitVec 16), y <<< (8#16 % 16) = y <<< (8 : Nat) from fun _ => rfl,
+    show bv >>> (8#16 % 16) = bv >>> (8 : Nat) from rfl]
+  apply BitVec.eq_of_getLsbD_eq; intro i hi
+  simp only [BitVec.getLsbD_or, BitVec.getLsbD_shiftLeft, BitVec.getLsbD_setWidth,
+    BitVec.getLsbD_ushiftRight, BitVec.getLsbD_and, getLsbD_255_16]
+  by_cases h : i < 8
+  · simp [h, hi, Nat.not_le.mpr h]
+  · rw [show 8 + (i - 8) = i from by omega]
+    simp [h, hi, (show i - 8 < 8 from by omega), (show i - 8 < 16 from by omega)]
+
+example : DnsParser.run DnsParser.readUInt8 ⟨#[42]⟩ 0 = .ok (42, 1) := by decide
 
 @[simp] theorem exec_writeUInt8 (init : ByteArray) (b : UInt8) :
     (StateT.run (DnsSerializer.writeUInt8 b) init).2 = init.push b := by rfl
 
 @[simp] theorem exec_writeBytes (init : ByteArray) (bs : ByteArray) :
     (StateT.run (DnsSerializer.writeBytes bs) init).2 = init ++ bs := by rfl
-
--- ============================================================
--- Parser equational lemmas (all by rfl thanks to new type)
--- ============================================================
 
 @[simp] theorem run_readUInt8 (buf : ByteArray) (pos : Nat) :
     DnsParser.run DnsParser.readUInt8 buf pos =
@@ -85,10 +160,6 @@ example : DnsParser.run DnsParser.readUInt8 ⟨#[42]⟩ 0 = .ok (42, 1) := by na
 @[simp] theorem run_fail {α : Type} (buf : ByteArray) (pos : Nat) (msg : String) :
     DnsParser.run (DnsParser.fail msg : DnsParser α) buf pos = .error msg := by rfl
 
--- ============================================================
--- Monadic bind/pure reduction for DnsParser.run
--- ============================================================
-
 @[simp] theorem run_pure {α : Type} (buf : ByteArray) (pos : Nat) (a : α) :
     DnsParser.run (pure a : DnsParser α) buf pos = .ok (a, pos) := by rfl
 
@@ -114,20 +185,6 @@ example : DnsParser.run DnsParser.readUInt8 ⟨#[42]⟩ 0 = .ok (42, 1) := by na
   | ok val => cases val; rfl
   | error e => rfl
 
--- ============================================================
--- Write-then-read roundtrip lemmas (BV16/BV32/BV8)
--- These are the key infrastructure: encoding then decoding
--- recovers the original value.
---
--- Proof pattern:
---   1. unfold definitions to ByteArray.push + dite
---   2. dsimp to reduce StateM monad operations
---   3. simp to resolve Array.getElem_push and sizes
---   4. decide to resolve Nat comparisons to True/False
---   5. dite_true/dite_false to collapse if-then-else
---   6. bv_decide for the BitVec identity
--- ============================================================
-
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 800000 in
 @[simp] theorem readBV16_writeBV16 (v : BitVec 16) :
@@ -142,7 +199,7 @@ set_option maxHeartbeats 800000 in
              ByteArray.emptyWithCapacity, List.length_nil]
   simp (config := { decide := true }) only []
   simp only [dite_true, dite_false]
-  congr 1; simp only [Prod.mk.injEq]; exact ⟨by bv_decide, trivial⟩
+  congr 1; simp only [Prod.mk.injEq]; exact ⟨reassemble16 v, trivial⟩
 
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 800000 in
@@ -158,7 +215,7 @@ set_option maxHeartbeats 800000 in
              ByteArray.emptyWithCapacity, List.length_nil]
   simp (config := { decide := true }) only []
   simp only [dite_true, dite_false]
-  congr 1; simp only [Prod.mk.injEq]; exact ⟨by bv_decide, trivial⟩
+  congr 1; simp only [Prod.mk.injEq]; exact ⟨reassemble32 v, trivial⟩
 
 set_option maxRecDepth 4096 in
 set_option maxHeartbeats 400000 in
@@ -174,10 +231,6 @@ set_option maxHeartbeats 400000 in
              ByteArray.emptyWithCapacity, List.length_nil]
   simp (config := { decide := true }) only []
   simp only [dite_true, dite_false]
-
--- ============================================================
--- UInt16 write-then-read roundtrip
--- ============================================================
 
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 800000 in
@@ -197,17 +250,12 @@ set_option maxHeartbeats 800000 in
   simp only [dite_true, dite_false]
   congr 1; simp only [Prod.mk.injEq]
   refine ⟨?_, trivial⟩
-  -- UInt16 roundtrip: ((v >>> 8).toUInt8.toUInt16 <<< 8) ||| (v &&& 0xFF).toUInt8.toUInt16 = v
-  -- Prove the UInt16 byte roundtrip via native_decide on a BitVec helper
+
   suffices h : ∀ bv : BitVec 16,
       (({ toBitVec := bv } : UInt16) >>> 8).toUInt8.toUInt16 <<< 8 |||
       (({ toBitVec := bv } : UInt16) &&& 255).toUInt8.toUInt16 =
       ({ toBitVec := bv } : UInt16) from h v.toBitVec
-  native_decide
-
--- ============================================================
--- Standalone UInt16 byte roundtrip
--- ============================================================
+  exact uint16_split
 
 @[simp] theorem uint16_byte_roundtrip (v : UInt16) :
     (v >>> 8).toUInt8.toUInt16 <<< 8 ||| (v &&& 255).toUInt8.toUInt16 = v := by
@@ -215,20 +263,12 @@ set_option maxHeartbeats 800000 in
       (({ toBitVec := bv } : UInt16) >>> 8).toUInt8.toUInt16 <<< 8 |||
       (({ toBitVec := bv } : UInt16) &&& 255).toUInt8.toUInt16 =
       ({ toBitVec := bv } : UInt16) from this v.toBitVec
-  native_decide
-
--- ============================================================
--- BitVec 16 byte split/merge identity
--- ============================================================
+  exact uint16_split
 
 theorem bv16_byte_identity (v : BitVec 16) :
     BitVec.setWidth 16 (BitVec.setWidth 8 (v >>> 8)) <<< 8 |||
-    BitVec.setWidth 16 (BitVec.setWidth 8 v) = v := by
-  bv_decide
-
--- ============================================================
--- Serializer exec reductions (state transitions)
--- ============================================================
+    BitVec.setWidth 16 (BitVec.setWidth 8 v) = v :=
+  reassemble16 v
 
 @[simp] theorem exec_writeBV16 (init : ByteArray) (v : BitVec 16) :
     (StateT.run (writeBV16 v) init).2 =
@@ -249,10 +289,6 @@ theorem bv16_byte_identity (v : BitVec 16) :
     (StateT.run (DnsSerializer.writeUInt16BE v) init).2 =
     (init.push (v >>> 8).toUInt8).push (v &&& 0xFF).toUInt8 := by rfl
 
--- ============================================================
--- Serializer sequential execution (StateM decomposition)
--- ============================================================
-
 @[simp] theorem stateM_run_seq {α : Type} (s1 : DnsSerializer Unit) (s2 : DnsSerializer α)
     (init : ByteArray) :
     StateT.run (s1 >>= fun _ => s2) init =
@@ -262,10 +298,6 @@ theorem bv16_byte_identity (v : BitVec 16) :
     (init : ByteArray) :
     (StateT.run (s1 >>= fun _ => s2) init).2 =
     (StateT.run s2 (StateT.run s1 init).2).2 := by rfl
-
--- ============================================================
--- Serializer run/runBytes reductions
--- ============================================================
 
 @[simp] theorem runBytes_seq (s1 : DnsSerializer Unit) (s2 : DnsSerializer Unit) :
     DnsSerializer.runBytes (s1 >>= fun _ => s2) =
@@ -277,11 +309,6 @@ theorem bv16_byte_identity (v : BitVec 16) :
 @[simp] theorem runBytes_writeBytes (bs : ByteArray) :
     DnsSerializer.runBytes (DnsSerializer.writeBytes bs) = ByteArray.empty ++ bs := by rfl
 
--- ============================================================
--- Composite read helpers (reduce proof size for multi-field types)
--- ============================================================
-
-/-- Read a BV32 at a known position with known byte values. -/
 theorem readBV32_at (buf : ByteArray) (pos : Nat) (v : BitVec 32)
     (hb : pos + 3 < buf.data.size)
     (h0 : buf.data[pos]'(by omega) = UInt8.ofBitVec ((v >>> 24).setWidth 8))
@@ -291,9 +318,8 @@ theorem readBV32_at (buf : ByteArray) (pos : Nat) (v : BitVec 32)
     DnsParser.run readBV32 buf pos = .ok (v, pos + 4) := by
   simp only [run_readBV32, dif_pos hb, h0, h1, h2, h3]
   congr 1; congr 1
-  exact by bv_decide
+  exact reassemble32 v
 
-/-- Access byte at offset `a.size + b.size + k` in `(a ++ b ++ c).data` gives `c.data[k]`. -/
 theorem getElem_append3_right (a b c : ByteArray) (k : Nat)
     (h : a.size + b.size + k < (a ++ b ++ c).data.size)
     (hk : k < c.data.size) :
@@ -303,8 +329,6 @@ theorem getElem_append3_right (a b c : ByteArray) (k : Nat)
   congr 1
   simp [Array.size_append, ByteArray.size_data]
 
-/-- Access byte at arbitrary index `idx` in `(a ++ b ++ c).data`,
-    where `idx = a.size + b.size + k` (proved by omega). -/
 theorem byte_at_suffix (a b c : ByteArray) (idx k : Nat)
     (hidx : idx = a.size + b.size + k)
     (h : idx < (a ++ b ++ c).data.size)

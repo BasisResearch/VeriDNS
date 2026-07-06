@@ -11,18 +11,19 @@ open VeriDNS.Spec
 set_option maxHeartbeats 1600000 in
 theorem decode_encode (q : VeriDNS.Spec.Question)
     (labels : Array ByteArray) (hv : Proof.DomainName.ValidLabels labels)
+    (hle : (DomainName.labelsToWireFormat labels).size ≤ 255)
     (hqn : DomainName.labelsToWireFormat labels = q.qname) :
     DnsParser.run Question.decode (DnsSerializer.runBytes (Question.encode q)) =
       .ok (q, q.qname.size + 4) := by
   obtain ⟨qname, qtype, qclass⟩ := q
   simp only at hqn ⊢
   subst hqn
-  -- Abbreviation for the buffer suffix
+
   let suf : ByteArray := ⟨#[UInt8.ofBitVec ((qtype >>> 8).setWidth 8),
      UInt8.ofBitVec (qtype.setWidth 8),
      UInt8.ofBitVec ((qclass >>> 8).setWidth 8),
      UInt8.ofBitVec (qclass.setWidth 8)]⟩
-  -- Step 1: Compute serializer buffer
+
   have hbuf : DnsSerializer.runBytes (Question.encode
       { qname := DomainName.labelsToWireFormat labels, qtype, qclass }) =
       ByteArray.empty ++ DomainName.labelsToWireFormat labels ++ suf := by
@@ -33,25 +34,25 @@ theorem decode_encode (q : VeriDNS.Spec.Question)
     simp [MonadStateOf.modifyGet, StateT.modifyGet, pure]
     apply ByteArray.ext; simp [ByteArray.data_push, ByteArray.data_append, ByteArray.data]; rfl
   rw [hbuf]
-  -- Step 2: Unfold decoder
+
   simp only [Question.decode, Primitives.run_bind, Primitives.run_pure]
-  -- Step 3: decodeName via frame lemma
+
   have hdn : DnsParser.run DomainName.decodeName
       (ByteArray.empty ++ DomainName.labelsToWireFormat labels ++ suf) 0
       = .ok (labels, (DomainName.labelsToWireFormat labels).size) := by
-    have := Proof.DomainName.decodeName_frame_labels labels hv ByteArray.empty suf
+    have := Proof.DomainName.decodeName_frame_labels labels hv hle ByteArray.empty suf
     simp only [ByteArray.size_empty, Nat.zero_add] at this
     exact this
   simp only [hdn]
-  -- Buffer data size fact
+
   have hbds : (ByteArray.empty ++ DomainName.labelsToWireFormat labels ++ suf).data.size =
       (DomainName.labelsToWireFormat labels).size + 4 := by
     simp [ByteArray.size_data, ByteArray.size_append, suf]
-  -- Steps 4-5: readBV16 for qtype and qclass
+
   simp only [Primitives.run_readBV16]
   simp only [dif_pos (show (DomainName.labelsToWireFormat labels).size + 1 < (ByteArray.empty ++ DomainName.labelsToWireFormat labels ++ suf).data.size from by rw [hbds]; omega)]
   simp only [dif_pos (show (DomainName.labelsToWireFormat labels).size + 2 + 1 < (ByteArray.empty ++ DomainName.labelsToWireFormat labels ++ suf).data.size from by rw [hbds]; omega)]
-  -- Byte access for qtype (wrapping .data in parens to avoid line break parsing)
+
   have hqt0 : ((ByteArray.empty ++ DomainName.labelsToWireFormat labels ++ suf).data
     )[(DomainName.labelsToWireFormat labels).size] =
       UInt8.ofBitVec ((qtype >>> 8).setWidth 8) := by
@@ -62,9 +63,10 @@ theorem decode_encode (q : VeriDNS.Spec.Question)
     simp [ByteArray.data_append, suf]
   simp only [hqt0, hqt1]
   have hqt_id : (UInt8.ofBitVec ((qtype >>> 8).setWidth 8)).toBitVec.setWidth 16 <<< 8 |||
-      (UInt8.ofBitVec (qtype.setWidth 8)).toBitVec.setWidth 16 = qtype := by bv_decide
+      (UInt8.ofBitVec (qtype.setWidth 8)).toBitVec.setWidth 16 = qtype :=
+    VeriDNS.Proof.Primitives.reassemble16 qtype
   simp only [hqt_id]
-  -- Byte access for qclass
+
   have hqc0 : ((ByteArray.empty ++ DomainName.labelsToWireFormat labels ++ suf).data
     )[(DomainName.labelsToWireFormat labels).size + 2] =
       UInt8.ofBitVec ((qclass >>> 8).setWidth 8) := by
@@ -78,7 +80,8 @@ theorem decode_encode (q : VeriDNS.Spec.Question)
     simp [ByteArray.data_append, suf]
   simp only [hqc0, hqc1]
   have hqc_id : (UInt8.ofBitVec ((qclass >>> 8).setWidth 8)).toBitVec.setWidth 16 <<< 8 |||
-      (UInt8.ofBitVec (qclass.setWidth 8)).toBitVec.setWidth 16 = qclass := by bv_decide
+      (UInt8.ofBitVec (qclass.setWidth 8)).toBitVec.setWidth 16 = qclass :=
+    VeriDNS.Proof.Primitives.reassemble16 qclass
   simp only [hqc_id]
 
 end VeriDNS.Proof.Question

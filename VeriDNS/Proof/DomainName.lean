@@ -6,17 +6,8 @@ namespace VeriDNS.Proof.DomainName
 
 open VeriDNS.Impl.DomainName
 
--- ============================================================
--- labelsToWireFormat / wireFormatToLabels roundtrip
--- ============================================================
-
-/-- A label array is valid if every label has length 1–63 (per RFC 1035 §2.3.1). -/
 def ValidLabels (labels : Array ByteArray) : Prop :=
   ∀ (i : Nat) (h : i < labels.size), 0 < labels[i].size ∧ labels[i].size ≤ 63
-
--- ============================================================
--- ByteArray helper lemmas
--- ============================================================
 
 private theorem ba_append_assoc (a b c : ByteArray) : a ++ b ++ c = a ++ (b ++ c) := by
   ext1; simp [ByteArray.data_append, Array.append_assoc]
@@ -30,6 +21,49 @@ theorem labelsToWireFormatGo_size_pos (ls : List ByteArray) :
   | nil => simp [labelsToWireFormatGo]; decide
   | cons l rest ih =>
     simp [labelsToWireFormatGo, ByteArray.size_append, ByteArray.size_push]; omega
+
+/-- Each nonempty label contributes at least 2 wire bytes (length octet + content), plus the root
+    octet: `2·len + 1 ≤ wire size`. With the RFC 1035 §2.3.4 total ≤255 cap this bounds a canonical
+    wire name to ≤127 labels — the label-count side of the name budget. -/
+theorem labelsToWireFormatGo_length_bound (ls : List ByteArray)
+    (hpos : ∀ x ∈ ls, 0 < x.size) :
+    2 * ls.length + 1 ≤ (labelsToWireFormatGo ls).size := by
+  induction ls with
+  | nil => simp [labelsToWireFormatGo]; decide
+  | cons l rest ih =>
+    have he : (ByteArray.empty).size = 0 := rfl
+    have hsz : (labelsToWireFormatGo (l :: rest)).size
+        = 1 + l.size + (labelsToWireFormatGo rest).size := by
+      simp only [labelsToWireFormatGo, ByteArray.size_append, ByteArray.size_push, he]
+    have hl := hpos l (List.mem_cons_self ..)
+    have hr := ih (fun x hx => hpos x (List.mem_cons_of_mem _ hx))
+    simp only [List.length_cons]
+    omega
+
+/-- The accumulator form of `encodedNameLen`: `foldl (·+1+size) acc ls + 1 = acc + wire size`. -/
+private theorem foldl_encodedLen_eq (ls : List ByteArray) (acc : Nat) :
+    List.foldl (fun a (l : ByteArray) => a + 1 + l.size) acc ls + 1
+      = acc + (labelsToWireFormatGo ls).size := by
+  induction ls generalizing acc with
+  | nil =>
+    have h0 : (labelsToWireFormatGo ([] : List ByteArray)).size = 1 := rfl
+    simp [h0]
+  | cons l rest ih =>
+    have he : (ByteArray.empty).size = 0 := rfl
+    have hsz : (labelsToWireFormatGo (l :: rest)).size
+        = 1 + l.size + (labelsToWireFormatGo rest).size := by
+      simp only [labelsToWireFormatGo, ByteArray.size_append, ByteArray.size_push, he]
+    rw [List.foldl_cons, ih (acc + 1 + l.size), hsz]
+    omega
+
+/-- The impl's `encodedNameLen` equals the wire-encoded size — so the ≤255 guard in `decodeName` is exactly
+    a bound on `(labelsToWireFormat labels).size`. -/
+theorem encodedNameLen_eq (labels : Array ByteArray) :
+    Impl.DomainName.encodedNameLen labels = (Impl.DomainName.labelsToWireFormat labels).size := by
+  unfold Impl.DomainName.encodedNameLen Impl.DomainName.labelsToWireFormat
+  rw [← Array.foldl_toList]
+  have h := foldl_encodedLen_eq labels.toList 1
+  omega
 
 private theorem ba_extract_at_size (a b : ByteArray) (i j : Nat) :
     (a ++ b).extract (a.size + i) (a.size + j) = b.extract i j := by
@@ -53,10 +87,6 @@ private theorem extract_label (pre hdr l tail : ByteArray) :
       ← ByteArray.size_append (a := pre) (b := hdr)]
   exact (ba_extract_at_size (pre ++ hdr) (l ++ tail) 0 l.size).trans
     (ba_extract_zero_size l tail)
-
--- ============================================================
--- Combined frame+roundtrip: wireFormatToLabelsGo with prefix
--- ============================================================
 
 set_option maxHeartbeats 800000 in
 private theorem wireFormatToLabelsGo_prepend (pre : ByteArray) (ls : List ByteArray)
@@ -82,7 +112,7 @@ private theorem wireFormatToLabelsGo_prepend (pre : ByteArray) (ls : List ByteAr
     have hvrest : ∀ l' ∈ rest, 0 < l'.size ∧ l'.size ≤ 63 :=
       fun l' hl' => hv l' (List.mem_cons_of_mem l hl')
     simp only [labelsToWireFormatGo]
-    -- wire = pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++ labelsToWireFormatGo rest)
+
     rw [wireFormatToLabelsGo]
     have hlt : pre.size <
         (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++
@@ -92,7 +122,7 @@ private theorem wireFormatToLabelsGo_prepend (pre : ByteArray) (ls : List ByteAr
         (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++
           labelsToWireFormatGo rest)).data.size := hlt
     simp only [dif_pos hltd]
-    -- Byte at pre.size is l.size
+
     have hbyte : ((pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++
         labelsToWireFormatGo rest)).data[pre.size]'hltd).toNat = l.size := by
       simp only [ByteArray.data_append, ByteArray.data_push, ByteArray.data_empty]
@@ -107,7 +137,7 @@ private theorem wireFormatToLabelsGo_prepend (pre : ByteArray) (ls : List ByteAr
         #[l.size.toUInt8].size from by simp)]
       simp [UInt8.toNat, UInt8.ofNat, BitVec.toNat_ofNat]; omega
     simp only [hbyte]
-    -- Resolve branches
+
     have hbnd : pre.size + 1 + l.size ≤
         (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++
           labelsToWireFormatGo rest)).size := by
@@ -115,7 +145,7 @@ private theorem wireFormatToLabelsGo_prepend (pre : ByteArray) (ls : List ByteAr
     simp only [dif_neg (show ¬(l.size = 0) from by omega),
                dif_neg (show ¬(l.size > 63) from by omega),
                dif_pos hbnd]
-    -- Recursive call
+
     have hrec : wireFormatToLabelsGo
         (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++ labelsToWireFormatGo rest))
         (pre.size + 1 + l.size) = .ok rest := by
@@ -127,7 +157,7 @@ private theorem wireFormatToLabelsGo_prepend (pre : ByteArray) (ls : List ByteAr
           simp [ByteArray.size_append, ByteArray.size_push]]
       exact ih (pre ++ ByteArray.empty.push l.size.toUInt8 ++ l) hvrest
     rw [hrec]
-    -- Extract gives l
+
     have hext : (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++
         labelsToWireFormatGo rest)).extract (pre.size + 1) (pre.size + 1 + l.size) = l := by
       rw [← ba_append_assoc pre (ByteArray.empty.push l.size.toUInt8 ++ l)
@@ -141,9 +171,64 @@ private theorem wireFormatToLabelsGo_prepend (pre : ByteArray) (ls : List ByteAr
         (labelsToWireFormatGo rest)
     simp only [hext]
 
--- ============================================================
--- Main roundtrip theorem
--- ============================================================
+/-- **Decoder validity**: every label produced by a successful `wireFormatToLabelsGo` run is
+    DNS-valid — nonempty (a zero length byte terminates the name, producing `[]`) and ≤63 bytes
+    (larger length bytes are rejected with an error). The label itself is
+    `wire.extract (pos+1) (pos+1+len)` whose size is exactly the (1..63) length byte. The
+    name-intrinsic fact the glueless-provenance driver invariant carries for address-less SLIST
+    targets. -/
+theorem wireFormatToLabelsGo_valid {wire : ByteArray} {pos : Nat} {ls : List ByteArray}
+    (hw : wireFormatToLabelsGo wire pos = .ok ls) :
+    ∀ l ∈ ls, 0 < l.size ∧ l.size ≤ 63 := by
+  unfold wireFormatToLabelsGo at hw
+  by_cases hpos : pos < wire.data.size
+  · rw [dif_pos hpos] at hw
+    dsimp only [] at hw
+    split at hw
+    · cases hw
+      intro x hx
+      simp at hx
+    · next hzero =>
+      split at hw
+      · exact absurd hw (by simp)
+      · next hbig =>
+        split at hw
+        · next hroom =>
+          split at hw
+          · next rest hrec =>
+            cases hw
+            intro x hx
+            rcases List.mem_cons.mp hx with rfl | hx'
+            · have hds : wire.data.size = wire.size := rfl
+              constructor
+              · rw [ByteArray.size_extract]
+                omega
+              · rw [ByteArray.size_extract]
+                omega
+            · exact wireFormatToLabelsGo_valid hrec x hx'
+          · exact absurd hw (by simp)
+        · exact absurd hw (by simp)
+  · rw [dif_neg hpos] at hw
+    cases hw
+    intro x hx
+    simp at hx
+termination_by wire.size - pos
+decreasing_by omega
+
+/-- Corollary of `wireFormatToLabelsGo_valid` at the `wireFormatToLabels` entry point: a
+    successfully decoded wire name has only valid (nonempty, ≤63-byte) labels. -/
+theorem wireFormatToLabels_valid {wire : ByteArray} {labels : Array ByteArray}
+    (h : wireFormatToLabels wire = .ok labels) :
+    ∀ l ∈ labels.toList, 0 < l.size ∧ l.size ≤ 63 := by
+  unfold wireFormatToLabels at h
+  split at h
+  · next ls hgo =>
+    have harr : ls.toArray = labels := by injection h
+    intro l hl
+    refine wireFormatToLabelsGo_valid hgo l ?_
+    rw [← harr] at hl
+    simpa using hl
+  · exact absurd h (by simp)
 
 theorem wireFormat_roundtrip (labels : Array ByteArray) (hv : ValidLabels labels) :
     wireFormatToLabels (labelsToWireFormat labels) = .ok labels := by
@@ -157,16 +242,8 @@ theorem wireFormat_roundtrip (labels : Array ByteArray) (hv : ValidLabels labels
   change wireFormatToLabelsGo (labelsToWireFormatGo labels.toList) 0 = .ok labels.toList at h
   simp only [h, Array.toArray_toList]
 
--- ============================================================
--- UInt8 helper lemmas
--- ============================================================
-
 private theorem toUInt8_toNat (n : Nat) (h : n < 256) : n.toUInt8.toNat = n := by
   simp [UInt8.toNat, Nat.toUInt8, UInt8.ofNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt h]
-
--- ============================================================
--- decodeNameAux with prefix: the fuel-based decoder roundtrip
--- ============================================================
 
 set_option maxHeartbeats 1600000 in
 private theorem decodeNameAux_prepend (pre : ByteArray) (ls : List ByteArray)
@@ -233,7 +310,7 @@ private theorem decodeNameAux_prepend (pre : ByteArray) (ls : List ByteArray)
         simp [ByteArray.size_data]
       simp only [show (pre.size + 1 + l.size ≤ (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++
         l) ++ labelsToWireFormatGo rest)).data.size) = True from eq_true hbnd, ↓reduceIte]
-      -- Recursive call
+
       have hrec : decodeNameAux
           (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++ labelsToWireFormatGo rest))
           (pre.size + 1 + l.size) fuel none
@@ -248,7 +325,7 @@ private theorem decodeNameAux_prepend (pre : ByteArray) (ls : List ByteArray)
         exact ih (pre ++ ByteArray.empty.push l.size.toUInt8 ++ l) hvrest fuel
           (by simp at hfuel; omega)
       rw [hrec]
-      -- Extract gives l
+
       have hext : (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++
           labelsToWireFormatGo rest)).extract (pre.size + 1) (pre.size + 1 + l.size) = l := by
         rw [← ba_append_assoc pre (ByteArray.empty.push l.size.toUInt8 ++ l)
@@ -262,12 +339,6 @@ private theorem decodeNameAux_prepend (pre : ByteArray) (ls : List ByteArray)
           (labelsToWireFormatGo rest)
       simp only [hext]; simp
 
--- ============================================================
--- decodeNameAux / encodeName roundtrip (uncompressed names)
--- ============================================================
-
-/-- Decoding a name from a buffer produced by encodeName recovers the labels.
-    This is the core roundtrip property for uncompressed domain names. -/
 theorem decode_encode_name (labels : Array ByteArray) (hv : ValidLabels labels) :
     let wire := labelsToWireFormat labels
     decodeNameAux wire 0 wire.size none = .ok (labels, wire.size) := by
@@ -288,10 +359,6 @@ theorem decode_encode_name (labels : Array ByteArray) (hv : ValidLabels labels) 
     = .ok (labels.toList.toArray, _) at h
   simp only [Array.toArray_toList] at h
   exact h
-
--- ============================================================
--- decodeNameAux with prefix AND suffix
--- ============================================================
 
 private theorem ba_append_empty (a : ByteArray) : a ++ ByteArray.empty = a := by
   ext1; simp [ByteArray.data_append]
@@ -366,7 +433,7 @@ theorem decodeNameAux_prepend_append (pre suf : ByteArray) (ls : List ByteArray)
         simp [ByteArray.size_data]
       simp only [show (pre.size + 1 + l.size ≤ (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++
         l) ++ labelsToWireFormatGo rest) ++ suf).data.size) = True from eq_true hbnd, ↓reduceIte]
-      -- Recursive call
+
       have hrec : decodeNameAux
           (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++ labelsToWireFormatGo rest) ++ suf)
           (pre.size + 1 + l.size) fuel none
@@ -381,7 +448,7 @@ theorem decodeNameAux_prepend_append (pre suf : ByteArray) (ls : List ByteArray)
         exact ih (pre ++ ByteArray.empty.push l.size.toUInt8 ++ l) hvrest fuel
           (by simp at hfuel; omega)
       rw [hrec]
-      -- Extract gives l
+
       have hext : (pre ++ ((ByteArray.empty.push l.size.toUInt8 ++ l) ++
           labelsToWireFormatGo rest) ++ suf).extract (pre.size + 1) (pre.size + 1 + l.size) = l := by
         rw [← ba_append_assoc pre (ByteArray.empty.push l.size.toUInt8 ++ l)
@@ -398,23 +465,18 @@ theorem decodeNameAux_prepend_append (pre suf : ByteArray) (ls : List ByteArray)
       simp only [hext]
       congr 1; simp [ByteArray.size_append, ByteArray.size_push]; omega
 
--- ============================================================
--- decodeName frame lemma (for use in Question/RR roundtrips)
--- ============================================================
-
 open VeriDNS.Impl in
-/-- `decodeName` on `pre ++ labelsToWireFormat labels ++ suf` at `pre.size`
-    returns the original labels and advances past the wire format. -/
+
 theorem decodeName_frame_labels
     (labels : Array ByteArray) (hv : ValidLabels labels)
+    (hle : (labelsToWireFormat labels).size ≤ 255)
     (pre suf : ByteArray) :
     DnsParser.run decodeName
       (pre ++ labelsToWireFormat labels ++ suf) pre.size
     = .ok (labels, pre.size + (labelsToWireFormat labels).size) := by
   simp only [decodeName, Primitives.run_bind, Primitives.run_getBuffer,
     Primitives.run_getPos, Primitives.run_setPos, Primitives.run_pure]
-  -- Goal is now: match decodeNameAux buf pos buf.size none with ...
-  -- We need to show decodeNameAux reduces correctly
+
   simp only [labelsToWireFormat]
   have hvl : ∀ l ∈ labels.toList, 0 < l.size ∧ l.size ≤ 63 := by
     intro l hl
@@ -431,20 +493,10 @@ theorem decodeName_frame_labels
         have := labelsToWireFormatGo_size_pos rest; omega
     omega
   rw [decodeNameAux_prepend_append pre suf labels.toList hvl _ hfuel]
+  simp only [Array.toArray_toList]
+  rw [if_pos (by rw [encodedNameLen_eq]; exact hle)]
   simp [Array.toArray_toList]
 
--- ============================================================
--- Adversarial-input safety
--- ============================================================
-
-/-- Adversarial-input safety for the name decoder. Termination on ANY
-    input is structural (recursion on `fuel`, initialized to `buf.size` by
-    `decodeName`; a compression-pointer loop burns one fuel per hop and
-    errors out), so this theorem pins the resource bounds of every
-    SUCCESSFUL decode of arbitrary bytes: at most `fuel` labels, each at
-    most 63 bytes (output linear in input size), and the final parser
-    position inside the buffer (the caller's `setPos` cannot escape it).
-    No well-formedness hypothesis on `buf`. -/
 theorem decodeNameAux_adversarial_bounds (fuel : Nat) (buf : ByteArray)
     (pos : Nat) (firstEndPos : Option Nat)
     (hfep : ∀ e, firstEndPos = some e → e ≤ buf.size)
@@ -461,7 +513,7 @@ theorem decodeNameAux_adversarial_bounds (fuel : Nat) (buf : ByteArray)
     · rename_i hpos
       dsimp only [] at h
       split at h
-      · -- null terminator
+      ·
         injection h with hpair
         obtain ⟨rfl, rfl⟩ := Prod.mk.injEq .. ▸ hpair
         refine ⟨by simp, by simp, ?_⟩
@@ -475,29 +527,31 @@ theorem decodeNameAux_adversarial_bounds (fuel : Nat) (buf : ByteArray)
           have hsz : pos < buf.size := hpos
           omega
       · split at h
-        · -- compression pointer
+        ·
           split at h
           · rename_i hpos2
             split at h
-            · rename_i p hrec
-              injection h with hpair
-              obtain ⟨rfl, rfl⟩ := Prod.mk.injEq .. ▸ hpair
-              have hend : firstEndPos.getD (pos + 2) ≤ buf.size := by
-                cases hf : firstEndPos with
-                | some e =>
-                  have := hfep e hf
-                  simp only [hf, Option.getD_some]
-                  exact this
-                | none =>
-                  simp only [hf, Option.getD_none]
-                  have hsz : pos + 1 < buf.size := hpos2
-                  omega
-              obtain ⟨hsz, hmem, _⟩ := ih _ _
-                (fun e he => by rw [← Option.some.inj he]; exact hend) _ _ hrec
-              exact ⟨Nat.le_succ_of_le hsz, hmem, hend⟩
+            · split at h
+              · rename_i p hrec
+                injection h with hpair
+                obtain ⟨rfl, rfl⟩ := Prod.mk.injEq .. ▸ hpair
+                have hend : firstEndPos.getD (pos + 2) ≤ buf.size := by
+                  cases hf : firstEndPos with
+                  | some e =>
+                    have := hfep e hf
+                    simp only [hf, Option.getD_some]
+                    exact this
+                  | none =>
+                    simp only [hf, Option.getD_none]
+                    have hsz : pos + 1 < buf.size := hpos2
+                    omega
+                obtain ⟨hsz, hmem, _⟩ := ih _ _
+                  (fun e he => by rw [← Option.some.inj he]; exact hend) _ _ hrec
+                exact ⟨Nat.le_succ_of_le hsz, hmem, hend⟩
+              · simp at h
             · simp at h
           · simp at h
-        · -- plain label
+        ·
           split at h
           · simp at h
           · rename_i hlen
@@ -526,13 +580,7 @@ theorem decodeNameAux_adversarial_bounds (fuel : Nat) (buf : ByteArray)
     · simp at h
 
 open VeriDNS.Impl in
-/-- Parser-level corollary: ANY successful `decodeName` over arbitrary
-    bytes yields at most `buf.size` labels of at most 63 bytes each, and
-    leaves the parser position inside the buffer. Together with structural
-    fuel termination, this closes the adversarial-input question for the
-    name decoder: a hostile datagram (compression-pointer loop, deep
-    chain, truncated label) either errors out or produces linearly bounded
-    output. -/
+
 theorem decodeName_adversarial_bounds (buf : ByteArray) (pos : Nat)
     (labels : Array ByteArray) (endPos : Nat)
     (h : DnsParser.run decodeName buf pos = .ok (labels, endPos)) :
@@ -541,16 +589,35 @@ theorem decodeName_adversarial_bounds (buf : ByteArray) (pos : Nat)
     Primitives.run_getPos, Primitives.run_setPos, Primitives.run_pure] at h
   split at h
   · rename_i p hrec
-    injection h with hpair
-    obtain ⟨rfl, rfl⟩ := Prod.mk.injEq .. ▸ hpair
-    exact decodeNameAux_adversarial_bounds _ _ _ _ (by simp) _ _ hrec
+    split at h
+    · injection h with hpair
+      obtain ⟨rfl, rfl⟩ := Prod.mk.injEq .. ▸ hpair
+      exact decodeNameAux_adversarial_bounds _ _ _ _ (by simp) _ _ hrec
+    · simp at h
+  · simp at h
+
+open VeriDNS.Impl in
+/-- **A successfully decoded name is ≤255 octets** (RFC 1035 §2.3.4) — the payoff of the `decodeName` length
+    guard. This is the fact that discharges `decodeName_frame_labels`'s `hle` at the top-level round-trip: every
+    name in a decoded message satisfies the cap, so re-encoding it fits the 16-bit length fields and re-decodes. -/
+theorem run_decodeName_le255 (buf : ByteArray) (pos : Nat)
+    (labels : Array ByteArray) (endPos : Nat)
+    (h : DnsParser.run decodeName buf pos = .ok (labels, endPos)) :
+    (labelsToWireFormat labels).size ≤ 255 := by
+  simp only [decodeName, Primitives.run_bind, Primitives.run_getBuffer,
+    Primitives.run_getPos, Primitives.run_setPos, Primitives.run_pure] at h
+  split at h
+  · rename_i p hrec
+    split at h
+    · rename_i hcond
+      injection h with hpair
+      obtain ⟨rfl, rfl⟩ := Prod.mk.injEq .. ▸ hpair
+      rw [← encodedNameLen_eq]; exact hcond
+    · simp at h
   · simp at h
 
 open VeriDNS.Impl VeriDNS.Spec in
-/-- The generated `namespace_prop_0` (every label within the §2.3.4 size
-    limits) instantiated at the decoder's output: any label array
-    `decodeName` produces — even on adversarial input — satisfies it,
-    since each decoded label is at most 63 octets. -/
+
 theorem decodeName_namespace_conforms (buf : ByteArray) (pos : Nat)
     (labels : Array ByteArray) (endPos : Nat)
     (h : DnsParser.run decodeName buf pos = .ok (labels, endPos)) :
@@ -559,18 +626,8 @@ theorem decodeName_namespace_conforms (buf : ByteArray) (pos : Nat)
   have hb := (decodeName_adversarial_bounds buf pos labels endPos h).2.1 l hl
   omega
 
--- ============================================================
--- RFC 1035 §3.1: case-insensitive comparison conformance
--- (generated specs in Spec/DomainName.lean from "must compare labels in
---  a case-insensitive manner (i.e., A=a), assuming ASCII with zero
---  parity.  Non-alphabetic codes must match exactly.")
--- ============================================================
-
 open VeriDNS.Spec in
-/-- `nameEqCI` satisfies the generated `namespace_compare_caseinsensitive`:
-    names identified by `foldNameCase` compare equal. This is the
-    end-to-end direction that matters operationally — `EXAMPLE.com` must
-    match a cache entry stored as `example.com`. -/
+
 theorem nameEqCI_conforms :
     namespace_compare_caseinsensitive ByteArray nameEqCI foldNameCase := by
   intro a b h
@@ -582,18 +639,14 @@ theorem nameEqCI_conforms :
   simp
 
 open VeriDNS.Spec in
-/-- The byte-level comparison underlying `nameEqCI` satisfies the generated
-    `namespace_compare_example` ("(i.e., A=a)"): byte 65 ('A') matches
-    byte 97 ('a'). -/
+
 theorem foldCaseByte_example_conforms :
     namespace_compare_example (fun a b => foldCaseByte a == foldCaseByte b) := by
   show (foldCaseByte 65 == foldCaseByte 97) = true
   decide
 
 open VeriDNS.Spec in
-/-- The byte-level comparison satisfies the generated
-    `namespace_nonalphabetic_match_exactly`: outside the alphabetic range
-    the fold is the identity, so the comparison is exact equality. -/
+
 theorem foldCaseByte_nonalphabetic_exact :
     namespace_nonalphabetic_match_exactly
       (fun a b => foldCaseByte a == foldCaseByte b) alphabeticByte := by

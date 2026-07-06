@@ -5,11 +5,6 @@ namespace VeriDNS.Proof.Enum
 open VeriDNS.Spec
 open VeriDNS.Impl.Enum
 
--- ============================================================
--- Base ofCode_toCode roundtrips are now auto-generated in Spec.
--- Only BV4 roundtrips remain here (they depend on Impl.Enum).
--- ============================================================
-
 theorem opcode_ofBV4_toBV4 (o : Opcode) : Opcode.ofBV4 (Opcode.toBV4 o) = .ok o := by
   cases o <;> simp [Opcode.ofBV4, Opcode.toBV4, Opcode.ofCode, Opcode.toCode]
 

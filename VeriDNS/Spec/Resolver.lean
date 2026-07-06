@@ -1,15 +1,12 @@
-import VeriDNS.RFC.Macro
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
 import VeriDNS.Spec.Header
 import VeriDNS.Spec.Message
 import VeriDNS.Spec.RRType
 import VeriDNS.Spec.RRClass
 import VeriDNS.Spec.ResourceRecord
-
-
-namespace VeriDNS.Spec
-
--- RFC 1034 §5.3.2: Resolver state definitions (glossary format)
--- NLP generates: structure Resources { sname, stype, sclass, slist, sbelt, cache }
+import VeriDNS.RFC.Check
 include_rfc [1034][1777:1838] {
 5.3.2. Resources
 
@@ -65,11 +62,7 @@ CACHE           A structure which stores the results from previous
                 old RRs when it runs across them in the course of a
                 search, or discards them during periodic sweeps to
                 reclaim the memory consumed by old RRs.
-}
-
--- RFC 1034 §5.3.3: Resolution algorithm
--- NLP generates: inductive AlgorithmStep, inductive ResponseAction, Transition table
-include_rfc [1034][1849:1976] {
+}include_rfc [1034][1849:1976] {
 5.3.3. Algorithm
 
 The top level algorithm has four steps:
@@ -182,12 +175,7 @@ The name servers are entered in the SLIST, and the search is restarted.
 If the response contains a CNAME, the search is restarted at the CNAME
 unless the response has the data for the canonical name or if the CNAME
 is the answer itself.
-}
-
--- RFC 1035 §7.2: query transmission — server selection and retransmission.
--- NLP generates sendingthequeries_prevent_selection (a chosen address is not
--- selectable again until the others have been tried).
-include_rfc [1035][2432:2499] {
+}include_rfc [1035][2432:2499] {
 7.2. Sending the queries
 
 As described in [RFC-1034], the basic task of the resolver is to
@@ -248,44 +236,257 @@ be altered to prevent its selection again until all other addresses have
 been tried.  The timeout for each transmission should be 50-100% greater
 than the average predicted value to allow for variance in response.
 }
+def VeriDNS.Spec.guard_answerOrNameError : VeriDNS.Spec.Format → Prop :=
+  fun resp => resp.answer.size > 0 ∨ resp.header.rcode = VeriDNS.Spec.Rcode.nameError
 
--- SlistEntry is generated from the §5.3.3 algorithm prose above ("Copy the
--- names into SLIST" / "Set up their addresses ..." / "It may be the case
--- that the addresses are not available" / "keep track of previous
--- transmissions") — see `deriveEntryStructure` in VeriDNS.RFC.Syntax.
+def VeriDNS.Spec.guard_delegation : VeriDNS.Spec.Format → Prop :=
+  fun resp => resp.authority.size > 0
 
--- The cache interface is fully generated: `lookup` is assembled onto
--- CacheSpec from the §5.3.2 intro ("converted to a general lookup
--- function") + the search-state glossary entries (the key) + the CACHE
--- entry's "in the course of a search" (the time-indexed host); the
--- RFC 2308 negative-cache operations are NegativeCacheSpec /
--- NegativeAuthoritySpec (Spec/NegativeCache.lean); the RFC 2181 §5.4.1
--- ranked store / answer-path lookup are generated in Spec/Credibility.lean.
+def VeriDNS.Spec.guard_cname : VeriDNS.Spec.Format → Prop :=
+  fun resp => resp.answer.size > 0
 
--- SLIST construction is generated from the same §5.3.3 imperatives the
--- entry structure reads as fields, here read as OPERATIONS: "Copy the
--- names into SLIST" → SlistFromNameSpec.copyNames, "Set up their
--- addresses" → setUpAddresses (the possessive anaphor pairs each address
--- with its name), "the match count in SLIST ... computed from SNAME and
--- the NS RRs" → matchCount + the construction-time Nat, and "If the
--- search for NS RRs fails ..." → searchFails. See the entry-structure
--- rule in VeriDNS.RFC.Syntax.
+def VeriDNS.Spec.guard_serverFailure : VeriDNS.Spec.Format → Prop :=
+  fun resp =>
+  resp.header.rcode = VeriDNS.Spec.Rcode.serverFailure ∨
+    ¬VeriDNS.Spec.guard_answerOrNameError resp ∧
+      ¬VeriDNS.Spec.guard_delegation resp ∧ ¬VeriDNS.Spec.guard_cname resp
 
--- Manual: wire-format plumbing, not RFC semantics. RRs cross the Spec/Impl
--- boundary as canonical wire bytes; these accessors expose decode/encode
--- and field projections of the Impl's RR representation to the abstract
--- resolver. The RFC describes the wire FORMAT (generated in
--- Spec/ResourceRecord.lean), not this API.
-class RRParse (RR : Type) where
+@[blueprint "SlistEntry"]
+structure VeriDNS.Spec.SlistEntry  where
+  name : ByteArray
+  address : Option (BitVec 32)
+  transmissionCount : Nat
+  deriving BEq, Inhabited
+
+@[blueprint "AlgorithmStep"]
+inductive VeriDNS.Spec.AlgorithmStep  where
+  | checkAnswer : VeriDNS.Spec.AlgorithmStep
+  | findServers : VeriDNS.Spec.AlgorithmStep
+  | sendQueries : VeriDNS.Spec.AlgorithmStep
+  | analyzeResponse : VeriDNS.Spec.AlgorithmStep
+  deriving Repr, BEq, Inhabited
+
+@[blueprint "ResponseAction"]
+inductive VeriDNS.Spec.ResponseAction  where
+  | answerOrNameError : VeriDNS.Spec.ResponseAction
+  | delegation : VeriDNS.Spec.ResponseAction
+  | cname : VeriDNS.Spec.ResponseAction
+  | serverFailure : VeriDNS.Spec.ResponseAction
+  deriving Repr, BEq, Inhabited
+
+@[blueprint "Transition"]
+structure VeriDNS.Spec.Transition  where
+  «from» : VeriDNS.Spec.AlgorithmStep
+  action : VeriDNS.Spec.ResponseAction
+  to : VeriDNS.Spec.AlgorithmStep
+  deriving Repr, BEq, Inhabited
+
+def VeriDNS.Spec.algorithm_transition_1 : VeriDNS.Spec.Transition :=
+  VeriDNS.Spec.Transition.mk VeriDNS.Spec.AlgorithmStep.analyzeResponse
+  VeriDNS.Spec.ResponseAction.cname VeriDNS.Spec.AlgorithmStep.checkAnswer
+
+def VeriDNS.Spec.cache_search_ignores_old : (ρ : Type) → (ρ → Bool) → (ρ → Bool) → Prop :=
+  fun ρ old ignored => ∀ (r : ρ), old r = Bool.true → ignored r = Bool.true
+
+def VeriDNS.Spec.cache_sweep_discards_old : (ρ : Type) → (ρ → Bool) → (ρ → Bool) → Prop :=
+  fun ρ old discarded => ∀ (r : ρ), old r = Bool.true → discarded r = Bool.true
+
+def VeriDNS.Spec.guardRefined_serverFailure : (VeriDNS.Spec.Format → Bool) →
+  (Array ByteArray → BitVec 16 → Bool) → (VeriDNS.Spec.Format → Bool) → VeriDNS.Spec.Format → Prop :=
+  fun answersQuery hasRRType handled resp =>
+  resp.header.rcode = VeriDNS.Spec.Rcode.serverFailure ∨ handled resp = Bool.false
+
+def VeriDNS.Spec.obligation_checkAnswer : (σ : Type) → (σ → Prop) → (σ → Prop) → Prop :=
+  fun σ answerInLocalInformation returnAnswerToClient =>
+  ∀ (s : σ), answerInLocalInformation s → returnAnswerToClient s
+
+def VeriDNS.Spec.guardRefined_answerOrNameError : (VeriDNS.Spec.Format → Bool) →
+  (Array ByteArray → BitVec 16 → Bool) → (VeriDNS.Spec.Format → Bool) → VeriDNS.Spec.Format → Prop :=
+  fun answersQuery hasRRType handled resp =>
+  answersQuery resp = Bool.true ∨ resp.header.rcode = VeriDNS.Spec.Rcode.nameError
+
+def VeriDNS.Spec.guardRefined_delegation : (VeriDNS.Spec.Format → Bool) →
+  (Array ByteArray → BitVec 16 → Bool) → (VeriDNS.Spec.Format → Bool) → VeriDNS.Spec.Format → Prop :=
+  fun answersQuery hasRRType handled resp =>
+    hasRRType resp.authority 2 = Bool.true ∧ resp.answer.isEmpty = Bool.true
+    ∧ (resp.header.aa == 0) = Bool.true
+    ∧ (resp.header.rcode == VeriDNS.Spec.Rcode.noError) = Bool.true
+    ∧ hasRRType resp.authority 6 = Bool.false
+
+def VeriDNS.Spec.guardRefined_cname : (VeriDNS.Spec.Format → Bool) →
+  (Array ByteArray → BitVec 16 → Bool) → (VeriDNS.Spec.Format → Bool) → VeriDNS.Spec.Format → Prop :=
+  fun answersQuery hasRRType handled resp =>
+  hasRRType resp.answer 5 = Bool.true ∧ answersQuery resp = Bool.false
+
+def VeriDNS.Spec.obligation_answerOrNameError : (VeriDNS.Spec.Format → Bool) →
+  (Array ByteArray → BitVec 16 → Bool) →
+    (VeriDNS.Spec.Format → Bool) →
+      (VeriDNS.Spec.Format → Option VeriDNS.Spec.AlgorithmStep → Prop) → Prop :=
+  fun answersQuery hasRRType handled transition =>
+  ∀ (resp : VeriDNS.Spec.Format),
+    VeriDNS.Spec.guardRefined_answerOrNameError answersQuery hasRRType handled resp →
+      ¬VeriDNS.Spec.guardRefined_delegation answersQuery hasRRType handled resp →
+        ¬VeriDNS.Spec.guardRefined_cname answersQuery hasRRType handled resp →
+          ¬VeriDNS.Spec.guardRefined_serverFailure answersQuery hasRRType handled resp →
+            transition resp Option.none
+
+def VeriDNS.Spec.cache_storeAt_absolute : (κ ρ : Type) → (ρ → UInt32) → (κ → ρ → UInt32 → κ) → (κ → ρ → UInt32 → Prop) → Prop :=
+  fun κ ρ interval storeAt absolute =>
+  ∀ (c : κ) (r : ρ) (t : UInt32), absolute (storeAt c r t) r (t + interval r)
+
+def VeriDNS.Spec.algorithm_prop_1 : VeriDNS.Spec.Header → VeriDNS.Spec.Header → Prop :=
+  fun a b => a.qr.toNat = 1 ∧ b.qr.toNat = 0 → a.id = b.id
+
+@[blueprint "CacheSpec"]
+class VeriDNS.Spec.CacheSpec (C : Type) (RR : Type) where
+  store : C → RR → C
+  storeAt : C → RR → UInt32 → C
+  sweep : C → UInt32 → C
+  entries : C → Array RR
+  lookup : C → ByteArray → BitVec 16 → BitVec 16 → UInt32 → Array RR
+  /-- Credibility-aware lookup for SLIST construction: live matching records at per-key MAX credibility, no
+      answer floor (RFC 2181 §5.4.1 ranking applied for server selection, glue still usable to reach servers).
+      The model counterpart is `Cache.topServed`; `lookup` (raw, all credibilities) is the under-faithful read. -/
+  lookupTopCred : C → ByteArray → BitVec 16 → BitVec 16 → UInt32 → Array RR
+  sweep_subset : ∀ (c : C) (x0 : UInt32) (y : RR),
+  y ∈ entries (sweep c x0) →
+    y ∈ entries c
+  store_mem : ∀ (c : C) (x0 : RR), x0 ∈ entries (store c x0)
+  storeAt_mem : ∀ (c : C) (x0 : RR) (x1 : UInt32),
+  x0 ∈ entries (storeAt c x0 x1)
+
+def VeriDNS.Spec.algorithm_transition_2 : VeriDNS.Spec.Transition :=
+  VeriDNS.Spec.Transition.mk VeriDNS.Spec.AlgorithmStep.analyzeResponse
+  VeriDNS.Spec.ResponseAction.serverFailure VeriDNS.Spec.AlgorithmStep.sendQueries
+
+@[blueprint "RRParse"]
+class VeriDNS.Spec.RRParse (RR : Type) where
   parseRaw : ByteArray → Option RR
   rrType : RR → BitVec 16
   rrRdata : RR → ByteArray
-  /-- Canonical wire encoding, for returning cached RRs to the client
-      (RFC 1034 §5.3.3 step 1). -/
   rrBytes : RR → ByteArray
-  /-- Owner name (canonical wire bytes), for identifying the delegation
-      zone when validating closeness (§5.3.3 "computed from SNAME and the
-      NS RRs in the delegation"). -/
   rrName : RR → ByteArray
+  /-- Normalize each RRset in a raw section to a single per-key TTL (the minimum), RFC 2181 §5.2, so
+      the one-at-a-time cache store retains every member instead of evicting on differing expiry. -/
+  normalizeSection : Array ByteArray → Array ByteArray
 
-end VeriDNS.Spec
+@[blueprint "StepSpec"]
+inductive VeriDNS.Spec.StepSpec  : VeriDNS.Spec.AlgorithmStep → VeriDNS.Spec.AlgorithmStep → Prop where
+  | seq_checkAnswer_findServers : VeriDNS.Spec.StepSpec VeriDNS.Spec.AlgorithmStep.checkAnswer VeriDNS.Spec.AlgorithmStep.findServers
+  | seq_findServers_sendQueries : VeriDNS.Spec.StepSpec VeriDNS.Spec.AlgorithmStep.findServers VeriDNS.Spec.AlgorithmStep.sendQueries
+  | seq_sendQueries_analyzeResponse : VeriDNS.Spec.StepSpec VeriDNS.Spec.AlgorithmStep.sendQueries
+  VeriDNS.Spec.AlgorithmStep.analyzeResponse
+  | delegation : ∀ (resp : VeriDNS.Spec.Format),
+  VeriDNS.Spec.guard_delegation resp →
+    VeriDNS.Spec.StepSpec VeriDNS.Spec.AlgorithmStep.analyzeResponse
+      VeriDNS.Spec.AlgorithmStep.findServers
+  | cname : ∀ (resp : VeriDNS.Spec.Format),
+  VeriDNS.Spec.guard_cname resp →
+    VeriDNS.Spec.StepSpec VeriDNS.Spec.AlgorithmStep.analyzeResponse
+      VeriDNS.Spec.AlgorithmStep.checkAnswer
+  | serverFailure : ∀ (resp : VeriDNS.Spec.Format),
+  VeriDNS.Spec.guard_serverFailure resp →
+    VeriDNS.Spec.StepSpec VeriDNS.Spec.AlgorithmStep.analyzeResponse
+      VeriDNS.Spec.AlgorithmStep.sendQueries
+
+@[blueprint "StepSpecStar"]
+inductive VeriDNS.Spec.StepSpecStar  : VeriDNS.Spec.AlgorithmStep → VeriDNS.Spec.AlgorithmStep → Prop where
+  | refl : ∀ (s : VeriDNS.Spec.AlgorithmStep), VeriDNS.Spec.StepSpecStar s s
+  | trans : ∀ (s₁ s₂ s₃ : VeriDNS.Spec.AlgorithmStep),
+  VeriDNS.Spec.StepSpec s₁ s₂ → VeriDNS.Spec.StepSpecStar s₂ s₃ → VeriDNS.Spec.StepSpecStar s₁ s₃
+
+def VeriDNS.Spec.algorithm_transition_0 : VeriDNS.Spec.Transition :=
+  VeriDNS.Spec.Transition.mk VeriDNS.Spec.AlgorithmStep.analyzeResponse
+  VeriDNS.Spec.ResponseAction.delegation VeriDNS.Spec.AlgorithmStep.findServers
+
+def VeriDNS.Spec.isTerminal : VeriDNS.Spec.AlgorithmStep → VeriDNS.Spec.Format → Prop :=
+  fun step resp =>
+  step = VeriDNS.Spec.AlgorithmStep.analyzeResponse ∧ VeriDNS.Spec.guard_answerOrNameError resp
+
+def VeriDNS.Spec.responseHandled : VeriDNS.Spec.Format → Prop :=
+  fun resp =>
+  VeriDNS.Spec.guard_answerOrNameError resp ∨
+    VeriDNS.Spec.guard_delegation resp ∨
+      VeriDNS.Spec.guard_cname resp ∨ VeriDNS.Spec.guard_serverFailure resp
+
+def VeriDNS.Spec.obligation_cname : (VeriDNS.Spec.Format → Bool) →
+  (Array ByteArray → BitVec 16 → Bool) →
+    (VeriDNS.Spec.Format → Bool) →
+      (VeriDNS.Spec.Format → Option VeriDNS.Spec.AlgorithmStep → Prop) → Prop :=
+  fun answersQuery hasRRType handled transition =>
+  ∀ (resp : VeriDNS.Spec.Format),
+    VeriDNS.Spec.guardRefined_cname answersQuery hasRRType handled resp →
+      ¬VeriDNS.Spec.guardRefined_answerOrNameError answersQuery hasRRType handled resp →
+        ¬VeriDNS.Spec.guardRefined_delegation answersQuery hasRRType handled resp →
+          ¬VeriDNS.Spec.guardRefined_serverFailure answersQuery hasRRType handled resp →
+            transition resp (Option.some VeriDNS.Spec.AlgorithmStep.checkAnswer)
+
+@[blueprint "SlistSpec"]
+class VeriDNS.Spec.SlistSpec (S : Type) (NS : Type) where
+  describeServers : S → NS → Array NS
+  describeZone : S → ByteArray → ByteArray
+  keepTrack : S → ByteArray → ByteArray
+  zoneName : S → ByteArray → ByteArray
+
+@[blueprint "SlistFromNameSpec"]
+class VeriDNS.Spec.SlistFromNameSpec (S : Type) (NS : Type) extends VeriDNS.Spec.SlistSpec S NS where
+  copyNames : Array ByteArray → Nat → S
+  setUpAddresses : Array ByteArray → Array (ByteArray × BitVec 32) → Nat → S
+  matchCount : S → Nat
+  searchFails : S → Bool
+
+@[blueprint "Resources"]
+structure VeriDNS.Spec.Resources (S : Type) (C : Type) (NS : Type) (RR : Type) [VeriDNS.Spec.SlistSpec S NS] [VeriDNS.Spec.CacheSpec C RR] where
+  sname : ByteArray
+  stype : VeriDNS.Spec.Qtype
+  sclass : VeriDNS.Spec.Qclass
+  slist : S
+  sbelt : S
+  cache : C
+  deriving Inhabited
+
+def VeriDNS.Spec.algorithm_prop_0 : (σ S C NS RR : Type) →
+  [inst : VeriDNS.Spec.SlistSpec S NS] →
+    [inst_1 : VeriDNS.Spec.CacheSpec C RR] →
+      (σ → Prop) → (σ → VeriDNS.Spec.Resources S C NS RR) → Prop :=
+  fun σ S C NS RR [VeriDNS.Spec.SlistSpec S NS] [VeriDNS.Spec.CacheSpec C RR] searchForNSRRsFails
+    resourcesAfter =>
+  ∀ (st : σ), searchForNSRRsFails st → (resourcesAfter st).slist = (resourcesAfter st).sbelt
+
+def VeriDNS.Spec.obligation_delegation : (VeriDNS.Spec.Format → Bool) →
+  (Array ByteArray → BitVec 16 → Bool) →
+    (VeriDNS.Spec.Format → Bool) →
+      (VeriDNS.Spec.Format → Option VeriDNS.Spec.AlgorithmStep → Prop) → Prop :=
+  fun answersQuery hasRRType handled transition =>
+  ∀ (resp : VeriDNS.Spec.Format),
+    VeriDNS.Spec.guardRefined_delegation answersQuery hasRRType handled resp →
+      ¬VeriDNS.Spec.guardRefined_answerOrNameError answersQuery hasRRType handled resp →
+        ¬VeriDNS.Spec.guardRefined_cname answersQuery hasRRType handled resp →
+          ¬VeriDNS.Spec.guardRefined_serverFailure answersQuery hasRRType handled resp →
+            transition resp (Option.some VeriDNS.Spec.AlgorithmStep.findServers)
+
+def VeriDNS.Spec.obligation_replyIgnored : (σ : Type) → (σ → Bool) → (σ → Prop) → Prop :=
+  fun σ delegationCloserToAnswerThanServersInSlist replyIgnored =>
+  ∀ (s : σ), delegationCloserToAnswerThanServersInSlist s = Bool.false → replyIgnored s
+
+def VeriDNS.Spec.algorithm_prop_2 : VeriDNS.Spec.ResourceRecord → Prop :=
+  fun x => x.ttl.toNat > 0
+
+def VeriDNS.Spec.sendingthequeries_prevent_selection : (σ A : Type) → (σ → A → σ → Prop) → (σ → A → Bool) → Prop :=
+  fun σ A addressChosen selection =>
+  ∀ (s : σ) (a : A) (s' : σ), addressChosen s a s' → selection s' a = Bool.false
+
+def VeriDNS.Spec.recommendation_addressesAvailable : (σ : Type) → (σ → Bool) → (σ → Prop) → Prop :=
+  fun σ addressesAvailable lookWhile => ∀ (s : σ), addressesAvailable s = Bool.false → lookWhile s
+
+def VeriDNS.Spec.obligation_serverFailure : (VeriDNS.Spec.Format → Bool) →
+  (Array ByteArray → BitVec 16 → Bool) →
+    (VeriDNS.Spec.Format → Bool) →
+      (VeriDNS.Spec.Format → Option VeriDNS.Spec.AlgorithmStep → Prop) → Prop :=
+  fun answersQuery hasRRType handled transition =>
+  ∀ (resp : VeriDNS.Spec.Format),
+    VeriDNS.Spec.guardRefined_serverFailure answersQuery hasRRType handled resp →
+      ¬VeriDNS.Spec.guardRefined_answerOrNameError answersQuery hasRRType handled resp →
+        ¬VeriDNS.Spec.guardRefined_delegation answersQuery hasRRType handled resp →
+          ¬VeriDNS.Spec.guardRefined_cname answersQuery hasRRType handled resp →
+            transition resp (Option.some VeriDNS.Spec.AlgorithmStep.sendQueries)

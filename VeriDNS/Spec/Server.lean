@@ -1,11 +1,10 @@
-import VeriDNS.RFC.Macro
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
 import VeriDNS.Spec.Header
 import VeriDNS.Spec.Transport
 import VeriDNS.Spec.Message
-
-namespace VeriDNS.Spec
-
--- RFC 1035 §6.2: Standard query processing — response composition rules
+import VeriDNS.RFC.Check
 include_rfc [1035][2148:2170] {
 6.2. Standard query processing
 
@@ -30,10 +29,7 @@ data distributed from a zone.  This floor function should be done when
 the data is copied into a response.  This will allow future dynamic
 update protocols to change the SOA MINIMUM field without ambiguous
 semantics.
-}
-
--- RFC 1035 §7.3: Processing responses — response validation rules
-include_rfc [1035][2526:2574] {
+}include_rfc [1035][2526:2574] {
 7.3. Processing responses
 
 The first step in processing arriving response datagrams is to parse the
@@ -77,50 +73,27 @@ a request identifier of some sort.  This step has several fine points:
      resolver should simply remove the name server from the current
      SLIST, and continue.
 }
-
-/-- A datagram received during a query exchange, together with the
-    addressing metadata the transport observed:
-
-    * `source` — where the datagram came from (recvfrom),
-    * `destination` — where it was delivered (destination address from
-      packet metadata; destination port is the delivery port of the
-      exchange socket),
-    * `localAddr` — the exchange socket's local binding when the query
-      was sent.
-
-    The transport only REPORTS these fields; every RFC 5452 §9.1 matching
-    DECISION over them is Lean code (`datagramMatches`, Impl/Server.lean),
-    proven against the generated `querymatchingrules_match_obligation`
-    (Proof/Server.lean). -/
-structure Exchanged (Addr : Type) where
+@[blueprint "Exchanged"]
+structure VeriDNS.Spec.Exchanged (Addr : Type) where
   payload : ByteArray
   source : Addr
   destination : Addr
   localAddr : Addr
 
-/-- Abstract UDP socket operations. Parametric over monad M, socket type Sock,
-    and address type Addr. Manual by design: this is the Spec/Impl IO
-    boundary, not RFC content — RFC 1035 §4.2 describes transport FRAMING
-    (generated in Spec/Transport.lean), not a socket API. The members
-    instantiate generated specs rather than being derivable as signatures:
-    `now` feeds the §5.3.2 absolute-time convention (storeAt), `randomId`
-    and `exchange` discharge the RFC 5452 §9.1/§9.2 obligations generated
-    in Spec/Resilience.lean. -/
-class UdpSocket (M : Type → Type) (Sock Addr : Type) [Monad M] where
+def VeriDNS.Spec.processingresponses_limit_ttls : (RR : Type) →
+  (ByteArray → Option RR) → (RR → Nat) → (VeriDNS.Spec.Format → Option VeriDNS.Spec.Format) → Prop :=
+  fun RR parse ttlOf process =>
+  ∀ (resp resp' : VeriDNS.Spec.Format),
+    process resp = Option.some resp' →
+      ∀ (bytes : ByteArray),
+        (bytes ∈ resp'.answer ∨ bytes ∈ resp'.authority) ∨ bytes ∈ resp'.additional →
+          ∀ (rr : RR), parse bytes = Option.some rr → ttlOf rr ≤ 604800
+
+@[blueprint "UdpSocket"]
+class VeriDNS.Spec.UdpSocket (M : Type → Type) (Sock : Type) (Addr : Type) [Monad M] where
   recvFrom : Sock → Nat → M (ByteArray × Addr)
   sendTo : Sock → ByteArray → Addr → M Unit
-  /-- Absolute time in seconds, for cache expiry (RFC 1035 §6.1.3). -/
   now : M UInt32
-  /-- Unpredictable query ID for outgoing queries (RFC 5452 resilience). -/
   randomId : M UInt16
-  /-- One query exchange on a fresh UNCONNECTED socket (RFC 5452 §9.2: a
-      fresh socket per exchange gives an unpredictable ephemeral local
-      port). The transport does NOT filter by source: it returns the first
-      datagram with its observed addressing (`Exchanged`), and the §9.1
-      source/destination matching is decided by the Lean gate
-      (`datagramMatches`). Returns `none` on timeout. -/
-  exchange : ByteArray → Addr → M (Option (Exchanged Addr))
-  /-- Diagnostic log hook (default: silent). -/
+  exchange : ByteArray → Addr → M (Option (VeriDNS.Spec.Exchanged Addr))
   log : String → M Unit := fun _ => pure ()
-
-end VeriDNS.Spec

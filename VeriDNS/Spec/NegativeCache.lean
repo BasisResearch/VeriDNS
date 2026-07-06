@@ -1,27 +1,16 @@
-import VeriDNS.RFC.Macro
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
 import VeriDNS.Spec.Message
 import VeriDNS.Spec.RData
-
-namespace VeriDNS.Spec
-
--- RFC 2308: negative caching of DNS queries (NXDOMAIN / NODATA).
--- §2.2 derives `nodata_indicated` (rcode = noError ∧ answer empty) via the
--- "is indicated by" rule; the implementation detects NODATA with it
--- (Impl/Resolver.lean) and the conformance proof connects them
--- (Proof/Cache.lean).
+import VeriDNS.RFC.Check
 include_rfc [2308][274:279] {
 2.2 - No Data
 
    NODATA is indicated by an answer with the RCODE set to NOERROR and no
    relevant answers in the answer section.  The authority section will
    contain an SOA record, or there will be no NS records there.
-}
-
--- §3 derives `negativeanswers_negative_ttl`: the TTL a resolver may cache a
--- negative answer for is min(SOA.MINIMUM, the SOA record's own TTL), via the
--- minimum-of-two-fields rule. Instantiated by `computeNegativeTtl`
--- (Impl/Server.lean, proven in Proof/Cache.lean).
-include_rfc [2308][404:416] {
+}include_rfc [2308][404:416] {
 3 - Negative Answers from Authoritative Servers
 
    Name servers authoritative for a zone MUST include the SOA record of
@@ -35,26 +24,7 @@ include_rfc [2308][404:416] {
 
    If the containing zone is signed [RFC2065] the SOA and appropriate
    NXT and SIG records MUST be added.
-}
-
--- §5 derives `cachingnegativeanswers_nameError_retrieval` via the
--- tuple-key rule: the tuple "<QNAME, QCLASS>" is one lexical token; the
--- keyed PP ("for the same ⟨tuple⟩") is found grammatically; the answer
--- class resolves through the enum machinery ("resulted from a name error"
--- → Rcode.nameError). The omitted QTYPE renders as qtype-invariance of the
--- abstract retrieve function (an NXDOMAIN answers EVERY type at that
--- name). The NODATA sentence names all three fields, so no invariance is
--- generated for it (per-type keying is the existing lookup behavior).
--- Instantiated by `DnsCache.lookupNxdomain` (Proof/Cache.lean).
---
--- The closing paragraph derives `cachingnegativeanswers_limit_negativeresponse_ttl`
--- via the duration-cap rule: the capped entity is the object NP of "cache"
--- in the limit sentence ("… limit for how long it will cache a negative
--- response …"), and the bound is the upper end of the parsed
--- ⟨numeral to numeral time-unit⟩ range in "Values of one to three hours …
--- would make sensible a default" (10800 seconds). Instantiated by
--- `capNegativeTtl` (Impl/Server.lean, proven in Proof/Cache.lean).
-include_rfc [2308][464:521] {
+}include_rfc [2308][464:521] {
 5 - Caching Negative Answers
 
    Like normal answers negative answers have a time to live (TTL).  As
@@ -104,16 +74,7 @@ include_rfc [2308][464:521] {
    tunable.  Values of one to three hours have been found to work well
    and would make sensible a default.  Values exceeding one day have
    been found to be problematic.
-}
-
--- §6 derives `obligation_addCachedSoaRecordToAuthoritySection` via the
--- MUST-add-to rule: the when-clause guard ("encounters a cached negative
--- response"), the imperative's object NP ("the cached SOA record"), the
--- "to" PP target ("the authority section"), and the "with" PP's
--- head-noun + participle transform ("the TTL decremented …") are all read
--- from the parse. Instantiated by the negative-answer path in
--- Impl/Server.lean (proven in Proof/Cache.lean).
-include_rfc [2308][523:529] {
+}include_rfc [2308][523:529] {
 6 - Negative answers from the cache
 
    When a server, in answering a query, encounters a cached negative
@@ -122,5 +83,34 @@ include_rfc [2308][523:529] {
    stored in the cache.  This allows the NXDOMAIN / NODATA response to
    time out correctly.
 }
+def VeriDNS.Spec.obligation_addCachedSoaRecordToAuthoritySection : (σ RR : Type) → (σ → Bool) → (σ → Option RR) → (σ → RR → RR) → (σ → Array RR) → Prop :=
+  fun σ RR encountersCachedNegativeResponse cachedSoaRecord withTtlDecremented authoritySection =>
+  ∀ (s : σ),
+    encountersCachedNegativeResponse s = Bool.true →
+      ∀ (rr : RR), cachedSoaRecord s = Option.some rr → withTtlDecremented s rr ∈ authoritySection s
 
-end VeriDNS.Spec
+@[blueprint "NegativeCacheSpec"]
+class VeriDNS.Spec.NegativeCacheSpec (C : Type) where
+  cacheNegative : C → ByteArray → BitVec 16 → BitVec 16 → VeriDNS.Spec.Rcode → UInt32 → C
+  retrieveNegative : C → ByteArray → BitVec 16 → BitVec 16 → UInt32 → Option VeriDNS.Spec.Rcode
+
+@[blueprint "NegativeAuthoritySpec"]
+class VeriDNS.Spec.NegativeAuthoritySpec (C : Type) (RR : Type) extends VeriDNS.Spec.NegativeCacheSpec C where
+  storeSoaRecord : C → ByteArray → BitVec 16 → BitVec 16 → RR → UInt32 → C
+  authoritySection : C → ByteArray → BitVec 16 → BitVec 16 → UInt32 → Array RR
+
+def VeriDNS.Spec.cachingnegativeanswers_limit_negativeresponse_ttl : (σ : Type) → (σ → Nat) → Prop :=
+  fun σ cachedTtl => ∀ (s : σ), cachedTtl s ≤ 10800
+
+def VeriDNS.Spec.cachingnegativeanswers_nameError_retrieval : (σ ρ : Type) → (σ → ByteArray → BitVec 16 → BitVec 16 → ρ) → Prop :=
+  fun σ ρ retrieve =>
+  ∀ (s : σ) (qname : ByteArray) (qtype qtype' qclass : BitVec 16),
+    retrieve s qname qtype qclass = retrieve s qname qtype' qclass
+
+def VeriDNS.Spec.negativeanswersfromauthoritativeservers_negative_ttl : (VeriDNS.Spec.RData.Soa.SoaRdata → BitVec 32 → BitVec 32) → Prop :=
+  fun negTtl =>
+  ∀ (r : VeriDNS.Spec.RData.Soa.SoaRdata) (t : BitVec 32),
+    negTtl r t = if r.minimum ≤ t then r.minimum else t
+
+def VeriDNS.Spec.nodata_indicated : VeriDNS.Spec.Format → Prop :=
+  fun resp => resp.header.rcode = VeriDNS.Spec.Rcode.noError ∧ resp.answer.size = 0
