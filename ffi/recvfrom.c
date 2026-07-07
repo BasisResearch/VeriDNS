@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <sys/random.h>
 
 /* ----------------------------------------------------------------
  * veri_dns_udp_socket : IO UInt32
@@ -157,10 +159,26 @@ LEAN_EXPORT lean_obj_res veri_dns_now(lean_obj_arg world) {
     return lean_io_result_mk_ok(lean_box_uint32((uint32_t)time(NULL)));
 }
 
-/* Unpredictable 16-bit query ID (RFC 5452 resilience). */
+/* Unpredictable 16-bit query ID (RFC 5452 resilience).
+ *
+ * Uses the kernel CSPRNG via getrandom(2), falling back to /dev/urandom
+ * if the getrandom syscall is unavailable. arc4random() would be simpler
+ * but is not reliably present in the Lean toolchain's link sysroot; both
+ * getrandom and /dev/urandom are cryptographically strong, which is the
+ * property RFC 5452 §4.3 requires of the query ID. */
 LEAN_EXPORT lean_obj_res veri_dns_random_u16(lean_obj_arg world) {
     (void)world;
-    return lean_io_result_mk_ok(lean_box((uint16_t)(arc4random() & 0xFFFF)));
+    uint16_t r = 0;
+    ssize_t got = getrandom(&r, sizeof(r), 0);
+    if (got != (ssize_t)sizeof(r)) {
+        int fd = open("/dev/urandom", O_RDONLY);
+        if (fd >= 0) {
+            ssize_t n = read(fd, &r, sizeof(r));
+            (void)n;
+            close(fd);
+        }
+    }
+    return lean_io_result_mk_ok(lean_box((uint16_t)(r & 0xFFFF)));
 }
 
 /* Encode a (ip4, port) pair as a fresh 6-byte Lean ByteArray
