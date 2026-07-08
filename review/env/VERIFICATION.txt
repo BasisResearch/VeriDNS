@@ -1,0 +1,86 @@
+VeriDNS differential-testing rig -- verification capture
+date: 2026-07-07T17:03:04Z   host: 
+resolvers: veri-dns @10.53.0.2:5300 (under test) | unbound @10.53.0.3:5301 (reference)
+auth: nsd root=198.41.0.4/10.53.0.10 . | tld=10.53.0.11 test. | leaf=10.53.0.12 example.test.
+queries issued from the attacker namespace (10.53.0.99)
+============================================================
+
+### dig example.test A
+--- veri-dns @10.53.0.2:5300 ---
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 37915
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 0
+
+;; QUESTION SECTION:
+;example.test.			IN	A
+
+;; ANSWER SECTION:
+example.test.		3586	IN	A	10.53.0.100
+
+--- unbound @10.53.0.3:5301 ---
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 30711
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+;; QUESTION SECTION:
+;example.test.			IN	A
+
+;; ANSWER SECTION:
+example.test.		3586	IN	A	10.53.0.100
+
+
+### dig host.example.test A
+--- veri-dns @10.53.0.2:5300 ---
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 29711
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 0
+
+;; QUESTION SECTION:
+;host.example.test.		IN	A
+
+;; ANSWER SECTION:
+host.example.test.	3586	IN	A	10.53.0.101
+
+--- unbound @10.53.0.3:5301 ---
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 52304
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+;; QUESTION SECTION:
+;host.example.test.		IN	A
+
+;; ANSWER SECTION:
+host.example.test.	3585	IN	A	10.53.0.101
+
+
+### dig www.example.test A
+--- veri-dns @10.53.0.2:5300 ---
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 49133
+;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 0
+
+;; QUESTION SECTION:
+;www.example.test.		IN	A
+
+;; ANSWER SECTION:
+www.example.test.	3586	IN	CNAME	example.test.
+example.test.		3585	IN	A	10.53.0.100
+
+--- unbound @10.53.0.3:5301 ---
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1782
+;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+;; QUESTION SECTION:
+;www.example.test.		IN	A
+
+;; ANSWER SECTION:
+www.example.test.	3586	IN	CNAME	example.test.
+example.test.		3585	IN	A	10.53.0.100
+

@@ -27,3 +27,6 @@ temp.lean
 \#*\#
 .\#*
 *~
+
+# review deliverables: exclude the copied baseline binary (build artifact)
+review/veri-dns

@@ -1,0 +1,11 @@
+; Fake TLD zone "test." — the second level of the hierarchy.
+$TTL 3600
+$ORIGIN test.
+@   IN SOA a.tld.test. hostmaster.tld.test. (
+        1 3600 900 604800 3600 )
+@   IN NS a.tld.test.
+a.tld.test.         IN A 10.53.0.11
+
+; Delegation of the leaf zone "example.test." to its nameserver.
+example             IN NS ns.example.test.
+ns.example.test.    IN A 10.53.0.12

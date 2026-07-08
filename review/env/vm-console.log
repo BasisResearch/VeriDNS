@@ -1,0 +1,367 @@
+Booting initrd of Arch Linux...
+[  OK  ] Created slice Slice /system/modprobe.
+[  OK  ] Started Dispatch Password Requests to Console Directory Watch.
+[  OK  ] Set up automount Arbitrary Executable File Formats File System Automount Point.
+[  OK  ] Reached target Image Downloads.
+[  OK  ] Reached target Initrd /usr File System.
+[  OK  ] Reached target Local Integrity Protected Volumes.
+[  OK  ] Reached target Path Units.
+[  OK  ] Reached target Remote Integrity Protected Volumes.
+[  OK  ] Reached target Remote Verity Protected Volumes.
+[  OK  ] Reached target Slice Units.
+[  OK  ] Reached target Swaps.
+[  OK  ] Reached target Local Verity Protected Volumes.
+[  OK  ] Listening on Device-mapper event daemon FIFOs.
+[  OK  ] Listening on Query the User Interactively for a Password.
+[  OK  ] Listening on Process Core Dump Socket.
+[  OK  ] Listening on Credential Encryption/Decryption.
+[  OK  ] Listening on Factory Reset Management.
+[  OK  ] Listening on Hostname Service Socket.
+[  OK  ] Listening on Journal Audit Socket.
+[  OK  ] Listening on Journal Socket (/dev/log).
+[  OK  ] Listening on Journal Sockets.
+[  OK  ] Listening on Console Output Muting Service Socket.
+[  OK  ] Listening on Network Management Metrics Varlink Socket.
+[  OK  ] Listening on Network Management Varlink Socket.
+[  OK  ] Listening on Network Management Netlink Socket.
+[  OK  ] Listening on Disk Repartitioning Service Socket.
+[  OK  ] Listening on Resolve Monitor Varlink Socket.
+[  OK  ] Listening on Resolve Service Varlink Socket.
+[  OK  ] Listening on Simple Block Device Backed Storage Provider.
+[  OK  ] Listening on Simple File System Backed Storage Provider.
+[  OK  ] Listening on udev Control Socket.
+[  OK  ] Listening on udev Kernel Socket.
+[  OK  ] Listening on udev Varlink Socket.
+         Mounting Huge Pages File System...
+         Mounting POSIX Message Queue File System...
+         Mounting Kernel Debug File System...
+         Mounting Kernel Trace File System...
+         Mounting Temporary Directory /tmp...
+         Starting Create List of Static Device Nodes...
+         Mounting Kernel Configuration File System...
+         Starting Load Kernel Module dm_mod...
+         Mounting FUSE Control File System...
+         Starting Load Kernel Module loop...
+[  OK  ] Reached target Initrd Root Device.
+         Starting Journal Service...
+         Starting Generate Network Units from Kernel Command Line...
+         Starting Apply Kernel Variables...
+         Starting Load udev Rules from Credentials...
+         Starting Coldplug All udev Devices...
+[  OK  ] Mounted Huge Pages File System.
+[  OK  ] Mounted POSIX Message Queue File System.
+[  OK  ] Mounted Kernel Debug File System.
+[  OK  ] Mounted Kernel Trace File System.
+[  OK  ] Mounted Temporary Directory /tmp.
+[  OK  ] Finished Create List of Static Device Nodes.
+[  OK  ] Mounted Kernel Configuration File System.
+[  OK  ] Finished Load Kernel Module dm_mod.
+[  OK  ] Mounted FUSE Control File System.
+[  OK  ] Finished Load Kernel Module loop.
+[  OK  ] Finished Generate Network Units from Kernel Command Line.
+[  OK  ] Finished Apply Kernel Variables.
+[  OK  ] Finished Load udev Rules from Credentials.
+[  OK  ] Reached target Preparation for Network.
+[  OK  ] Listening on Network Management Resolve Hook Socket.
+[  OK  ] Reached target Local Encrypted Volumes (Pre).
+[  OK  ] Reached target Local Encrypted Volumes.
+[  OK  ] Reached target Remote Encrypted Volumes.
+         Starting Create Static Device Nodes in /dev gracefully...
+[  OK  ] Started Journal Service.
+[  OK  ] Finished Create Static Device Nodes in /dev gracefully.
+         Starting Journal Log Access Socket...
+         Starting Network Name Resolution...
+         Starting Create Static Device Nodes in /dev...
+[  OK  ] Listening on Journal Log Access Socket.
+[  OK  ] Finished Create Static Device Nodes in /dev.
+[  OK  ] Reached target Preparation for Local File Systems.
+         Starting Rule-based Manager for Device Events and Files...
+[  OK  ] Finished Coldplug All udev Devices.
+[  OK  ] Started Rule-based Manager for Device Events and Files.
+         Starting Network Management...
+         Starting Virtual Console Setup...
+[  OK  ] Finished Virtual Console Setup.
+         Mounting Arbitrary Executable File Formats File System...
+         Mounting /sysroot...
+[  OK  ] Reached target Local File Systems.
+[  OK  ] Listening on Boot Loader Control Service Socket.
+[  OK  ] Listening on Disk Image Download Service Socket.
+[  OK  ] Listening on System Extension Image Management.
+         Starting Create System Files and Directories...
+[  OK  ] Mounted Arbitrary Executable File Formats File System.
+[  OK  ] Mounted /sysroot.
+         Mounting /sysroot/root/dev...
+[  OK  ] Reached target Initrd Root File System.
+         Starting Mountpoints Configured in the Real Root...
+[  OK  ] Started Network Name Resolution.
+[  OK  ] Reached target Host and Network Name Lookups.
+[  OK  ] Mounted /sysroot/root/dev.
+[  OK  ] Finished Mountpoints Configured in the Real Root.
+[  OK  ] Reached target Initrd File Systems.
+[  OK  ] Finished Create System Files and Directories.
+[  OK  ] Reached target System Initialization.
+[  OK  ] Started Daily verification of password and group files.
+[  OK  ] Reached target Timer Units.
+[  OK  ] Listening on D-Bus System Message Bus Socket.
+[  OK  ] Listening on User Login Management Varlink Socket.
+[  OK  ] Listening on Virtual Machine and Container Registration Service Socket.
+[  OK  ] Reached target Socket Units.
+[  OK  ] Reached target Basic System.
+[  OK  ] Reached target Initrd Default Target.
+         Starting Cleaning Up and Shutting Down Daemons...
+         Starting D-Bus System Message Bus...
+[  OK  ] Finished Cleaning Up and Shutting Down Daemons.
+[  OK  ] Stopped target Initrd Default Target.
+[  OK  ] Stopped target Basic System.
+[  OK  ] Stopped target Initrd Root Device.
+[  OK  ] Stopped target Initrd /usr File System.
+[  OK  ] Stopped target Host and Network Name Lookups.
+[  OK  ] Stopped target Path Units.
+[  OK  ] Stopped target Remote Encrypted Volumes.
+[  OK  ] Stopped target Remote Integrity Protected Volumes.
+[  OK  ] Stopped target Remote Verity Protected Volumes.
+[  OK  ] Stopped target Slice Units.
+[  OK  ] Stopped target Socket Units.
+[  OK  ] Stopped target Timer Units.
+[  OK  ] Stopped Daily verification of password and group files.
+[  OK  ] Closed Device-mapper event daemon FIFOs.
+[  OK  ] Closed Query the User Interactively for a Password.
+[  OK  ] Closed Boot Loader Control Service Socket.
+[  OK  ] Closed Credential Encryption/Decryption.
+[  OK  ] Closed Factory Reset Management.
+[  OK  ] Closed Hostname Service Socket.
+[  OK  ] Closed Disk Image Download Service Socket.
+[  OK  ] Closed Journal Log Access Socket.
+[  OK  ] Closed User Login Management Varlink Socket.
+[  OK  ] Closed Virtual Machine and Container Registration Service Socket.
+[  OK  ] Closed Console Output Muting Service Socket.
+[  OK  ] Closed Disk Repartitioning Service Socket.
+[  OK  ] Closed Simple Block Device Backed Storage Provider.
+[  OK  ] Closed Simple File System Backed Storage Provider.
+[  OK  ] Closed System Extension Image Management.
+         Stopping D-Bus System Message Bus...
+         Stopping Network Management...
+[  OK  ] Stopped D-Bus System Message Bus.
+[  OK  ] Closed D-Bus System Message Bus Socket.
+[  OK  ] Stopped target System Initialization.
+[  OK  ] Stopped target Local Encrypted Volumes.
+[  OK  ] Stopped Dispatch Password Requests to Console Directory Watch.
+[  OK  ] Stopped target Local Encrypted Volumes (Pre).
+[  OK  ] Stopped target Image Downloads.
+[  OK  ] Stopped target Local Integrity Protected Volumes.
+[  OK  ] Stopped target Swaps.
+[  OK  ] Stopped target Local Verity Protected Volumes.
+         Stopping Network Name Resolution...
+[  OK  ] Stopped Create System Files and Directories.
+[  OK  ] Stopped target Local File Systems.
+[  OK  ] Stopped target Preparation for Local File Systems.
+[  OK  ] Stopped Coldplug All udev Devices.
+[  OK  ] Stopped Virtual Console Setup.
+[  OK  ] Stopped Network Name Resolution.
+[  OK  ] Closed Resolve Monitor Varlink Socket.
+[  OK  ] Closed Resolve Service Varlink Socket.
+[  OK  ] Stopped Network Management.
+[  OK  ] Closed Network Management Resolve Hook Socket.
+[  OK  ] Stopped target Preparation for Network.
+[  OK  ] Closed Network Management Metrics Varlink Socket.
+[  OK  ] Closed Network Management Varlink Socket.
+[  OK  ] Closed Network Management Netlink Socket.
+[  OK  ] Stopped Apply Kernel Variables.
+[  OK  ] Closed Process Core Dump Socket.
+         Stopping Rule-based Manager for Device Events and Files...
+[  OK  ] Stopped Rule-based Manager for Device Events and Files.
+[  OK  ] Closed udev Control Socket.
+[  OK  ] Closed udev Varlink Socket.
+         Starting Cleanup udev Database...
+[  OK  ] Stopped Generate Network Units from Kernel Command Line.
+[  OK  ] Stopped Create Static Device Nodes in /dev.
+[  OK  ] Stopped Create Static Device Nodes in /dev gracefully.
+[  OK  ] Stopped Create List of Static Device Nodes.
+[  OK  ] Stopped Load udev Rules from Credentials.
+[  OK  ] Finished Cleanup udev Database.
+[  OK  ] Reached target Switch Root.
+         Starting Switch Root...
+
+Welcome to Arch Linux!
+
+[  OK  ] Stopped Switch Root.
+[  OK  ] Created slice Slice /system/dirmngr.
+[  OK  ] Created slice Slice /system/getty.
+[  OK  ] Created slice Slice /system/gpg-agent.
+[  OK  ] Created slice Slice /system/gpg-agent-browser.
+[  OK  ] Created slice Slice /system/gpg-agent-extra.
+[  OK  ] Created slice Slice /system/gpg-agent-ssh.
+[  OK  ] Created slice Slice /system/keyboxd.
+[  OK  ] Created slice Slice /system/serial-getty.
+[  OK  ] Created slice User and Session Slice.
+[  OK  ] Started Dispatch Password Requests to Console Directory Watch.
+[  OK  ] Started Forward Password Requests to Wall Directory Watch.
+[  OK  ] Set up automount Arbitrary Executable File Formats File System Automount Point.
+         Expecting device /dev/hvc0...
+[  OK  ] Reached target Image Downloads.
+[  OK  ] Stopped target Switch Root.
+[  OK  ] Stopped target Initrd File Systems.
+[  OK  ] Stopped target Initrd Root File System.
+[  OK  ] Reached target Local Integrity Protected Volumes.
+[  OK  ] Reached target Path Units.
+[  OK  ] Reached target Remote Encrypted Volumes.
+[  OK  ] Reached target Remote File Systems.
+[  OK  ] Reached target Remote Integrity Protected Volumes.
+[  OK  ] Reached target Remote Verity Protected Volumes.
+[  OK  ] Reached target Slice Units.
+[  OK  ] Reached target Swaps.
+[  OK  ] Reached target Local Verity Protected Volumes.
+[  OK  ] Listening on Device-mapper event daemon FIFOs.
+[  OK  ] Listening on Query the User Interactively for a Password.
+[  OK  ] Listening on Process Core Dump Socket.
+[  OK  ] Listening on Credential Encryption/Decryption.
+[  OK  ] Listening on Factory Reset Management.
+[  OK  ] Listening on Hostname Service Socket.
+[  OK  ] Listening on DDI File System Mounter Socket.
+[  OK  ] Listening on Console Output Muting Service Socket.
+[  OK  ] Listening on Network Management Metrics Varlink Socket.
+[  OK  ] Listening on Network Management Varlink Socket.
+[  OK  ] Listening on Network Management Netlink Socket.
+[  OK  ] Listening on Namespace Resource Manager Socket.
+[  OK  ] Listening on Disk Repartitioning Service Socket.
+[  OK  ] Listening on Report System Basic Metrics Socket.
+[  OK  ] Listening on CGroup Report Varlink Socket.
+[  OK  ] Listening on Resolve Monitor Varlink Socket.
+[  OK  ] Listening on Resolve Service Varlink Socket.
+[  OK  ] Listening on Simple Block Device Backed Storage Provider.
+[  OK  ] Listening on Simple File System Backed Storage Provider.
+[  OK  ] Listening on udev Control Socket.
+[  OK  ] Listening on udev Varlink Socket.
+[  OK  ] Listening on User Database Manager Socket.
+         Mounting Temporary Directory /tmp...
+         Starting Create List of Static Device Nodes...
+         Starting Journal Service...
+         Starting Generate Network Units from Kernel Command Line...
+         Starting Remount Root and Kernel File Systems...
+         Starting Apply Kernel Variables...
+[  OK  ] Reached target Local Encrypted Volumes.
+         Starting Load udev Rules from Credentials...
+         Starting Coldplug All udev Devices...
+[  OK  ] Started Journal Service.
+[  OK  ] Mounted Temporary Directory /tmp.
+[  OK  ] Finished Create List of Static Device Nodes.
+[  OK  ] Finished Generate Network Units from Kernel Command Line.
+[  OK  ] Finished Remount Root and Kernel File Systems.
+[  OK  ] Reached target Preparation for Network.
+[  OK  ] Listening on Network Management Resolve Hook Socket.
+         Starting Flush Journal to Persistent Storage...
+         Starting Load/Save OS Random Seed...
+         Starting Create Static Device Nodes in /dev gracefully...
+[  OK  ] Finished Apply Kernel Variables.
+[  OK  ] Finished Load udev Rules from Credentials.
+[  OK  ] Finished Load/Save OS Random Seed.
+[  OK  ] Finished Coldplug All udev Devices.
+         Starting Load Kernel Module tun...
+         Starting User Database Manager...
+[  OK  ] Finished Flush Journal to Persistent Storage.
+         Mounting Arbitrary Executable File Formats File System...
+[  OK  ] Finished Load Kernel Module tun.
+         Starting Namespace Resource Manager...
+[  OK  ] Mounted Arbitrary Executable File Formats File System.
+[  OK  ] Started User Database Manager.
+[  OK  ] Started Namespace Resource Manager.
+[  OK  ] Finished Create Static Device Nodes in /dev gracefully.
+         Starting Create System Users...
+[  OK  ] Finished Create System Users.
+         Starting Journal Log Access Socket...
+         Starting Network Name Resolution...
+         Starting Network Time Synchronization...
+         Starting Create Static Device Nodes in /dev...
+[  OK  ] Listening on Journal Log Access Socket.
+[  OK  ] Started Network Time Synchronization.
+[  OK  ] Reached target System Time Set.
+[  OK  ] Finished Create Static Device Nodes in /dev.
+[  OK  ] Reached target Preparation for Local File Systems.
+         Starting Rule-based Manager for Device Events and Files...
+[  OK  ] Started Network Name Resolution.
+[  OK  ] Reached target Host and Network Name Lookups.
+[  OK  ] Started Rule-based Manager for Device Events and Files.
+         Starting Network Management...
+[  OK  ] Listening on Load/Save RF Kill Switch Status /dev/rfkill Watch.
+         Starting Virtual Console Setup...
+[  OK  ] Started Network Management.
+[  OK  ] Reached target Network.
+         Starting Enable Persistent Storage in systemd-networkd...
+[  OK  ] Finished Virtual Console Setup.
+[  OK  ] Finished Enable Persistent Storage in systemd-networkd.
+[  OK  ] Reached target Local File Systems.
+[  OK  ] Reached target Virtual Machines and Containers.
+[  OK  ] Listening on Boot Loader Control Service Socket.
+[  OK  ] Listening on Disk Image Download Service Socket.
+[  OK  ] Listening on System Extension Image Management.
+         Starting Automatic Boot Loader Update...
+         Starting Create System Files and Directories...
+         Starting Load JSON user/group Records from Credentials...
+[  OK  ] Finished Automatic Boot Loader Update.
+[  OK  ] Finished Load JSON user/group Records from Credentials.
+[  OK  ] Finished Create System Files and Directories.
+         Starting Rebuild Dynamic Linker Cache...
+         Starting Initial Setup...
+         Starting Rebuild Journal Catalog...
+]3008;start=c0e0cb3cc04a4e61b60af3bca8824fc8;user=root;hostname=testvm;machineid=5ad6e8b9289948d8ae02197f9b346908;bootid=5873828a41c9450cbccf569241d95a4c;pid=336;pidfdid=12367;comm=(systemd-firstboot);servicename=systemd-firstboot.service;invocationid=d83fc64642f245379fe314744bf5f5e3;type=service\         Starting Record System Boot/Shutdown in UTMP...
+[  OK  ] Finished Initial Setup.
+[  OK  ] Reached target First Boot Complete.
+         Starting Save Transient machine-id to Disk...
+[  OK  ] Finished Record System Boot/Shutdown in UTMP.
+[  OK  ] Finished Save Transient machine-id to Disk.
+[  OK  ] Finished Rebuild Dynamic Linker Cache.
+[  OK  ] Finished Rebuild Journal Catalog.
+         Starting Update is Completed...
+[  OK  ] Finished Update is Completed.
+[  OK  ] Reached target System Initialization.
+[  OK  ] Started Refresh existing PGP keys of archlinux-keyring regularly.
+[  OK  ] Started Daily verification of password and group files.
+[  OK  ] Started Daily Cleanup of Temporary Directories.
+[  OK  ] Reached target Timer Units.
+[  OK  ] Listening on D-Bus System Message Bus Socket.
+[  OK  ] Listening on Mkosi SSH Server VSock Socket.
+[  OK  ] Listening on OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
+[  OK  ] Listening on User Login Management Varlink Socket.
+[  OK  ] Listening on Virtual Machine and Container Registration Service Socket.
+[  OK  ] Reached target Socket Units.
+         Starting D-Bus System Message Bus...
+[  OK  ] Started D-Bus System Message Bus.
+[  OK  ] Reached target Basic System.
+         Starting Home Area Manager...
+         Starting User Login Management...
+[  OK  ] Started Home Area Manager.
+[  OK  ] Finished Home Area Activation.
+         Starting Permit User Sessions...
+[  OK  ] Started User Login Management.
+[  OK  ] Finished Permit User Sessions.
+[  OK  ] Started Getty on tty1.
+[  OK  ] Started Serial Getty on hvc0.
+[  OK  ] Reached target Login Prompts.
+[  OK  ] Reached target Multi-User System.
+[  OK  ] Reached target Graphical Interface.
+]3008;start=8ea71e5c0f6645e1a0637ec6861c772d;user=root;hostname=testvm;machineid=5ad6e8b9289948d8ae02197f9b346908;bootid=5873828a41c9450cbccf569241d95a4c;pid=362;pidfdid=142;comm=(agetty);servicename=serial-getty@hvc0.service;invocationid=39acdb8d4d6f45619d93ee5df7313beb;type=service\
+Arch Linux 7.1.2-arch3-1 (hvc0)
+
+testvm login: root (automatic login)
+
+[root@testvm ~]# [71696.417538] Out of memory: Killed process 368 (systemd) total-vm:17636kB, anon-rss:1800kB, file-rss:16kB, shmem-rss:0kB, UID:0 pgtables:84kB oom_score_adj:100
+[71696.689048] Out of memory: Killed process 370 ((sd-pam)) total-vm:18564kB, anon-rss:1532kB, file-rss:8kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:100
+[71696.702380] Out of memory: Killed process 380 (p11-kit-server) total-vm:4400kB, anon-rss:236kB, file-rss:8kB, shmem-rss:0kB, UID:0 pgtables:48kB oom_score_adj:100
+[71696.716396] Out of memory: Killed process 7312 (nsd: xfrd) total-vm:52720kB, anon-rss:34568kB, file-rss:16kB, shmem-rss:24kB, UID:0 pgtables:148kB oom_score_adj:0
+[71697.130765] Out of memory: Killed process 11837 (nsd: xfrd) total-vm:52720kB, anon-rss:34564kB, file-rss:16kB, shmem-rss:24kB, UID:0 pgtables:148kB oom_score_adj:0
+[71698.729933] Out of memory: Killed process 9406 (nsd: xfrd) total-vm:52720kB, anon-rss:34328kB, file-rss:16kB, shmem-rss:24kB, UID:0 pgtables:148kB oom_score_adj:0
+[71698.841895] Out of memory: Killed process 9411 (nsd: main) total-vm:47752kB, anon-rss:1564kB, file-rss:116kB, shmem-rss:31264kB, UID:0 pgtables:132kB oom_score_adj:0
+[71699.148281] Out of memory: Killed process 9412 (nsd: server 1) total-vm:63736kB, anon-rss:14456kB, file-rss:16kB, shmem-rss:12kB, UID:0 pgtables:100kB oom_score_adj:0
+[71699.512294] Out of memory: Killed process 13519 (veri-dns) total-vm:3359244kB, anon-rss:13356kB, file-rss:52kB, shmem-rss:0kB, UID:0 pgtables:248kB oom_score_adj:0
+[71699.640427] Out of memory: Killed process 11936 (unbound) total-vm:26704kB, anon-rss:10400kB, file-rss:16kB, shmem-rss:0kB, UID:0 pgtables:96kB oom_score_adj:0
+[71699.883372] Out of memory: Killed process 13581 (python3) total-vm:17180kB, anon-rss:5820kB, file-rss:1476kB, shmem-rss:0kB, UID:0 pgtables:68kB oom_score_adj:0
+[71699.954279] Out of memory: Killed process 13575 (python3) total-vm:17180kB, anon-rss:5824kB, file-rss:1824kB, shmem-rss:0kB, UID:0 pgtables:68kB oom_score_adj:0
+[71699.984378] Out of memory: Killed process 13596 (python3) total-vm:17544kB, anon-rss:5928kB, file-rss:908kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:0
+[71700.024001] Out of memory: Killed process 13565 (python3) total-vm:17180kB, anon-rss:5792kB, file-rss:1808kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:0
+[71700.087137] Out of memory: Killed process 13580 (python3) total-vm:17288kB, anon-rss:5872kB, file-rss:1864kB, shmem-rss:0kB, UID:0 pgtables:76kB oom_score_adj:0
+[71700.251821] Out of memory: Killed process 13588 (python3) total-vm:16700kB, anon-rss:5308kB, file-rss:1516kB, shmem-rss:0kB, UID:0 pgtables:68kB oom_score_adj:0
+[71700.277579] Out of memory: Killed process 13607 (python3) total-vm:16568kB, anon-rss:5136kB, file-rss:1592kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:0
+[71700.346662] Out of memory: Killed process 13594 (python3) total-vm:16392kB, anon-rss:4868kB, file-rss:1668kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:0
+[71700.428916] Out of memory: Killed process 13598 (python3) total-vm:16908kB, anon-rss:5324kB, file-rss:1556kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:0
+[71700.516872] Out of memory: Killed process 13601 (python3) total-vm:16392kB, anon-rss:4840kB, file-rss:1932kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:0
+[71700.543830] Out of memory: Killed process 13577 (python3) total-vm:16700kB, anon-rss:5248kB, file-rss:1492kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:0
