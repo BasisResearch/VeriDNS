@@ -103,6 +103,20 @@ const kbSummary = () => `KNOWLEDGE BASE (accumulated; build on it, do not repeat
 ${kb.map(s => '- ' + s).join('\n')}
 MUTANTS ALREADY TRIED: ${mutantLog.length ? mutantLog.map(m => `${m.id}=${m.classification}(${m.reason})`).join(' | ') : 'none yet'}`
 
+// Resilient agent call: agent() returns null on a terminal API error (e.g. 529
+// Overloaded after its own retries). A null finder must NOT be mistaken for "no
+// findings" (that produced the earlier FALSE dry-stop), so retry the call a few
+// more times before giving up. On resume, the first attempt returns the cached
+// result, so this adds no cost to replayed rounds.
+async function agentR(prompt, opts, tries = 4) {
+  for (let i = 0; i < tries; i++) {
+    const r = await agent(prompt, opts)
+    if (r) return r
+    log(`  ${opts.label || 'agent'}: null (attempt ${i + 1}/${tries}) — likely transient API error, retrying`)
+  }
+  return null
+}
+
 // --- rounds ----------------------------------------------------------------
 for (let round = 1; round <= MAX_ROUNDS; round++) {
   phase('Find')
@@ -113,14 +127,14 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     : 'No prior candidates.'
 
   const finders = [
-    () => agent(
+    () => agentR(
 `DEDICATED reading-source agent auditing VeriDNS at ${REPO} (round ${round}). Read the RFC docs (${REPO}/rfc/), the mature reference unbound (${REPO}/unbound/, C source), and the VeriDNS Lean sources (${REPO}/VeriDNS/Impl, Spec) AGAINST each other; surface DISCREPANCIES where unbound does a defense/check/normalization/edge-case that VeriDNS omits or does differently and it would be observable and wrong. Read ${REPO}/review/pathmap.md first; focus ON-PATH code. Cite unbound file:line and/or RFC section AND the VeriDNS location, with a concrete runtime experiment.
 ${KB}
 ${dedupeHint}
 Do NOT edit code. Return candidates (kind 'discrepancy'/'scope-gap'); a few well-substantiated leads beat many shallow ones. Prefer leads that extend or sharpen the KB (e.g. the bailiwick-leniency lead).`,
       { label: `R:read r${round}`, phase: 'Find', model: 'fable', schema: CANDIDATES }),
 
-    () => agent(
+    () => agentR(
 `Spec-auditor for VeriDNS (round ${round}) at ${REPO}. Find WEAK/VACUOUS/OVER-PREMISED theorems — specs loose enough that an observably-wrong impl still satisfies them — and write SPOTs. Read ${REPO}/review/pathmap.md and ${REPO}/review/evidence/oracle-analysis.md first. Deepen these open threads: (a) whether the generated props pin the case fold at all beyond the A=a point (finding 001); (b) ioResumeLoop_sound (Proof/IoResumeSound.lean:2810) ~25 hypotheses — vacuity/coverage of real client queries; (c) whether the heavy IoResumeSound.ioResumeLoop_sound is ever APPLIED (hypotheses discharged) or is terminal; (d) Refinement.resolveWithIO_simulates network arm as an assumption.
 Techniques: SPOTs under ${REPO}/review/evidence/spots/ — a SENSIBLE property that SHOULD prove, and a NONSENSE property that should NOT (if it proves, vacuity). You MAY run 'lake env lean <file>' on SPOTs; do NOT run 'lake build' (another stage owns the build tree) and do NOT edit tracked Impl/Proof files.
 ${KB}
@@ -128,7 +142,7 @@ ${dedupeHint}
 Return candidates (kind 'weak-theorem'); each MUST propose a concrete weaponizable mutant in howToVerify AND note how to distinguish a real semantic catch from proof-script brittleness.`,
       { label: `S:spec r${round}`, phase: 'Find', model: 'fable', schema: CANDIDATES }),
 
-    () => agent(
+    () => agentR(
 `Dynamic differential+pentest agent for VeriDNS (round ${round}) at ${REPO}. Produce OBSERVED behavior, not speculation.
 ${RIG}
 Do NOT rebuild veri-dns (another stage owns the build tree); query the running rig.
@@ -214,8 +228,13 @@ Do NOT rebuild veri-dns. Reproduce against the rig, capture exact commands+outpu
   }
 
   const newConfirmed = confirmed.length
+  const findersRan = found.length > 0   // false => ALL finders errored (API/network); NOT a genuine dry
   const producedSomething = fresh.length > 0 || mutants.length > 0
-  if (!producedSomething) { dryRounds++; log(`Round ${round}: dry (${dryRounds}/${DRY_ROUNDS_TO_STOP})`) } else dryRounds = 0
+  if (!findersRan) {
+    log(`Round ${round}: ALL finders errored (transient API/network) — INCONCLUSIVE, not counting toward dry`)
+  } else if (!producedSomething) {
+    dryRounds++; log(`Round ${round}: GENUINE dry (${dryRounds}/${DRY_ROUNDS_TO_STOP}) — finders ran and found nothing new`)
+  } else dryRounds = 0
   log(`Round ${round} done. confirmed total: ${newConfirmed}. finder notes: ${finderNotes.join(' || ').slice(0, 300)}`)
   if (dryRounds >= DRY_ROUNDS_TO_STOP) { log('Loop dry — stopping.'); break }
 }
