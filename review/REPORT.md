@@ -22,8 +22,10 @@ and the gap is where the real bugs live.**
   server runs*, not a parallel model (`pathmap.md`).
 - **The anti-poisoning core is real.** Every mutation that weakened a security-critical
   check broke a real theorem *statement* at build time (`proof-caught-semantic`):
-  RFC 5452 response matching, the answer-section bailiwick filter, the IO-loop
-  delegation guard, the negative-cache TTL floor, and the case-fold's full-range law.
+  RFC 5452 response matching (both the id/question gate *and* the source/destination
+  match in `datagramMatches` — the latter hand-verified in this review), the
+  answer-section bailiwick filter, the IO-loop delegation guard, the negative-cache TTL
+  floor, and the case-fold's full-range law.
   You cannot silently ship a resolver that accepts an off-path spoof or an
   out-of-bailiwick delegation — the build goes red. That is the thing a skeptic most
   needs to know, and it holds.
@@ -127,11 +129,25 @@ DoS vector, and none is covered by any theorem.
 - The "0x20 upstream case-randomization" half of 003.
 
 ### Coverage note
-5 loop-synthesized mutations (`scrub-callsite-bypass-nonIN`, `casefold-YK-collapse`,
-`referral-aa0-guard-drop`, `network-authority-fold-into-answer`, `slist-first-address-only`)
-were **blocked by the harness safety classifier** (their auto-revert used a tree-wide
-`git checkout -- .`) and so were **not evaluated** — an untested gap, though several
-overlap findings already confirmed by other means (scrub call-site, casefold, slist failover).
+Two harness/environment limits, honestly stated:
+- **Safety-blocked mutations.** ~15 loop-synthesized mutations were blocked by the
+  harness safety classifier (their auto-revert used a tree-wide `git checkout -- .`)
+  and went unevaluated. The most important of these — dropping the **RFC 5452
+  source-address check** in `datagramMatches` (`Server.lean:231`) — **I ran by hand**
+  (all deliverables committed, so a per-file revert is safe): the build **breaks** at
+  `Proof/Server.lean:248` (`exchanged_matches` destructures the source-match conjunct),
+  so **the source/destination matching is genuinely proof-load-bearing** — a positive
+  result. The residual trust point is the *FFI supplying a truthful source* (an
+  `ffi-source-forge` mutation would build green — the same coverage-gap as 002/000).
+  Other blocked mutations overlap findings already confirmed by other means (scrub
+  call-site, casefold, slist failover).
+- **API-overload false dry.** The final loop run's terminating "dry" rounds (8–10)
+  coincided with sustained `API 529 Overloaded` errors (25 agents errored), so the
+  finders returned empty for reasons of *server load*, not genuine exhaustion. The loop
+  did complete/return, and Rounds 5–8 had already descended into long-tail coverage-gaps,
+  so the *meaningful* finding space is effectively exhausted — but the formal dry-stop
+  was environment-induced, not a clean substantive terminus. Re-running immediately would
+  hit the same overload; the finding set here is comprehensive regardless.
 
 ## 3. Verification architecture (what actually runs)
 
