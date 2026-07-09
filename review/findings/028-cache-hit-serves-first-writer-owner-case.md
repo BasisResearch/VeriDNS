@@ -65,3 +65,21 @@ The spec deliberately models names up-to-fold (finding 001), so "answer owner ca
 ## Verdict
 
 CONFIRMED, both directions, with TTL-decrement proof of cache hits, against a reference unbound that rewrites to the query case. Cosmetic / coverage-gap.
+
+## Addendum (independent re-verification, 2026-07-08, second pass)
+
+Reproduced from scratch on the live rig; two extensions beyond the original write-up:
+
+1. **CNAME-chain owners also serve first-writer case.** Prime `WwW.eXaMpLe.TeSt` (cold miss, mixed-case echoed and cached), then query lowercase `www.example.test` — veri-dns cache hit (TTL 3582) serves:
+
+   ```
+   $ dig @10.53.0.2 -p 5300 www.example.test A +noall +answer
+   WwW.eXaMpLe.TeSt.	3582	IN	CNAME	eXaMpLe.TeSt.
+   example.test.		3556	IN	A	10.53.0.100
+   ```
+
+   unbound, same sequence: both records rewritten to the client's lowercase (`www.example.test. CNAME example.test.` / `example.test. A`, TTLs 3581/3555 proving hits).
+
+2. **A single response can mix owner cases from different cache-write histories.** In the reply above, the CNAME RR carries mixed case (first writer of the `www` RRset) while the chained A RR carries lowercase (first writer of the `example.test` A RRset) — neither matching the client's query case. Similarly `AlIaS.eXaMpLe.TeSt` (after lowercase alias warm and mixed-case host warm) returned `alias.example.test. CNAME host.example.test.` + `HoSt.ExAmPlE.TeSt. A 10.53.0.101` (TTL 3581, hit). unbound's reply to the identical query: `AlIaS.eXaMpLe.TeSt. CNAME host.eXaMpLe.TeSt.` + `host.eXaMpLe.TeSt. A` — it propagates the client's case through the chain by suffix.
+
+3. Reverse direction re-proven with `host`: mixed-case cold prime `HoSt.ExAmPlE.TeSt` (TTL 3600), then both `host.example.test` and `HOST.EXAMPLE.TEST` hits (TTL 3582/3581) each returned `HoSt.ExAmPlE.TeSt.` — the served case is a pure function of cache history, invariant under the client's case in either direction.
