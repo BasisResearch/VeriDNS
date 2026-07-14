@@ -1,10 +1,7 @@
-import VeriDNS.RFC.Macro
-
-namespace VeriDNS.Spec
-
--- Verify and parse RFC 1035 section 4.1.4.
--- Custom syntax generates: structure MessageCompression (offset : BitVec 14)
--- Literal "1  1" marker bits are filtered; example diagrams are skipped.
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
+import VeriDNS.RFC.Check
 include_rfc [1035][1634:1738] {
 4.1.4. Message compression
 
@@ -96,5 +93,10 @@ ARPA being the last label in the string at 20.  The root domain name is
 defined by a single octet of zeros at 92; the root domain name has no
 labels.
 }
+def VeriDNS.Spec.messagecompression_example_0 : ByteArray :=
+  ByteArray.mk #[1, 70, 3, 73, 83, 73, 4, 65, 82, 80, 65, 0, 3, 70, 79, 79, 20, 26, 0]
 
-end VeriDNS.Spec
+@[blueprint "MessageCompression"]
+structure VeriDNS.Spec.MessageCompression  where
+  offset : BitVec 14
+  deriving Repr, BEq, Inhabited

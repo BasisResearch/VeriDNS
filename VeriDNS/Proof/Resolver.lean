@@ -10,10 +10,6 @@ variable {S C NS RR : Type}
     [CacheSpec C RR] [TrustworthinessSpec C RR] [NegativeAuthoritySpec C RR] [RRParse RR]
     [Inhabited S] [Inhabited C]
 
--- ============================================================
--- Step dispatch proofs
--- ============================================================
-
 theorem step_checkAnswer_dispatch (s : State S C NS RR) (h : s.currentStep = .checkAnswer)
     : step s = stepCheckLocal s := by
   unfold step; simp [h]
@@ -30,32 +26,17 @@ theorem step_analyzeResponse_dispatch (s : State S C NS RR) (h : s.currentStep =
     : step s = stepAnalyzeResponse s := by
   unfold step; simp [h]
 
--- ============================================================
--- SBELT fallback proof (algorithm_prop_0)
--- ============================================================
-
-/-- The §5.3.3 "search for NS RRs fails" event, as the implementation
-    observes it: the cache walk from SNAME toward the root finds no NS RRs,
-    and the current SLIST carries no closer knowledge for step 2 to
-    preserve (the keep-when-closer deviation documented on
-    `stepFindServers`). -/
 def nsSearchFails (s : State S C NS RR) : Prop :=
   stepFindServers.walkNs (C := C) (RR := RR) s.resources.sname s.resources.cache
       (BitVec.ofNat 16 2) (BitVec.ofNat 16 1) s.now 128 = none ∧
   (!SlistFromNameSpec.searchFails (NS := NS) s.resources.slist
       && decide (0 < SlistFromNameSpec.matchCount (NS := NS) s.resources.slist)) = false
 
-/-- The state step 2 transitions to (`step_seq_findServers`: it always
-    gotos). -/
 def findServersState (s : State S C NS RR) : State S C NS RR :=
   match stepFindServers s with
   | .goto _ s' => s'
   | _ => s
 
-/-- Instantiation of the generated `algorithm_prop_0` ("If the search for NS
-    RRs fails, then the resolver initializes SLIST from the safety belt
-    SBELT"): whenever the NS-walk failure event holds, the state produced by
-    step 2 has SLIST = SBELT. -/
 theorem impl_algorithm_sbelt_fallback :
     algorithm_prop_0 (State S C NS RR) S C NS RR
       nsSearchFails
@@ -66,17 +47,10 @@ theorem impl_algorithm_sbelt_fallback :
   simp only [hwalk, hcloser]
   rfl
 
--- ============================================================
--- ID match proof (algorithm_prop_1)
--- ============================================================
-
-/-- prependChain never alters the header ID. -/
 theorem prependChain_id (chain : Array ByteArray) (resp : Format) :
     (prependChain chain resp).header.id = resp.header.id := by
   unfold prependChain; split <;> rfl
 
-/-- finalizeAnswer never alters the header ID (it only touches the answer
-    section, ANCOUNT, the question section, and QDCOUNT). -/
 theorem finalizeAnswer_id (s : State S C NS RR) (resp : Format) :
     (finalizeAnswer s resp).header.id = resp.header.id := by
   unfold finalizeAnswer
@@ -85,62 +59,68 @@ theorem finalizeAnswer_id (s : State S C NS RR) (resp : Format) :
   · show (prependChain s.cnameChain resp).header.id = resp.header.id
     exact prependChain_id s.cnameChain resp
 
-/-- A chase decision implies a CNAME was actually extracted from the answer. -/
 theorem cnameToChase_extractCname {resp : Format}
     {c : ByteArray} (h : cnameToChase (RR := RR) resp = some c) :
-    extractCname (RR := RR) resp.answer = some c := by
+    ∃ qu, resp.question[0]? = some qu
+      ∧ extractCname (RR := RR) qu.qname resp.answer = some c := by
   unfold cnameToChase at h
   split at h
   · simp at h
-  · exact h
+  · split at h
+    next qu hq => exact ⟨qu, hq, h⟩
+    next => simp at h
 
-/-- stepAnalyzeResponse preserves the response ID.
-    When the response answers, the returned Format has the same header ID
-    as the input response (prependChain only touches answer/ancount). -/
 theorem stepAnalyzeResponse_preserves_id (s : State S C NS RR) (resp : Format)
     (hr : s.lastResponse = some resp)
     : match stepAnalyzeResponse s with
-      | .answer r => r.header.id = resp.header.id
+      | .answer r _ => r.header.id = resp.header.id
       | _ => True := by
   unfold stepAnalyzeResponse; simp only [hr]
   split <;> rename_i heq
-  · -- .answer branch: need to trace which branch produced it
+  ·
     split at heq
-    · simp at heq
+    · split at heq
+      · simp [StepResult.answer.injEq] at heq
+        obtain ⟨heq, -⟩ := heq
+        subst heq
+        exact finalizeAnswer_id s resp
+      · split at heq <;> simp at heq
     · split at heq
       · simp at heq
       · split at heq
-        · -- 4b: delegation goto, NODATA answer, or "no NS" error
+        ·
           split at heq
           · simp at heq
           · split at heq
             · simp [StepResult.answer.injEq] at heq
+              obtain ⟨heq, -⟩ := heq
               subst heq
               exact finalizeAnswer_id s resp
             · simp at heq
-        · -- 4a, NODATA, TC pass-through, or fallback error
+        ·
           split at heq
           · simp [StepResult.answer.injEq] at heq
+            obtain ⟨heq, -⟩ := heq
             subst heq
             exact finalizeAnswer_id s resp
           · split at heq
             · simp [StepResult.answer.injEq] at heq
+              obtain ⟨heq, -⟩ := heq
               subst heq
               exact finalizeAnswer_id s resp
             · split at heq
               · simp [StepResult.answer.injEq] at heq
+                obtain ⟨heq, -⟩ := heq
                 subst heq
                 exact finalizeAnswer_id s resp
-              · simp at heq
+              · split at heq
+                · simp [StepResult.answer.injEq] at heq
+                  obtain ⟨heq, -⟩ := heq
+                  subst heq
+                  exact finalizeAnswer_id s resp
+                · simp at heq
   · trivial
 
--- ============================================================
--- Loop soundness: pauses are genuine IO points, and every run
--- walks the generated StepSpec relation
--- ============================================================
-
-/-- The only step that yields `needsIO` is step 3 (sendQueries) with no
-    response in hand — and it yields the state unchanged. -/
 theorem step_needsIO_inversion (s s' : State S C NS RR)
     (h : step s = .needsIO s') :
     s' = s ∧ s.currentStep = .sendQueries ∧ s.lastResponse = none := by
@@ -154,7 +134,7 @@ theorem step_needsIO_inversion (s s' : State S C NS RR)
     rw [step_findServers_dispatch s hcs] at h
     unfold stepFindServers at h
     dsimp only [] at h
-    split at h <;> (try split at h) <;> injection h
+    split at h <;> (try split at h) <;> (try split at h) <;> injection h
   | sendQueries =>
     rw [step_sendQueries_dispatch s hcs] at h
     unfold stepSendQueries at h
@@ -168,7 +148,7 @@ theorem step_needsIO_inversion (s s' : State S C NS RR)
     split at h
     · injection h
     · split at h
-      · injection h
+      · simp only [] at h; split at h <;> (try split at h) <;> injection h
       · split at h
         · injection h
         · split at h
@@ -177,12 +157,10 @@ theorem step_needsIO_inversion (s s' : State S C NS RR)
             · injection h
             · split at h
               · injection h
-              · split at h <;> injection h
+              · split at h
+                · injection h
+                · split at h <;> injection h
 
-/-- A paused resolver run is a genuine IO yield: the loop pauses exactly at
-    step 3 with no response in hand. This is the contract the IO shim
-    relies on (`buildSubQuery` builds the outgoing query for the paused
-    SNAME; `resume` installs the response and continues at step 3). -/
 theorem resolve_loop_paused (fuel : Nat) (s s' : State S C NS RR)
     (h : resolve.loop s fuel = .ok (.paused s')) :
     s'.currentStep = .sendQueries ∧ s'.lastResponse = none := by
@@ -201,47 +179,33 @@ theorem resolve_loop_paused (fuel : Nat) (s s' : State S C NS RR)
       exact ⟨hcs, hr⟩
     · exact absurd h (by simp)
 
--- ============================================================
--- needsIO yield proofs
--- ============================================================
-
-/-- stepSendQueries yields needsIO when no response is available. -/
 theorem step_sendQueries_needsIO (s : State S C NS RR)
     (h : s.lastResponse = none) :
     stepSendQueries s = .needsIO s := by
   unfold stepSendQueries; simp [h]
 
--- ============================================================
--- Sequential transition soundness
--- ============================================================
-
-/-- Step 1 either answers from the cache — negative (RFC 2308) or positive
-    (step 1's "if so return it to the client") — or transitions to step 2
-    (findServers). -/
 theorem step_seq_checkAnswer (s : State S C NS RR) (h : s.currentStep = .checkAnswer) :
-    (∃ s', step s = .goto .findServers s') ∨ (∃ r, step s = .answer r) := by
+    (∃ s', step s = .goto .findServers s') ∨ (∃ r st, step s = .answer r st)
+      ∨ step s = .error "cname chain too long" := by
   simp only [step, h]; unfold stepCheckLocal
   split
   · exact Or.inl ⟨_, rfl⟩
   · split
     · exact Or.inl ⟨_, rfl⟩
     · split
-      · exact Or.inr ⟨_, rfl⟩
-      · exact Or.inr ⟨_, rfl⟩
+      · exact Or.inr (Or.inl ⟨_, _, rfl⟩)
+      · exact Or.inr (Or.inl ⟨_, _, rfl⟩)
       · split
         · exact Or.inl ⟨_, rfl⟩
         · exact Or.inl ⟨_, rfl⟩
+      · exact Or.inr (Or.inr rfl)
 
-/-- Step 2 always transitions (via SBELT or NS walking). -/
 theorem step_seq_findServers (s : State S C NS RR) (h : s.currentStep = .findServers) :
     ∃ nextStep s', step s = .goto nextStep s' := by
   simp only [step, h]
   unfold stepFindServers; dsimp only []
-  split <;> (try split) <;> exact ⟨_, _, rfl⟩
+  split <;> (try split) <;> (try split) <;> exact ⟨_, _, rfl⟩
 
--- The generated enums derive BEq without LawfulBEq; these helpers convert
--- between boolean equality tests in the implementation and the propositional
--- equalities in the NLP-generated guards.
 private theorem rcode_eq_of_beq {a b : Rcode} (h : (a == b) = true) : a = b := by
   cases a <;> cases b <;> first | rfl | exact absurd h (by decide)
 
@@ -278,7 +242,6 @@ private theorem isEmpty_false_of_any {α : Type} {as : Array α} {p : α → Boo
     subst hemp
     simp at h
 
-/-- An empty answer section never answers the query. -/
 theorem answersQueryB_of_isEmpty {resp : Format}
     (h : resp.answer.isEmpty = true) : answersQueryB (RR := RR) resp = false := by
   have hemp : resp.answer = #[] := by simpa using h
@@ -287,7 +250,6 @@ theorem answersQueryB_of_isEmpty {resp : Format}
   · unfold hasRRTypeIn; rw [hemp]; simp
   · rfl
 
-/-- A response that answers the query has a nonempty answer section. -/
 theorem answer_isEmpty_false_of_answersQueryB {resp : Format}
     (h : answersQueryB (RR := RR) resp = true) : resp.answer.isEmpty = false := by
   unfold answersQueryB at h
@@ -295,10 +257,9 @@ theorem answer_isEmpty_false_of_answersQueryB {resp : Format}
   · exact isEmpty_false_of_any (by unfold hasRRTypeIn at h; exact h)
   · simp at h
 
-/-- If the answer contains no CNAME-typed RR, extractCname finds nothing. -/
-theorem extractCname_none_of_no_cname {ans : Array ByteArray}
+theorem extractCname_none_of_no_cname {sname : ByteArray} {ans : Array ByteArray}
     (h : hasRRTypeIn (RR := RR) ans 5 = false) :
-    extractCname (RR := RR) ans = none := by
+    extractCname (RR := RR) sname ans = none := by
   unfold extractCname
   rw [Array.findSome?_eq_none_iff]
   intro bytes hmem
@@ -312,38 +273,29 @@ theorem extractCname_none_of_no_cname {ans : Array ByteArray}
     simp only [hpr] at hp
     have hpf : (RRParse.rrType rr == (5 : BitVec 16)) = false :=
       bool_eq_false_of_ne_true hp
-    have hne : ¬ RRParse.rrType rr = (5 : BitVec 16) := fun he => by
-      rw [he] at hpf; simp at hpf
-    simp only [hpr]
-    simp only [beq_iff_eq, ite_eq_right_iff, reduceCtorEq, imp_false]
-    exact hne
+    simp only [hpr, hpf, Bool.false_and, Bool.false_eq_true, if_false]
 
-/-- If the answer contains a CNAME-typed RR, extractCname finds one. -/
-theorem extractCname_some_of_cname {ans : Array ByteArray}
-    (h : hasRRTypeIn (RR := RR) ans 5 = true) :
-    ∃ c, extractCname (RR := RR) ans = some c := by
-  cases ho : extractCname (RR := RR) ans with
-  | some c => exact ⟨c, rfl⟩
-  | none =>
-    exfalso
-    unfold extractCname at ho
-    rw [Array.findSome?_eq_none_iff] at ho
-    unfold hasRRTypeIn at h
-    obtain ⟨i, hi, hp⟩ := Array.any_eq_true.mp h
-    have hf := ho ans[i] (Array.getElem_mem hi)
-    cases hpr : RRParse.parseRaw (RR := RR) ans[i] with
-    | none => simp [hpr] at hp
-    | some rr =>
-      simp only [hpr] at hp hf
-      rw [hp] at hf
-      simp at hf
+theorem hasRRTypeIn_of_extractCname_some {sname : ByteArray} {ans : Array ByteArray}
+    {c : ByteArray} (h : extractCname (RR := RR) sname ans = some c) :
+    hasRRTypeIn (RR := RR) ans 5 = true := by
+  unfold extractCname at h
+  obtain ⟨bytes, hmem, hb⟩ := Array.exists_of_findSome?_eq_some h
+  unfold hasRRTypeIn
+  rw [Array.any_eq_true]
+  obtain ⟨i, hi, rfl⟩ := Array.mem_iff_getElem.mp hmem
+  refine ⟨i, hi, ?_⟩
+  cases hpr : RRParse.parseRaw (RR := RR) ans[i] with
+  | none => rw [hpr] at hb; simp at hb
+  | some rr =>
+    simp only [hpr] at hb
+    split at hb
+    next hcond => exact (Bool.and_eq_true _ _ |>.mp hcond).1
+    next => simp at hb
 
 private theorem or5_false {a b c d e : Bool} (h : (a || b || c || d || e) = false) :
     a = false ∧ b = false ∧ c = false ∧ d = false ∧ e = false := by
   cases a <;> cases b <;> cases c <;> cases d <;> cases e <;> simp_all
 
-/-- `classifiableB = false` unpacks: empty answer and authority, rcode
-    neither nameError nor noError, untruncated — "other bizarre contents". -/
 private theorem classifiable_false_facts {resp : Format}
     (hc : classifiableB resp = false) :
     resp.answer.isEmpty = true ∧ (resp.header.rcode == Rcode.nameError) = false ∧
@@ -359,9 +311,6 @@ private theorem classifiable_false_facts {resp : Format}
     | true => rfl
     | false => rw [hb] at h3; exact absurd h3 (by decide)
 
-/-- The implementation's widened 4d test implies the widened base
-    `guard_serverFailure` (its "other bizarre contents" arm is the complement
-    of the sibling guards). -/
 private theorem guard_serverFailure_of_test {resp : Format}
     (h : (resp.header.rcode == Rcode.serverFailure || !classifiableB resp) = true) :
     guard_serverFailure resp := by
@@ -372,7 +321,7 @@ private theorem guard_serverFailure_of_test {resp : Format}
     obtain ⟨hans, hne, hauth, _, _⟩ := classifiable_false_facts hcl
     have hans0 := size_eq_zero_of_isEmpty hans
     have hauth0 := size_eq_zero_of_isEmpty hauth
-    refine Or.inr ⟨?_, ?_, ?_⟩
+    refine Or.inr (Or.inl ⟨?_, ?_, ?_⟩)
     · rintro (hpos | hrc)
       · omega
       · exact rcode_ne_of_beq_false hne hrc
@@ -383,7 +332,12 @@ private theorem guard_serverFailure_of_test {resp : Format}
       have hsz : resp.answer.size > 0 := hpos
       omega
 
-/-- step only produces transitions allowed by StepSpec. -/
+private theorem guard_serverFailure_of_lame {resp : Format}
+    (hnoerr : (resp.header.rcode == Rcode.noError) = false)
+    (hne : (resp.header.rcode == Rcode.nameError) = false) :
+    guard_serverFailure resp :=
+  Or.inr (Or.inr ⟨rcode_ne_of_beq_false hnoerr, rcode_ne_of_beq_false hne⟩)
+
 theorem step_implies_spec (s : State S C NS RR) (nextStep : AlgorithmStep)
     (s' : State S C NS RR) (h : step s = .goto nextStep s') :
     StepSpec s.currentStep nextStep := by
@@ -398,18 +352,20 @@ theorem step_implies_spec (s : State S C NS RR) (nextStep : AlgorithmStep)
       · obtain ⟨h1, _⟩ := StepResult.goto.inj h; subst h1
         exact .seq_checkAnswer_findServers
       · split at h
-        · -- negative-cache hit answers (not a goto)
+        ·
           injection h
-        · -- positive cache hit (possibly via cached CNAMEs) answers
+        ·
           injection h
-        · -- miss (possibly with chased sname): both arms goto findServers
+        ·
           split at h <;>
             (obtain ⟨h1, _⟩ := StepResult.goto.inj h; subst h1
              exact .seq_checkAnswer_findServers)
+        ·
+          injection h
   | findServers =>
     rw [step_findServers_dispatch s hcs] at h
     unfold stepFindServers at h; dsimp only [] at h
-    split at h <;> (try split at h) <;>
+    split at h <;> (try split at h) <;> (try split at h) <;>
       (obtain ⟨h1, _⟩ := StepResult.goto.inj h; subst h1
        exact .seq_findServers_sendQueries)
   | sendQueries =>
@@ -426,51 +382,61 @@ theorem step_implies_spec (s : State S C NS RR) (nextStep : AlgorithmStep)
     · simp at h
     · rename_i resp _
       split at h <;> rename_i hcn
-      · -- 4c: CNAME chase → checkAnswer
+      ·
+        simp only [] at h
+        split at h
+        · injection h
+        split at h
+        · injection h
         injection h with h1 _; subst h1
-        -- guard_cname: a chase implies a CNAME, hence a nonempty answer
+
         refine .cname resp ?_
-        have hext := cnameToChase_extractCname hcn
+        obtain ⟨qu, _, hext⟩ := cnameToChase_extractCname hcn
         cases Nat.eq_zero_or_pos resp.answer.size with
         | inl h0 =>
           have hemp : resp.answer = #[] := Array.size_eq_zero_iff.mp h0
           rw [hemp] at hext
-          have hnone : extractCname (RR := RR) (#[] : Array ByteArray) = none := rfl
+          have hnone : extractCname (RR := RR) qu.qname (#[] : Array ByteArray) = none := rfl
           rw [hnone] at hext
           simp at hext
         | inr hpos => exact hpos
       · split at h <;> rename_i hsf
-        · -- 4d: server failure or other bizarre contents → sendQueries
+        ·
           injection h with h1 _; subst h1
           exact .serverFailure resp (guard_serverFailure_of_test hsf)
         · split at h <;> rename_i h4b
-          · -- 4b: delegation → findServers
+          ·
             have hpos : resp.authority.size > 0 := by
               cases hb : resp.authority.isEmpty with
               | false => exact size_pos_of_isEmpty_false hb
               | true => rw [hb] at h4b; simp at h4b
-            split at h <;> (try dsimp only [] at h) <;> (try split at h) <;>
-              first
-                | (injection h with h1 _; subst h1; exact .delegation resp hpos)
-                | injection h
-          · -- 4a / NODATA / TC pass-through / fallback: none is a goto
+            have h4b' := h4b
+            simp only [Bool.and_eq_true, Bool.not_eq_true'] at h4b'
+            obtain ⟨⟨⟨haq, hne⟩, hans⟩, hauth⟩ := h4b'
             split at h
-            · injection h
+            · dsimp only [] at h
+              injection h with h1 _; subst h1
+              exact .delegation resp hpos
+            · split at h <;> rename_i hnodata
+              · injection h
+              ·
+                injection h with h1 _; subst h1
+                have hnoerr : (resp.header.rcode == Rcode.noError) = false := by
+                  cases hb : (resp.header.rcode == Rcode.noError) with
+                  | false => rfl
+                  | true => exact absurd (by rw [hb, hans]; rfl) hnodata
+                exact .serverFailure resp (guard_serverFailure_of_lame hnoerr hne)
+          ·
+            split at h
+            · dsimp only [] at h; injection h
             · split at h
               · injection h
               · split at h
                 · injection h
-                · injection h
+                · split at h
+                  · injection h
+                  · injection h
 
--- ============================================================
--- Response coverage (completeness obligation)
--- ============================================================
-
-/-- stepAnalyzeResponse never returns the fallback "unhandled response type"
-    error: with 4d widened to "other bizarre contents" (the complement of
-    the classifiable shapes), EVERY response is handled — no
-    `responseHandled` hypothesis is needed (the widened guards make it
-    total). -/
 theorem step_analyzeResponse_coverage (s : State S C NS RR) (resp : Format)
     (hr : s.lastResponse = some resp) :
     stepAnalyzeResponse s ≠ .error "unhandled response type" := by
@@ -478,118 +444,110 @@ theorem step_analyzeResponse_coverage (s : State S C NS RR) (resp : Format)
   unfold stepAnalyzeResponse at h
   simp only [hr] at h
   split at h
-  · -- 4c chase: goto ≠ error
-    injection h
+  ·
+    split at h
+    · injection h
+    · split at h
+      · injection h with hmsg; exact absurd hmsg (by decide)
+      · injection h
   · split at h <;> rename_i hsf
-    · -- 4d: goto ≠ error
+    ·
       injection h
     · split at h <;> rename_i h4b
-      · -- 4b branch: goto, NODATA answer, or error "4b: ..." — never the fallback
+      ·
         split at h <;> (try split at h) <;>
           first
             | (injection h with hmsg; exact absurd hmsg (by decide))
             | injection h
-      · split at h <;> rename_i h4a
-        · -- 4a: answer ≠ error
-          injection h
-        · split at h <;> rename_i hnodata
-          · injection h
-          · split at h <;> rename_i htc
+      · split at h <;> rename_i haqB
+        ·
+          simp at h
+        · split at h <;> rename_i h4a
+          ·
+            injection h
+          · split at h <;> rename_i hnodata
             · injection h
-            · -- fallback: every branch test false ⟹ classifiableB = false,
-              -- contradicting ¬4d-test (which requires classifiableB = true)
-              clear h
-              have hb4d : (resp.header.rcode == Rcode.serverFailure
-                  || !classifiableB resp) = false := bool_eq_false_of_ne_true hsf
-              rw [Bool.or_eq_false_iff] at hb4d
-              have hclass : classifiableB resp = true := by
-                have hnc := hb4d.2
-                cases hbc : classifiableB resp with
-                | true => rfl
-                | false => rw [hbc] at hnc; exact absurd hnc (by decide)
-              rw [Bool.or_eq_true, not_or] at h4a
-              obtain ⟨hansEmpty, hnerr⟩ := h4a
-              have hans : resp.answer.isEmpty = true := by
-                cases hb : resp.answer.isEmpty with
-                | true => rfl
-                | false => exact absurd (by simp [hb]) hansEmpty
-              have haq : answersQueryB (RR := RR) resp = false :=
-                answersQueryB_of_isEmpty hans
-              have hnef : (resp.header.rcode == Rcode.nameError) = false :=
-                bool_eq_false_of_ne_true hnerr
-              rw [haq, hnef] at h4b
-              have hauth : resp.authority.isEmpty = true := by
-                cases hb : resp.authority.isEmpty with
-                | true => rfl
-                | false => rw [hb] at h4b; simp at h4b
-              have hnoerr : (resp.header.rcode == Rcode.noError) = false := by
-                cases hb : (resp.header.rcode == Rcode.noError) with
-                | false => rfl
-                | true => exact absurd (by rw [hb, hans]; rfl) hnodata
-              have htc' : (resp.header.tc == (1 : BitVec 1)) = false :=
-                bool_eq_false_of_ne_true htc
-              unfold classifiableB at hclass
-              rw [hans, hnef, hauth, hnoerr, htc'] at hclass
-              simp at hclass
+            · split at h <;> rename_i htc
+              · injection h
+              ·
 
--- ============================================================
--- CNAME chase obligation (liveness direction)
--- ============================================================
+                clear h
+                have hb4d : (resp.header.rcode == Rcode.serverFailure
+                    || !classifiableB resp) = false := bool_eq_false_of_ne_true hsf
+                rw [Bool.or_eq_false_iff] at hb4d
+                have hclass : classifiableB resp = true := by
+                  have hnc := hb4d.2
+                  cases hbc : classifiableB resp with
+                  | true => rfl
+                  | false => rw [hbc] at hnc; exact absurd hnc (by decide)
+                rw [Bool.or_eq_true, not_or] at h4a
+                obtain ⟨hansEmpty, hnerr⟩ := h4a
+                have hans : resp.answer.isEmpty = true := by
+                  cases hb : resp.answer.isEmpty with
+                  | true => rfl
+                  | false => exact absurd (by simp [hb]) hansEmpty
+                have haq : answersQueryB (RR := RR) resp = false :=
+                  answersQueryB_of_isEmpty hans
+                have hnef : (resp.header.rcode == Rcode.nameError) = false :=
+                  bool_eq_false_of_ne_true hnerr
+                rw [haq, hnef, hans] at h4b
+                have hauth : resp.authority.isEmpty = true := by
+                  cases hb : resp.authority.isEmpty with
+                  | true => rfl
+                  | false => rw [hb] at h4b; simp at h4b
+                have hnoerr : (resp.header.rcode == Rcode.noError) = false := by
+                  cases hb : (resp.header.rcode == Rcode.noError) with
+                  | false => rfl
+                  | true => exact absurd (by rw [hb, hans]; rfl) hnodata
+                have htc' : (resp.header.tc == (1 : BitVec 1)) = false :=
+                  bool_eq_false_of_ne_true htc
+                unfold classifiableB at hclass
+                rw [hans, hnef, hauth, hnoerr, htc'] at hclass
+                simp at hclass
 
-/-- CNAME chase obligation (RFC 1034 §5.3.3 4c, "change the SNAME to the
-    canonical name in the CNAME RR and go to step 1"): when the response shows
-    a CNAME that is not itself the answer, `stepAnalyzeResponse` MUST take the
-    analyzeResponse → checkAnswer transition, updating SNAME to the canonical
-    name and accumulating the chain.
-
-    The NLP-generated `StepSpec` only expresses the permission direction
-    (`step_implies_spec`: every transition taken is allowed); it cannot detect
-    an implementation that never takes an allowed transition. This theorem
-    states the obligation direction manually. -/
 theorem step_cname_chase (s : State S C NS RR) (resp : Format) (c : ByteArray)
     (hr : s.lastResponse = some resp)
-    (hc : cnameToChase (RR := RR) resp = some c) :
+    (hc : cnameToChase (RR := RR) resp = some c)
+    (htc : (resp.header.tc == 1) = false)
+    (hnrev : ((cnameChaseVisited (RR := RR)
+        ((s.lastQuery.bind (fun q => q.question[0]?)).elim s.resources.sname (fun qu => qu.qname))
+        s.cnameChain).any (fun v => VeriDNS.Impl.DomainName.nameEqCI v c)) = false) :
     ∃ s', stepAnalyzeResponse s = .goto .checkAnswer s' ∧
       s'.resources.sname = c ∧
-      s'.cnameChain = s.cnameChain ++ resp.answer := by
+      s'.cnameChain = prependCnameLink (RR := RR) s.cnameChain resp := by
   unfold stepAnalyzeResponse
-  simp only [hr, hc]
+  simp only [hr, hc, htc, hnrev, Bool.false_eq_true, if_false]
   exact ⟨_, rfl, rfl, rfl⟩
 
--- ============================================================
--- Generated obligations: the implementation satisfies them
---
--- The NLP pipeline generates obligation_* props from the RFC sub-steps over
--- abstract content predicates (answersQuery, hasRRType) and an abstract
--- transition relation. The implementation instantiates the predicates with
--- its parse-based checks and the relation with stepAnalyzeResponse.
--- ============================================================
+def cnameChaseLoopFree (s : State S C NS RR) (resp : Format) : Prop :=
+  ∀ c, cnameToChase (RR := RR) resp = some c →
+    ((cnameChaseVisited (RR := RR)
+        ((s.lastQuery.bind (fun q => q.question[0]?)).elim s.resources.sname (fun qu => qu.qname))
+        s.cnameChain).any (fun v => VeriDNS.Impl.DomainName.nameEqCI v c)) = false
 
-/-- The implementation's analyzeResponse transition relation, as a function of
-    the response alone. -/
+def cnameChaseUntruncated (resp : Format) : Prop :=
+  ∀ c, cnameToChase (RR := RR) resp = some c → (resp.header.tc == 1) = false
+
 def implTransition (resp : Format) : Option AlgorithmStep → Prop
   | some tgt => ∀ s : State S C NS RR, s.lastResponse = some resp →
+      cnameChaseLoopFree (S := S) (C := C) (NS := NS) (RR := RR) s resp →
+      cnameChaseUntruncated (RR := RR) resp →
       ∃ s', stepAnalyzeResponse s = .goto tgt s'
   | none => ∀ s : State S C NS RR, s.lastResponse = some resp →
-      ∃ r, stepAnalyzeResponse s = .answer r
+      ∃ r st, stepAnalyzeResponse s = .answer r st
 
-/-- The chase trigger fires exactly on guardRefined_cname. -/
 private theorem cnameToChase_none_of_not_guard {resp : Format}
     (hg : ¬ guardRefined_cname (answersQueryB (RR := RR))
-      (hasRRTypeIn (RR := RR)) classifiableB resp)
+      (hasRRTypeIn (RR := RR)) classifiableB (cnameToChase (RR := RR)) resp)
     (haq : answersQueryB (RR := RR) resp = false) :
     cnameToChase (RR := RR) resp = none := by
-  unfold cnameToChase
-  rw [haq]
-  simp only [Bool.false_eq_true, if_false]
-  have hcn : hasRRTypeIn (RR := RR) resp.answer 5 = false := by
-    cases hb : hasRRTypeIn (RR := RR) resp.answer 5 with
-    | false => rfl
-    | true => exact absurd ⟨hb, haq⟩ hg
-  exact extractCname_none_of_no_cname hcn
+  cases hb : cnameToChase (RR := RR) resp with
+  | none => rfl
+  | some c =>
+    exfalso
+    obtain ⟨qu, _, hext⟩ := cnameToChase_extractCname (RR := RR) hb
+    exact hg ⟨hasRRTypeIn_of_extractCname_some (RR := RR) hext, haq, by rw [hb]; rfl⟩
 
-/-- The widened 4d implementation test is false when neither
-    `guardRefined_serverFailure` arm holds. -/
 private theorem test4d_false_of_not_guard {resp : Format}
     (hd : ¬ guardRefined_serverFailure (answersQueryB (RR := RR))
       (hasRRTypeIn (RR := RR)) classifiableB resp) :
@@ -607,29 +565,24 @@ private theorem test4d_false_of_not_guard {resp : Format}
 
 theorem impl_obligation_cname :
     obligation_cname (answersQueryB (RR := RR)) (hasRRTypeIn (RR := RR))
-      classifiableB
+      classifiableB (cnameToChase (RR := RR))
       (implTransition (S := S) (C := C) (NS := NS) (RR := RR)) := by
-  intro resp hg _ha _hb _hd s hr
-  obtain ⟨hcn, haq⟩ := hg
-  obtain ⟨c, hc⟩ := extractCname_some_of_cname (RR := RR) hcn
-  have hchase : cnameToChase (RR := RR) resp = some c := by
-    unfold cnameToChase
-    rw [haq]
-    simpa using hc
-  obtain ⟨s', hs, _, _⟩ := step_cname_chase s resp c hr hchase
+  intro resp hg _ha _hb _hd s hr hlf htc
+  obtain ⟨_hcn, _haq, hsome⟩ := hg
+  obtain ⟨c, hchase⟩ := Option.isSome_iff_exists.mp hsome
+  obtain ⟨s', hs, _, _⟩ := step_cname_chase s resp c hr hchase (htc c hchase) (hlf c hchase)
   exact ⟨s', hs⟩
 
 theorem impl_obligation_serverFailure :
     obligation_serverFailure (answersQueryB (RR := RR)) (hasRRTypeIn (RR := RR))
-      classifiableB
+      classifiableB (cnameToChase (RR := RR))
       (implTransition (S := S) (C := C) (NS := NS) (RR := RR)) := by
-  intro resp hg ha _hb hc s hr
-  -- ¬answerOrNameError gives answersQuery = false
+  intro resp hg ha _hb hc s hr _hlf _htc
+
   have haq : answersQueryB (RR := RR) resp = false :=
     bool_eq_false_of_ne_true (fun h => ha (Or.inl h))
   have hchase := cnameToChase_none_of_not_guard (RR := RR) hc haq
-  -- the widened guard (rcode = serverFailure ∨ handled = false) makes the
-  -- widened implementation test true on either arm
+
   have hg' : resp.header.rcode = Rcode.serverFailure ∨ classifiableB resp = false := hg
   have hcond : (resp.header.rcode == Rcode.serverFailure
       || !classifiableB resp) = true := by
@@ -643,10 +596,11 @@ theorem impl_obligation_serverFailure :
 
 theorem impl_obligation_delegation :
     obligation_delegation (answersQueryB (RR := RR)) (hasRRTypeIn (RR := RR))
-      classifiableB
+      classifiableB (cnameToChase (RR := RR))
       (implTransition (S := S) (C := C) (NS := NS) (RR := RR)) := by
-  intro resp hg ha hc hd s hr
-  have hgb : hasRRTypeIn (RR := RR) resp.authority 2 = true := hg
+  intro resp hg ha hc hd s hr _hlf _htc
+  unfold guardRefined_delegation at hg
+  obtain ⟨hgb, hans, haa, hrc, hsoa⟩ := hg
   have haq : answersQueryB (RR := RR) resp = false :=
     bool_eq_false_of_ne_true (fun h => ha (Or.inl h))
   have hne : (resp.header.rcode == Rcode.nameError) = false :=
@@ -657,32 +611,35 @@ theorem impl_obligation_delegation :
     isEmpty_false_of_any (by unfold hasRRTypeIn at hgb; exact hgb)
   have hcond : (!answersQueryB (RR := RR) resp
       && !(resp.header.rcode == Rcode.nameError)
+      && resp.answer.isEmpty
       && !resp.authority.isEmpty) = true := by
-    rw [haq, hne, hauth]; rfl
+    rw [haq, hne, hans, hauth]; rfl
   unfold stepAnalyzeResponse
-  simp only [hr, hchase, hsf, hcond, hgb]
+  simp only [hr, hchase, hsf, hcond, hgb, haa, hrc, hsoa, Bool.not_false,
+    Bool.and_true, Bool.true_and, Bool.and_self, if_true]
   exact ⟨_, rfl⟩
 
 theorem impl_obligation_answerOrNameError :
     obligation_answerOrNameError (answersQueryB (RR := RR)) (hasRRTypeIn (RR := RR))
-      classifiableB
+      classifiableB (cnameToChase (RR := RR))
       (implTransition (S := S) (C := C) (NS := NS) (RR := RR)) := by
   intro resp hg _hb hc hd s hr
   have hsf := test4d_false_of_not_guard (RR := RR) hd
-  -- the chase never fires when the response answers or names an error
+
   have hchase : cnameToChase (RR := RR) resp = none := by
     cases haq : answersQueryB (RR := RR) resp with
     | true => unfold cnameToChase; rw [haq]; rfl
     | false => exact cnameToChase_none_of_not_guard (RR := RR) hc haq
-  -- 4a condition holds
+
   have h4a : (!resp.answer.isEmpty || resp.header.rcode == Rcode.nameError) = true := by
     rcases hg with haq | hne
     · rw [answer_isEmpty_false_of_answersQueryB (RR := RR) haq]; rfl
     · rw [rcode_beq_of_eq hne]
       simp
-  -- 4b condition is false
+
   have h4b : (!answersQueryB (RR := RR) resp
       && !(resp.header.rcode == Rcode.nameError)
+      && resp.answer.isEmpty
       && !resp.authority.isEmpty) = false := by
     rcases hg with haq | hne
     · rw [haq]; rfl
@@ -690,11 +647,11 @@ theorem impl_obligation_answerOrNameError :
       simp
   unfold stepAnalyzeResponse
   simp only [hr, hchase, hsf, h4b, h4a]
-  exact ⟨_, rfl⟩
 
-/-- "The answer is in local information": the state's cache holds a fresh
-    entry — negative (RFC 2308) or positive ANSWER-GRADE (RFC 2181 §5.4.1:
-    untrustworthy data is not an answer) — for the current query key. -/
+  cases haq : answersQueryB (RR := RR) resp with
+  | true => simp only [haq, if_true]; exact ⟨_, _, rfl⟩
+  | false => simp only [haq, Bool.false_eq_true, if_false]; exact ⟨_, _, rfl⟩
+
 def answerInLocal (s : State S C NS RR) : Prop :=
   ∃ q qu, s.lastQuery = some q ∧ q.question[0]? = some qu ∧
     ((NegativeCacheSpec.retrieveNegative s.resources.cache
@@ -702,39 +659,35 @@ def answerInLocal (s : State S C NS RR) : Prop :=
      ∨ (TrustworthinessSpec.answers s.resources.cache
         s.resources.sname qu.qtype qu.qclass s.now : Array RR).isEmpty = false)
 
-/-- Honest instantiation of the generated step-1 obligation
-    (`obligation_checkAnswer`, from "See if the answer is in local
-    information, and if so return it to the client"): whenever the cache
-    holds a fresh answer for the query key, stepCheckLocal returns an
-    answer to the client — not a goto. -/
 theorem impl_obligation_checkAnswer :
     obligation_checkAnswer (State S C NS RR)
       (answerInLocal)
-      (fun s => ∃ r, stepCheckLocal s = .answer r) := by
+      (fun s => ∃ r st, stepCheckLocal s = .answer r st) := by
   intro s hloc
   obtain ⟨q, qu, hq, hqu, hcase⟩ := hloc
   unfold stepCheckLocal
   simp only [hq, hqu]
   have h8 : (8 : Nat) = 7 + 1 := rfl
   rw [h8]
-  -- the condition holds at the FIRST name, so one unfolding of the
-  -- cached-CNAME chase suffices (lookups precede the alias hop)
+
   cases hneg : NegativeCacheSpec.retrieveNegative s.resources.cache
       s.resources.sname qu.qtype qu.qclass s.now with
   | some rc =>
     have hla : localAnswer (C := C) (RR := RR) s.resources.cache qu.qtype qu.qclass
         s.now (7 + 1) s.resources.sname s.cnameChain
+        (cnameChaseVisited (RR := RR) qu.qname s.cnameChain)
         = .negative rc (NegativeAuthoritySpec.authoritySection s.resources.cache
-            s.resources.sname qu.qtype qu.qclass s.now) := by
+            s.resources.sname qu.qtype qu.qclass s.now) s.cnameChain := by
       unfold localAnswer
       rw [hneg]
     rw [hla]
-    exact ⟨_, rfl⟩
+    exact ⟨_, _, rfl⟩
   | none =>
     rcases hcase with hns | hpos
     · rw [hneg] at hns; exact absurd hns (by simp)
     · have hla : localAnswer (C := C) (RR := RR) s.resources.cache qu.qtype qu.qclass
           s.now (7 + 1) s.resources.sname s.cnameChain
+          (cnameChaseVisited (RR := RR) qu.qname s.cnameChain)
           = .answerHit s.resources.sname s.cnameChain
               (TrustworthinessSpec.answers s.resources.cache s.resources.sname
                 qu.qtype qu.qclass s.now) := by
@@ -744,7 +697,7 @@ theorem impl_obligation_checkAnswer :
         rw [hpos]
         simp
       rw [hla]
-      exact ⟨_, rfl⟩
+      exact ⟨_, _, rfl⟩
 
 private theorem optRcode_eq_of_beq {a : Option Rcode}
     (h : (a == some Rcode.nameError) = true) : a = some Rcode.nameError := by
@@ -752,20 +705,14 @@ private theorem optRcode_eq_of_beq {a : Option Rcode}
   | none => exact absurd h (by decide)
   | some rc => cases rc <;> first | rfl | exact absurd h (by decide)
 
-/-- Step 1's cache consultation satisfies the generated
-    `rcode_nameError_semantics` ("this code signifies that the domain name
-    referenced in the query does not exist"): nonexistence knowledge is a
-    fresh cached NXDOMAIN (RFC 2308), and whenever it is present
-    (`exist = false`) the local answer is a `.negative` carrying
-    nameError with its §6 SOA authority section. -/
 theorem localAnswer_nameError_semantics (qtype qclass : BitVec 16)
-    (now : UInt32) (fuel : Nat) (chain : Array ByteArray) :
+    (now : UInt32) (fuel : Nat) (chain visited : Array ByteArray) :
     rcode_nameError_semantics (C × ByteArray)
       (fun p => !(NegativeCacheSpec.retrieveNegative p.1 p.2 qtype qclass now
         == some Rcode.nameError))
-      (fun p => localAnswer (RR := RR) p.1 qtype qclass now (fuel + 1) p.2 chain
+      (fun p => localAnswer (RR := RR) p.1 qtype qclass now (fuel + 1) p.2 chain visited
         = .negative Rcode.nameError
-            (NegativeAuthoritySpec.authoritySection p.1 p.2 qtype qclass now)) := by
+            (NegativeAuthoritySpec.authoritySection p.1 p.2 qtype qclass now) chain) := by
   intro p h
   have hb : (NegativeCacheSpec.retrieveNegative p.1 p.2 qtype qclass now
       == some Rcode.nameError) = true := by
@@ -774,13 +721,6 @@ theorem localAnswer_nameError_semantics (qtype qclass : BitVec 16)
   unfold localAnswer
   rw [heq]
 
--- ============================================================
--- Loop trace soundness (uses step_implies_spec)
--- ============================================================
-
-/-- Trace soundness for pauses: a paused run's current step is reachable
-    from the starting step through the generated step relation — the loop
-    never takes a transition the RFC algorithm does not allow. -/
 theorem resolve_loop_star (fuel : Nat) (s s' : State S C NS RR)
     (h : resolve.loop s fuel = .ok (.paused s')) :
     StepSpecStar s.currentStep s'.currentStep := by
@@ -800,27 +740,225 @@ theorem resolve_loop_star (fuel : Nat) (s s' : State S C NS RR)
       exact .refl _
     · exact absurd h (by simp)
 
-/-- Trace soundness for answers: every answer the loop returns is produced
-    by a single `.answer` step at a state whose step is StepSpec-reachable
-    from the starting step. -/
 theorem resolve_loop_done (fuel : Nat) (s : State S C NS RR) (r : Format)
-    (h : resolve.loop s fuel = .ok (.done r)) :
+    (stF : State S C NS RR)
+    (h : resolve.loop s fuel = .ok (.done r stF)) :
     ∃ s₀ : State S C NS RR,
-      StepSpecStar s.currentStep s₀.currentStep ∧ step s₀ = .answer r := by
+      StepSpecStar s.currentStep s₀.currentStep ∧ step s₀ = .answer r stF := by
   induction fuel generalizing s with
   | zero => exact absurd h (by simp [resolve.loop])
   | succ n ih =>
     unfold resolve.loop at h
     split at h <;> rename_i hstep
-    · rename_i resp
-      have hd : ResolveYield.done (S := S) (C := C) (NS := NS) (RR := RR) resp
-          = .done r := Except.ok.inj h
-      injection hd with hresp
-      exact ⟨s, .refl _, hresp ▸ hstep⟩
+    · rename_i resp st'
+      have hd : ResolveYield.done (S := S) (C := C) (NS := NS) (RR := RR) resp st'
+          = .done r stF := Except.ok.inj h
+      injection hd with hresp hst
+      exact ⟨s, .refl _, hresp ▸ hst ▸ hstep⟩
     · rename_i nextStep s₀
       obtain ⟨s₁, hstar, hans⟩ := ih _ h
       exact ⟨s₁, .trans _ _ _ (step_implies_spec s nextStep s₀ hstep) hstar, hans⟩
     · exact absurd (Except.ok.inj h) (by simp)
     · exact absurd h (by simp)
+
+
+
+def fuelRank : AlgorithmStep → Option Format → Nat
+  | .sendQueries, none => 1
+  | .findServers, none => 2
+  | .checkAnswer, none => 3
+  | .analyzeResponse, _ => 4
+  | .sendQueries, some _ => 5
+  | .findServers, some _ => 6
+  | .checkAnswer, some _ => 7
+
+theorem fuelRank_pos (cs : AlgorithmStep) (lr : Option Format) : 1 ≤ fuelRank cs lr := by
+  cases cs <;> cases lr <;> simp [fuelRank]
+
+theorem fuelRank_le_seven (cs : AlgorithmStep) (lr : Option Format) : fuelRank cs lr ≤ 7 := by
+  cases cs <;> cases lr <;> simp [fuelRank]
+
+theorem stepCheckLocal_goto_resp (s : State S C NS RR) (next : AlgorithmStep)
+    (s' : State S C NS RR) (h : stepCheckLocal s = .goto next s') :
+    next = .findServers ∧ s'.lastResponse = s.lastResponse := by
+  unfold stepCheckLocal at h
+  split at h
+  · obtain ⟨h1, h2⟩ := StepResult.goto.inj h; subst h1 h2; exact ⟨rfl, rfl⟩
+  · split at h
+    · obtain ⟨h1, h2⟩ := StepResult.goto.inj h; subst h1 h2; exact ⟨rfl, rfl⟩
+    · split at h
+      · injection h
+      · injection h
+      · split at h <;>
+          (obtain ⟨h1, h2⟩ := StepResult.goto.inj h; subst h1 h2; exact ⟨rfl, rfl⟩)
+      · injection h
+
+theorem stepFindServers_goto_resp (s : State S C NS RR) (next : AlgorithmStep)
+    (s' : State S C NS RR) (h : stepFindServers s = .goto next s') :
+    next = .sendQueries ∧ s'.lastResponse = s.lastResponse := by
+  unfold stepFindServers at h; dsimp only [] at h
+  split at h <;> (try split at h) <;> (try split at h) <;>
+    (obtain ⟨h1, h2⟩ := StepResult.goto.inj h; subst h1 h2; exact ⟨rfl, rfl⟩)
+
+theorem stepSendQueries_goto_resp (s : State S C NS RR) (next : AlgorithmStep)
+    (s' : State S C NS RR) (h : stepSendQueries s = .goto next s') :
+    next = .analyzeResponse ∧ s' = s ∧ ∃ resp, s.lastResponse = some resp := by
+  unfold stepSendQueries at h
+  split at h
+  · rename_i resp hr
+    obtain ⟨h1, h2⟩ := StepResult.goto.inj h; subst h1 h2
+    exact ⟨rfl, rfl, resp, hr⟩
+  · injection h
+
+theorem stepAnalyzeResponse_goto_resp (s : State S C NS RR) (next : AlgorithmStep)
+    (s' : State S C NS RR) (h : stepAnalyzeResponse s = .goto next s') :
+    next ≠ .analyzeResponse ∧ s'.lastResponse = none := by
+  unfold stepAnalyzeResponse at h
+  split at h
+  · injection h
+  · split at h
+    ·
+      simp only [] at h
+      split at h
+      · injection h
+      split at h
+      · injection h
+      obtain ⟨h1, h2⟩ := StepResult.goto.inj h; subst h1 h2
+      exact ⟨nofun, rfl⟩
+    · split at h
+      ·
+        obtain ⟨h1, h2⟩ := StepResult.goto.inj h; subst h1 h2
+        exact ⟨nofun, rfl⟩
+      · split at h
+        · split at h
+          ·
+            dsimp only [] at h
+            obtain ⟨h1, h2⟩ := StepResult.goto.inj h; subst h1 h2
+            exact ⟨nofun, rfl⟩
+          · split at h
+            · injection h
+            ·
+              obtain ⟨h1, h2⟩ := StepResult.goto.inj h; subst h1 h2
+              exact ⟨nofun, rfl⟩
+        · split at h
+          · dsimp only [] at h; injection h
+          · split at h
+            · injection h
+            · split at h
+              · injection h
+              · split at h
+                · injection h
+                · injection h
+
+theorem step_goto_fuelRank (s : State S C NS RR) (next : AlgorithmStep)
+    (s' : State S C NS RR) (h : step s = .goto next s') :
+    fuelRank next s'.lastResponse < fuelRank s.currentStep s.lastResponse := by
+  cases hcs : s.currentStep with
+  | checkAnswer =>
+    rw [step_checkAnswer_dispatch s hcs] at h
+    obtain ⟨h1, h2⟩ := stepCheckLocal_goto_resp s next s' h
+    subst h1; rw [h2]
+    cases s.lastResponse <;> simp [fuelRank]
+  | findServers =>
+    rw [step_findServers_dispatch s hcs] at h
+    obtain ⟨h1, h2⟩ := stepFindServers_goto_resp s next s' h
+    subst h1; rw [h2]
+    cases s.lastResponse <;> simp [fuelRank]
+  | sendQueries =>
+    rw [step_sendQueries_dispatch s hcs] at h
+    obtain ⟨h1, h2, resp, hr⟩ := stepSendQueries_goto_resp s next s' h
+    subst h1 h2; rw [hr]
+    simp [fuelRank]
+  | analyzeResponse =>
+    rw [step_analyzeResponse_dispatch s hcs] at h
+    obtain ⟨h1, h2⟩ := stepAnalyzeResponse_goto_resp s next s' h
+    rw [h2]
+    cases next <;> first | exact absurd rfl h1 | (cases s.lastResponse <;> simp [fuelRank])
+
+theorem step_error_ne_maxIterations (s : State S C NS RR) (msg : String)
+    (h : step s = .error msg) : msg ≠ "resolver: max iterations" := by
+  cases hcs : s.currentStep with
+  | checkAnswer =>
+    rw [step_checkAnswer_dispatch s hcs] at h
+    unfold stepCheckLocal at h
+    split at h
+    · injection h
+    · split at h
+      · injection h
+      · split at h
+        · injection h
+        · injection h
+        · split at h <;> injection h
+        · injection h with hmsg; subst hmsg; decide
+  | findServers =>
+    rw [step_findServers_dispatch s hcs] at h
+    unfold stepFindServers at h; dsimp only [] at h
+    split at h <;> (try split at h) <;> (try split at h) <;> injection h
+  | sendQueries =>
+    rw [step_sendQueries_dispatch s hcs] at h
+    unfold stepSendQueries at h
+    split at h <;> injection h
+  | analyzeResponse =>
+    rw [step_analyzeResponse_dispatch s hcs] at h
+    unfold stepAnalyzeResponse at h
+    split at h
+    · injection h with hmsg; subst hmsg; decide
+    · split at h
+      · simp only [] at h
+        split at h
+        · injection h
+        split at h
+        · injection h with hmsg; subst hmsg; decide
+        injection h
+      · split at h
+        · injection h
+        · split at h
+          · split at h
+            · dsimp only [] at h; injection h
+            · split at h <;> injection h
+          · split at h
+            · dsimp only [] at h; injection h
+            · split at h
+              · injection h
+              · split at h
+                · injection h
+                · split at h
+                  · injection h
+                  · injection h with hmsg; subst hmsg; decide
+
+theorem loop_ne_maxIterations (n : Nat) (s : State S C NS RR)
+    (h : fuelRank s.currentStep s.lastResponse ≤ n) :
+    resolve.loop s n ≠ .error "resolver: max iterations" := by
+  induction n generalizing s with
+  | zero =>
+    intro _
+    have := fuelRank_pos s.currentStep s.lastResponse
+    omega
+  | succ n ih =>
+    unfold resolve.loop
+    split <;> rename_i hstep
+    · nofun
+    · rename_i nextStep s₀
+      exact ih _ (Nat.le_of_lt_succ (Nat.lt_of_lt_of_le
+        (step_goto_fuelRank s nextStep s₀ hstep) h))
+    · nofun
+    · rename_i msg
+      intro hc
+      injection hc with hmsg
+      exact step_error_ne_maxIterations s msg hstep hmsg
+
+theorem resolve_ne_maxIterations (query : Format) (sbelt : S) (fuel : Nat) (now : UInt32)
+    (initCache : C) (hfuel : 3 ≤ fuel) :
+    resolve (NS := NS) (RR := RR) query sbelt fuel now initCache
+      ≠ .error "resolver: max iterations" := by
+  unfold resolve
+  exact loop_ne_maxIterations fuel (initFromQuery query sbelt now initCache)
+    (Nat.le_trans (by simp [initFromQuery, fuelRank]) hfuel)
+
+theorem resume_ne_maxIterations (s : State S C NS RR) (resp : Format) (fuel : Nat)
+    (hfuel : 7 ≤ fuel) :
+    resume s resp fuel ≠ .error "resolver: max iterations" := by
+  unfold resume
+  exact loop_ne_maxIterations fuel _ (Nat.le_trans (fuelRank_le_seven _ _) hfuel)
 
 end VeriDNS.Proof.Resolver

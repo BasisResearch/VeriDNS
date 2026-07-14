@@ -2,14 +2,6 @@ import Batteries
 
 namespace VeriDNS.Impl
 
--- ============================================================
--- DnsParser monad: ReaderT ByteArray over StateT Nat (Except String)
---
--- This formulation returns Except String (α × Nat), putting the
--- state INSIDE the Except. This means DnsParser.run is just
--- function application, making equational lemmas provable by rfl.
--- ============================================================
-
 abbrev DnsParser (α : Type) :=
   ReaderT ByteArray (StateT Nat (Except String)) α
 
@@ -30,10 +22,6 @@ def getBuffer : DnsParser ByteArray :=
 
 def fail {α : Type} (msg : String) : DnsParser α :=
   fun _buf _pos => .error msg
-
--- ============================================================
--- Byte-level read primitives (plain functions, no do notation)
--- ============================================================
 
 def readUInt8 : DnsParser UInt8 :=
   fun buf pos =>
@@ -71,10 +59,6 @@ def readBytes (n : Nat) : DnsParser ByteArray :=
 
 end DnsParser
 
--- ============================================================
--- DnsSerializer monad: StateM over a growing ByteArray
--- ============================================================
-
 abbrev DnsSerializer (α : Type) := StateM ByteArray α
 
 namespace DnsSerializer
@@ -84,10 +68,6 @@ def run {α : Type} (s : DnsSerializer α) : α × ByteArray :=
 
 def runBytes (s : DnsSerializer Unit) : ByteArray :=
   (StateT.run s ByteArray.empty).2
-
--- ============================================================
--- Byte-level write primitives
--- ============================================================
 
 def writeUInt8 (b : UInt8) : DnsSerializer Unit :=
   modify (·.push b)
@@ -111,10 +91,6 @@ def getPos : DnsSerializer Nat := do
 
 end DnsSerializer
 
--- ============================================================
--- BitVec conversion helpers
--- ============================================================
-
 def bv16OfUInt16 (v : UInt16) : BitVec 16 := BitVec.ofNat 16 v.toNat
 def uint16OfBv16 (v : BitVec 16) : UInt16 := v.toNat.toUInt16
 
@@ -123,10 +99,6 @@ def uint32OfBv32 (v : BitVec 32) : UInt32 := v.toNat.toUInt32
 
 def bv8OfUInt8 (v : UInt8) : BitVec 8 := BitVec.ofNat 8 v.toNat
 def uint8OfBv8 (v : BitVec 8) : UInt8 := v.toNat.toUInt8
-
--- Read/write helpers for BitVec fields
--- These work directly with BitVec operations (setWidth) to avoid
--- UInt↔Nat conversions that block bv_decide in proofs.
 
 def readBV16 : DnsParser (BitVec 16) :=
   fun buf pos =>

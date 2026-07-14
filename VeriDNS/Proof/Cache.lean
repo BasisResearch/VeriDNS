@@ -2,44 +2,7 @@ import VeriDNS.Spec.Cache
 import VeriDNS.Impl.Cache
 import VeriDNS.Impl.Resolver
 import VeriDNS.Impl.Server
-
-/-!
-DnsCache conformance to the NLP-generated cache specification.
-
-The generated `CacheSpec` laws (`store_mem`, `storeAt_mem`, `sweep_subset`,
-from the RFC 1034 §5.3.2 CACHE glossary entry) are proven directly in the
-instance (Impl/Cache.lean). Every remaining cache constraint in this file
-INSTANTIATES a generated parameterized Prop — the statements come from the
-RFC text via the generator, not from hand-written formalizations (manually
-stated bridges, marked as helpers, only connect the instantiated predicates
-back to membership facts):
-
-- §5.3.2 "convert the interval specified in arriving RRs to some sort of
-  absolute time when the RR is stored in the cache":
-  `store_absolute_expiry` instantiates the generated
-  `cache_storeAt_absolute`.
-- §5.3.2 "the resolver just ignores or discards old RRs when it runs across
-  them in the course of a search": `lookup_ignores_old` instantiates the
-  generated `cache_search_ignores_old` against `liveEntry` (the exact
-  per-entry test `lookup` filters by); helper `lookup_fresh` adds the
-  membership/remaining-TTL reading.
-- §5.3.2 "discards them during periodic sweeps": `sweep_discards_old`
-  instantiates the generated `cache_sweep_discards_old` against
-  `CacheEntry.fresh` (the exact retention test `sweep` filters by); helper
-  `sweep_removes_expired` is the membership reading.
-- §7.4 "either the data in the response or the cache is preferred, but the
-  two should never be combined" (the all-or-none discipline):
-  `store_never_combined` instantiates the generated
-  `usingthecache_never_combined`; helper `store_replaces` is the
-  underlying membership argument.
-- §7.4 "should not cache a possibly partial set" (truncation):
-  `truncated_not_cached` instantiates the generated
-  `usingthecache_truncated_not_cached`; corollary
-  `truncated_cache_unchanged` is the pointwise equation.
-- §7.4 "unsolicited responses or RR data other than that requested ...
-  discard it without caching it": `accept_discard_unrequested` instantiates
-  the generated `usingthecache_discard_unrequested`.
--/
+import VeriDNS.RFC.Check
 
 namespace VeriDNS.Proof.Cache
 
@@ -47,16 +10,6 @@ open VeriDNS.Spec VeriDNS.Impl VeriDNS.Impl.Cache
 open VeriDNS.Impl.Resolver VeriDNS.Impl.Server
 open VeriDNS.Impl.DomainName (nameEqCI foldNameCase foldCaseByte alphabeticByte)
 
--- ============================================================
--- §5.3.2: absolute-time conversion on store
--- ============================================================
-
-/-- `DnsCache.store` satisfies the generated `cache_storeAt_absolute`
-    ("convert the interval specified in arriving RRs to some sort of
-    absolute time when the RR is stored in the cache"): `interval` is the
-    RR's TTL, `storeAt` is the store, and the post-store predicate holds
-    of the absolute time `now + ttl` — an entry carrying the RR with
-    exactly that absolute expiry is present after the store. -/
 theorem store_absolute_expiry :
     cache_storeAt_absolute DnsCache ResourceRecord
       (fun rr => rr.ttl.toNat.toUInt32)
@@ -67,16 +20,6 @@ theorem store_absolute_expiry :
   unfold DnsCache.store
   exact ⟨_, Array.mem_push.mpr (Or.inr rfl), rfl, rfl⟩
 
--- ============================================================
--- §5.3.2: search ignores expired entries
--- ============================================================
-
-/-- The search path satisfies the generated `cache_search_ignores_old`
-    ("the resolver just ignores or discards old RRs when it runs across
-    them in the course of a search"): `old` is the negation of
-    `CacheEntry.fresh`, and `ignored` is the negation of `liveEntry` — the
-    EXACT per-entry test `DnsCache.lookup` filters by (single source of
-    truth). An old entry never passes the search test. -/
 theorem lookup_ignores_old (name : ByteArray) (qt qc : BitVec 16)
     (now : UInt32) :
     cache_search_ignores_old CacheEntry
@@ -86,9 +29,6 @@ theorem lookup_ignores_old (name : ByteArray) (qt qc : BitVec 16)
   have hf : e.fresh now = false := by simpa using h
   simp [liveEntry, hf]
 
-/-- Helper (membership reading of `lookup_ignores_old`): every RR returned
-    by a lookup comes from an entry that has not expired, and carries the
-    REMAINING ttl (expiry − now), never the original interval. -/
 theorem lookup_fresh (c : DnsCache) (name : ByteArray) (qt qc : BitVec 16)
     (now : UInt32) (rr : ResourceRecord)
     (h : rr ∈ DnsCache.lookup c name qt qc now) :
@@ -104,23 +44,92 @@ theorem lookup_fresh (c : DnsCache) (name : ByteArray) (qt qc : BitVec 16)
     exact hcond.2
   · exact absurd hf (by simp)
 
--- ============================================================
--- §5.3.2: periodic sweeps remove expired entries
--- ============================================================
+theorem mem_lookup (c : DnsCache) (name : ByteArray) (qt qc : BitVec 16) (now : UInt32)
+    (rr : ResourceRecord) :
+    rr ∈ DnsCache.lookup c name qt qc now ↔ ∃ e ∈ c.records, liveEntry e name qt qc now = true
+      ∧ rr = { e.rr with ttl := BitVec.ofNat 32 (e.expiry - now).toNat } := by
+  unfold DnsCache.lookup
+  rw [Array.mem_filterMap]
+  constructor
+  · rintro ⟨e, he, hf⟩
+    split at hf
+    · rename_i hcond; exact ⟨e, he, hcond, (Option.some.inj hf).symm⟩
+    · exact absurd hf (by simp)
+  · rintro ⟨e, he, hlive, hrr⟩
+    exact ⟨e, he, by rw [if_pos hlive, hrr]⟩
 
-/-- The sweep satisfies the generated `cache_sweep_discards_old`
-    ("discards them during periodic sweeps"): `old` is the negation of
-    `CacheEntry.fresh`, which is the EXACT retention test
-    `DnsCache.sweep` filters by (single source of truth) — old data is
-    discarded by the sweep filter. -/
+theorem liveEntry_iff (e : CacheEntry) (name : ByteArray) (qt qc : BitVec 16) (now : UInt32) :
+    liveEntry e name qt qc now = true ↔
+      nameEqCI e.rr.name name = true ∧ e.rr.type = qt ∧ e.rr.class = qc ∧ e.fresh now = true := by
+  unfold liveEntry
+  simp only [Bool.and_eq_true, beq_iff_eq, and_assoc]
+
+theorem mem_storeChecked_pushed (c : DnsCache) (rr : ResourceRecord) (cred : Trustworthiness) (now : UInt32)
+    (hnz : (rr.ttl == 0) = false)
+    (hnb : (c.records.any fun e =>
+        nameEqCI e.rr.name rr.name && e.rr.type == rr.type && e.rr.class == rr.class
+          && (e.expiry > now || e.expiry == now + rr.ttl.toNat.toUInt32)
+          && e.credibility.toCode < cred.toCode) = false) :
+    ∃ e ∈ (c.storeChecked rr cred now).records,
+      e.rr = rr ∧ e.expiry = now + rr.ttl.toNat.toUInt32 ∧ e.credibility = cred := by
+  unfold DnsCache.storeChecked
+  simp only [hnz, hnb, Bool.false_eq_true, if_false]
+  unfold DnsCache.store
+  exact ⟨⟨rr, now + rr.ttl.toNat.toUInt32, false, cred, now⟩, Array.mem_push.mpr (Or.inr rfl), rfl, rfl, rfl⟩
+
+theorem lookupTopCred_ne_of_mem (c : DnsCache) (name : ByteArray) (qtype qclass : BitVec 16) (now : UInt32)
+    (e : CacheEntry) (he : e ∈ c.records)
+    (hlive : liveEntry e name qtype qclass now = true)
+    (hrank : c.maxRankForKey e now = true) :
+    (c.lookupTopCred name qtype qclass now).isEmpty = false := by
+  rw [Array.isEmpty_eq_false_iff_exists_mem]
+  refine ⟨{ e.rr with ttl := BitVec.ofNat 32 (e.expiry - now).toNat }, ?_⟩
+  rw [DnsCache.lookupTopCred, Array.mem_filterMap]
+  exact ⟨e, he, by rw [hlive, hrank]; rfl⟩
+
+theorem mem_store_preserve (c : DnsCache) (rr : ResourceRecord) (now : UInt32) (cred : Trustworthiness)
+    (e : CacheEntry) (he : e ∈ c.records)
+    (hkeep : (nameEqCI e.rr.name rr.name && e.rr.type == rr.type && e.rr.class == rr.class
+        && (e.expiry != now + rr.ttl.toNat.toUInt32 || e.rr.rdata == rr.rdata)) = false) :
+    e ∈ (c.store rr now cred).records := by
+  unfold DnsCache.store
+  refine Array.mem_push.mpr (Or.inl ?_)
+  rw [Array.mem_filter]
+  exact ⟨he, by rw [hkeep]; rfl⟩
+
+theorem mem_storeChecked_preserve (c : DnsCache) (rr : ResourceRecord) (cred : Trustworthiness) (now : UInt32)
+    (e : CacheEntry) (he : e ∈ c.records)
+    (hkeep : (nameEqCI e.rr.name rr.name && e.rr.type == rr.type && e.rr.class == rr.class
+        && (e.expiry != now + rr.ttl.toNat.toUInt32 || e.rr.rdata == rr.rdata)) = false) :
+    e ∈ (c.storeChecked rr cred now).records := by
+  simp only [DnsCache.storeChecked]
+  split
+  · exact he
+  · split
+    · exact he
+    · exact mem_store_preserve c rr now cred e he hkeep
+
+theorem mem_cacheRRs_preserve (c : DnsCache) (raws : Array ByteArray) (cred : Trustworthiness) (now : UInt32)
+    (e : CacheEntry) (he : e ∈ c.records)
+    (hnc : ∀ b ∈ raws, ∀ rr, VeriDNS.Spec.RRParse.parseRaw (RR := ResourceRecord) b = some rr →
+        (nameEqCI e.rr.name rr.name && e.rr.type == rr.type && e.rr.class == rr.class
+          && (e.expiry != now + rr.ttl.toNat.toUInt32 || e.rr.rdata == rr.rdata)) = false) :
+    e ∈ (Resolver.cacheRRs (C := DnsCache) (RR := ResourceRecord) c raws cred now).records := by
+  unfold Resolver.cacheRRs
+  refine Array.foldl_induction (motive := fun _ (acc : DnsCache) => e ∈ acc.records) he ?_
+  intro i acc ih
+  cases hp : VeriDNS.Spec.RRParse.parseRaw (RR := ResourceRecord) raws[i] with
+  | none => simp only [hp]; exact ih
+  | some rr =>
+    simp only [hp]
+    exact mem_storeChecked_preserve acc rr cred now e ih (hnc raws[i] (Array.getElem_mem i.isLt) rr hp)
+
 theorem sweep_discards_old (now : UInt32) :
     cache_sweep_discards_old CacheEntry
       (fun e => !(e.fresh now))
       (fun e => !(e.fresh now)) :=
   fun _ h => h
 
-/-- Helper (membership reading of `sweep_discards_old`): after a sweep at
-    time `now`, no expired entry remains. -/
 theorem sweep_removes_expired (c : DnsCache) (now : UInt32) :
     ∀ e ∈ (DnsCache.sweep c now).records, e.expiry > now := by
   intro e he
@@ -128,14 +137,6 @@ theorem sweep_removes_expired (c : DnsCache) (now : UInt32) :
   have := (Array.mem_filter.mp he).2
   simpa [CacheEntry.fresh] using this
 
--- ============================================================
--- §7.4: all-or-none — the response and the cache are never combined
--- ============================================================
-
-/-- Helper (membership argument for `store_never_combined`): after storing
-    an RR, every same-key entry belongs to the new record's batch (same
-    expiry — its RRset siblings, RFC 2181 §5.2) or is the new record
-    itself — a stale set is never merged with the new one. -/
 theorem store_replaces (c : DnsCache) (rr : ResourceRecord) (now : UInt32) :
     ∀ e ∈ (DnsCache.store c rr now).records,
       (nameEqCI e.rr.name rr.name && e.rr.type == rr.type
@@ -154,13 +155,6 @@ theorem store_replaces (c : DnsCache) (rr : ResourceRecord) (now : UInt32) :
     simp at hkeep
   · left; rw [hnew]
 
-/-- Storing satisfies the generated `usingthecache_never_combined`
-    ("either the data in the response or the cache is preferred, but the
-    two should never be combined"): the entries `preferred` for the
-    stored RR's key are drawn wholly from the `response` side (the new
-    record and its same-expiry batch siblings) — proven via the left
-    disjunct; old same-key data from the `cache` side never survives
-    alongside them (`store_replaces`). -/
 theorem store_never_combined (c : DnsCache) (rr : ResourceRecord) (now : UInt32) :
     usingthecache_never_combined CacheEntry
       (fun e => e.rr = rr ∨ e.expiry = now + rr.ttl.toNat.toUInt32)
@@ -170,41 +164,51 @@ theorem store_never_combined (c : DnsCache) (rr : ResourceRecord) (now : UInt32)
           && e.rr.class == rr.class) = true) :=
   Or.inl fun e h => store_replaces c rr now e h.1 h.2
 
--- ============================================================
--- Cache bounds: expiry-class eviction at IO-round boundaries
--- ============================================================
-
-/-- The positive section is within `capacity` after the round-boundary
-    bound: `boundExpiryClasses` evicts whole expiry classes (oldest
-    inserted first) until the section fits. `store` itself no longer
-    evicts — a mid-batch eviction could strand part of an RRset, breaking
-    the wholeness invariant (`LookupComplete`,
-    Proof/NameTreeComplete.lean); `ioResumeLoop` and `serveOne` apply the
-    bound between IO rounds instead. -/
 theorem boundExpiryClasses_bounded (c : DnsCache) :
     (c.boundExpiryClasses).records.size ≤ DnsCache.capacity := by
   unfold DnsCache.boundExpiryClasses
   exact size_evictClasses_le _ _ (Nat.le_refl _)
 
-/-- The negative section never exceeds `capacity`. -/
+theorem evictClasses_noop (a : Array CacheEntry) (n : Nat) (h : a.size ≤ DnsCache.capacity) :
+    evictClasses a n = a := by
+  cases n with
+  | zero => rfl
+  | succ m => unfold evictClasses; rw [if_pos h]
+
+theorem boundExpiryClasses_noop (c : DnsCache) (h : c.records.size ≤ DnsCache.capacity) :
+    c.boundExpiryClasses = c := by
+  unfold DnsCache.boundExpiryClasses
+  rw [evictClasses_noop _ _ h]
+
+theorem boundLruKeys_bounded (c : DnsCache) :
+    (c.boundLruKeys).records.size ≤ DnsCache.capacity := by
+  unfold DnsCache.boundLruKeys
+  exact size_evictLruKeys_le _ _ (Nat.le_refl _)
+
+theorem evictLruKeys_noop (a : Array CacheEntry) (n : Nat) (h : a.size ≤ DnsCache.capacity) :
+    evictLruKeys a n = a := by
+  cases n with
+  | zero => rfl
+  | succ m => unfold evictLruKeys; rw [if_pos h]
+
+theorem boundLruKeys_noop (c : DnsCache) (h : c.records.size ≤ DnsCache.capacity) :
+    c.boundLruKeys = c := by
+  unfold DnsCache.boundLruKeys
+  rw [evictLruKeys_noop _ _ h]
+
+theorem boundLru_bounded (c : DnsCache) (ks : Array RRKey) (tnow : UInt32) :
+    (c.boundLru ks tnow).records.size ≤ DnsCache.capacity :=
+  boundLruKeys_bounded _
+
 theorem storeNegative_bounded (c : DnsCache) (name : ByteArray)
     (qt qc : BitVec 16) (rc : Rcode) (soa : Option ResourceRecord)
-    (expiry : UInt32) :
-    (DnsCache.storeNegative c name qt qc rc soa expiry).negatives.size
+    (expiry now : UInt32) :
+    (DnsCache.storeNegative c name qt qc rc soa expiry now).negatives.size
       ≤ DnsCache.capacity := by
   unfold DnsCache.storeNegative
   rw [Array.size_push]
-  exact Nat.succ_le_of_lt (size_boundFifo_lt _)
+  exact Nat.succ_le_of_lt (size_boundLruNegatives_lt _)
 
--- ============================================================
--- §7.4: truncated responses are not cached
--- ============================================================
-
-/-- The caching gate satisfies the generated
-    `usingthecache_truncated_not_cached` ("When a response is truncated,
-    ... it should not cache a possibly partial set of RRs"): `truncated`
-    reads the TC bit, and the `cache` action is `cacheUnlessTruncated` —
-    a no-op on truncated data (at any credibility rank). -/
 theorem truncated_not_cached {C RR : Type} [TrustworthinessSpec C RR]
     [RRParse RR] :
     usingthecache_truncated_not_cached C
@@ -218,23 +222,12 @@ theorem truncated_not_cached {C RR : Type} [TrustworthinessSpec C RR]
   unfold cacheUnlessTruncated
   rw [if_pos h]
 
-/-- Corollary (pointwise equation): a truncated response contributes
-    nothing to the cache. -/
 theorem truncated_cache_unchanged {C RR : Type} [TrustworthinessSpec C RR]
     [RRParse RR] (cache : C) (resp : Format) (raws : Array ByteArray)
     (cred : Trustworthiness) (now : UInt32) (h : resp.header.tc = 1) :
     cacheUnlessTruncated (RR := RR) cache resp raws cred now = cache :=
   truncated_not_cached cache (resp, raws, cred, now) (by simp [h])
 
--- ============================================================
--- §7.4: unsolicited / unrequested data is discarded before caching
--- ============================================================
-
-/-- The response-acceptance gate satisfies the generated
-    `usingthecache_discard_unrequested`: data that does not echo our query
-    (`requested := acceptResponse matches`) never passes the gate
-    (`cached := the gate yields a response`), hence never reaches `resume`
-    and the cache. -/
 theorem accept_discard_unrequested (sent : Format) :
     usingthecache_discard_unrequested Format
       (fun resp => (resp.header.id == sent.header.id
@@ -248,11 +241,6 @@ theorem accept_discard_unrequested (sent : Format) :
   rw [hreq']
   rfl
 
--- ============================================================
--- RFC 2308: negative caching conformance
--- (generated specs in Spec/NegativeCache.lean)
--- ============================================================
-
 private theorem rcode_eq_of_beq {a b : Rcode} (h : (a == b) = true) : a = b := by
   cases a <;> cases b <;> first | rfl | exact absurd h (by decide)
 
@@ -260,15 +248,10 @@ private theorem size_eq_zero_of_isEmpty {α : Type} {a : Array α}
     (h : a.isEmpty = true) : a.size = 0 := by
   simp at h; simp [h]
 
-/-- `computeNegativeTtl` satisfies the generated negative-TTL law
-    ("the minimum of the MINIMUM field of the SOA record and the TTL of the
-    SOA itself"). -/
 theorem computeNegativeTtl_conform :
     negativeanswersfromauthoritativeservers_negative_ttl computeNegativeTtl :=
   fun _ _ => rfl
 
-/-- The implementation's NODATA cacheability test agrees with the generated
-    `nodata_indicated` (NOERROR + empty answer) on untruncated responses. -/
 theorem negativelyCacheable_nodata (resp : Format)
     (htc : resp.header.tc = 0)
     (hne : resp.header.rcode ≠ Rcode.nameError)
@@ -287,9 +270,6 @@ private theorem orElse_eq_some {α : Type} {a b : Option α} {x : α}
   | some y => left; simpa using h
   | none => right; exact ⟨rfl, by simpa using h⟩
 
-/-- Negative lookups never return expired entries (the §5.3.2 freshness
-    discipline applies to the negative cache as well) — through both the
-    NXDOMAIN scan and the per-type scan. -/
 theorem lookupNegative_fresh (c : DnsCache) (name : ByteArray) (qt qc : BitVec 16)
     (now : UInt32) (rc : Rcode)
     (h : DnsCache.lookupNegative c name qt qc now = some rc) :
@@ -312,18 +292,11 @@ theorem lookupNegative_fresh (c : DnsCache) (name : ByteArray) (qt qc : BitVec 1
       exact ⟨Option.some.inj hf, hcond.2⟩
     · exact absurd hf (by simp)
 
-/-- `DnsCache.lookupNxdomain` satisfies the generated
-    `cachingnegativeanswers_nameError_retrieval` (NXDOMAIN retrieval is
-    keyed by <QNAME, QCLASS> only): it takes no qtype at all, so the
-    qtype-invariance is definitional. -/
 theorem nxdomain_retrieval_conform :
     cachingnegativeanswers_nameError_retrieval (DnsCache × UInt32) (Option Rcode)
       (fun p qname _qtype qclass => DnsCache.lookupNxdomain p.1 qname qclass p.2) :=
   fun _ _ _ _ _ => rfl
 
-/-- The resolver's negative lookup surfaces a fresh NXDOMAIN entry for
-    EVERY query type (the bridge from the invariant retrieval to
-    `lookupNegative`, which `stepCheckLocal` consults). -/
 theorem lookupNegative_nxdomain_any_qtype (c : DnsCache) (name : ByteArray)
     (qt qc : BitVec 16) (now : UInt32) (rc : Rcode)
     (h : DnsCache.lookupNxdomain c name qc now = some rc) :
@@ -332,13 +305,6 @@ theorem lookupNegative_nxdomain_any_qtype (c : DnsCache) (name : ByteArray)
   rw [h]
   rfl
 
-/-- `NegativeEntry.authority` instantiates the generated §6 obligation
-    `obligation_addCachedSoaRecordToAuthoritySection` ("MUST add the cached
-    SOA record to the authority section of the response with the TTL
-    decremented by the amount of time it was stored in the cache"): for any
-    cached negative entry holding a SOA, the SOA with its TTL decremented
-    to the remaining lifetime (`expiry − now`) is a member of the authority
-    section the entry serves. -/
 theorem negative_soa_in_authority :
     obligation_addCachedSoaRecordToAuthoritySection
       (NegativeEntry × UInt32) ResourceRecord
@@ -353,8 +319,6 @@ theorem negative_soa_in_authority :
   rw [hsoa]
   exact Array.mem_singleton.mpr rfl
 
-/-- The negative-cache lookup serves exactly that authority section: a
-    fresh entry found for the key yields its `NegativeEntry.authority`. -/
 theorem lookupNegativeSoa_serves_authority (c : DnsCache) (name : ByteArray)
     (qt qc : BitVec 16) (now : UInt32) (e : NegativeEntry)
     (h : DnsCache.findNegative c name qt qc now = some e) :
@@ -362,17 +326,6 @@ theorem lookupNegativeSoa_serves_authority (c : DnsCache) (name : ByteArray)
   unfold DnsCache.lookupNegativeSoa
   rw [h]
 
--- ============================================================
--- RFC 2181 §5.4.1: credibility ranking conformance
--- ============================================================
-
-/-- The answer-grade lookup never surfaces an entry at the untrustworthy
-    floor: this instantiates the generated
-    `obligation_untrustworthyNotAnswerable` (state = a (cache, key, time, rr)
-    that `lookupAnswerable` returns; `credibility` = its entry's tier;
-    `returnedAsAnswer` = membership in the answerable result). The key
-    poisoning fix: glue, cached at the floor rank, can never be served as
-    an answer. -/
 theorem lookupAnswerable_excludes_floor
     (c : DnsCache) (name : ByteArray) (qt qc : BitVec 16) (now : UInt32)
     (rr : ResourceRecord) (h : rr ∈ DnsCache.lookupAnswerable c name qt qc now) :
@@ -381,17 +334,13 @@ theorem lookupAnswerable_excludes_floor
   obtain ⟨e, he, hf⟩ := Array.mem_filterMap.mp h
   split at hf
   · rename_i hcond
-    unfold answerableEntry at hcond
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at hcond
-    exact ⟨e, he, hcond.2⟩
+    rw [Bool.and_eq_true] at hcond
+    obtain ⟨hans, _⟩ := hcond
+    unfold answerableEntry at hans
+    rw [Bool.and_eq_true, decide_eq_true_eq] at hans
+    exact ⟨e, he, hans.2⟩
   · exact absurd hf (by simp)
 
-/-- The cache's answer path satisfies the generated
-    `obligation_untrustworthyNotAnswerable`. State σ = a cache entry with a
-    lookup key+time; `credibility` reads the entry's tier;
-    `returnedAsAnswer` is `answerableEntry` — the EXACT per-entry test
-    `lookupAnswerable` filters by (single source of truth). A floor-rank
-    entry never passes — RFC 2181 §5.4.1's "never be returned as answers". -/
 theorem cache_untrustworthyNotAnswerable :
     obligation_untrustworthyNotAnswerable
       (CacheEntry × ByteArray × BitVec 16 × BitVec 16 × UInt32)
@@ -407,9 +356,6 @@ theorem cache_untrustworthyNotAnswerable :
     omega
   rw [hfloor, Bool.and_false]
 
-/-- `lookupAnswerable` is a credibility-restriction of `lookup`: every RR it
-    returns is also returned by the unfiltered lookup (so the answer path
-    never invents data). -/
 theorem lookupAnswerable_subset
     (c : DnsCache) (name : ByteArray) (qt qc : BitVec 16) (now : UInt32)
     (rr : ResourceRecord) (h : rr ∈ DnsCache.lookupAnswerable c name qt qc now) :
@@ -421,18 +367,14 @@ theorem lookupAnswerable_subset
   refine ⟨e, he, ?_⟩
   split at hf
   · rename_i hcond
-    unfold answerableEntry at hcond
     rw [Bool.and_eq_true] at hcond
-    rw [if_pos hcond.1]
+    obtain ⟨hans, _⟩ := hcond
+    unfold answerableEntry at hans
+    rw [Bool.and_eq_true] at hans
+    rw [if_pos hans.1]
     exact hf
   · exact absurd hf (by simp)
 
-/-- RFC 2181 §5.4.1 no-downgrade: `storeChecked` at credibility `cred` never
-    evicts a fresh same-key entry the incoming data is NOT at least as
-    trustworthy as (stated with the generated
-    `Trustworthiness.atLeastAsTrustworthy` ranking relation) — that entry
-    survives the store. "Data from a reply will be ignored if the cache
-    contains data from a [more trustworthy] source." -/
 theorem storeChecked_no_downgrade
     (c : DnsCache) (rr : ResourceRecord) (cred : Trustworthiness) (now : UInt32)
     (e : CacheEntry) (he : e ∈ c.records)
@@ -444,7 +386,7 @@ theorem storeChecked_no_downgrade
   have hbetter : e.credibility.toCode < cred.toCode := Nat.lt_of_not_le hbetter
   unfold DnsCache.storeChecked
   split
-  · -- RFC 1035 §3.2.1 zero-TTL skip: the cache is untouched
+  ·
     exact he
   rw [if_pos]
   · exact he
@@ -456,23 +398,14 @@ theorem storeChecked_no_downgrade
     rw [Bool.and_eq_true, Bool.and_eq_true] at hkey
     exact ⟨⟨⟨⟨hkey.1.1, hkey.1.2⟩, hkey.2⟩, Or.inl hfresh⟩, hbetter⟩
 
--- ============================================================
--- RFC 1035 §3.1: end-to-end case-insensitivity of the cache
--- ============================================================
-
-/-- The answer-path lookup is invariant under the case of the queried
-    name: `EXAMPLE.com` hits the entry stored for `example.com`. End-to-end
-    consequence of routing every name comparison through `nameEqCI`
-    (which satisfies the generated `namespace_compare_caseinsensitive`). -/
 theorem lookupAnswerable_caseInsensitive (c : DnsCache) (n1 n2 : ByteArray)
     (qt qc : BitVec 16) (now : UInt32)
     (h : foldNameCase n1 = foldNameCase n2) :
     DnsCache.lookupAnswerable c n1 qt qc now
       = DnsCache.lookupAnswerable c n2 qt qc now := by
-  unfold DnsCache.lookupAnswerable answerableEntry liveEntry nameEqCI
+  unfold DnsCache.lookupAnswerable DnsCache.maxCredForKey answerableEntry liveEntry nameEqCI
   rw [h]
 
-/-- The internal lookup is likewise case-invariant in the queried name. -/
 theorem lookup_caseInsensitive (c : DnsCache) (n1 n2 : ByteArray)
     (qt qc : BitVec 16) (now : UInt32)
     (h : foldNameCase n1 = foldNameCase n2) :
@@ -480,8 +413,6 @@ theorem lookup_caseInsensitive (c : DnsCache) (n1 n2 : ByteArray)
   unfold DnsCache.lookup liveEntry nameEqCI
   rw [h]
 
-/-- Negative-cache retrieval is case-invariant in the queried name
-    (both the NXDOMAIN and the per-type NODATA scan). -/
 theorem lookupNegative_caseInsensitive (c : DnsCache) (n1 n2 : ByteArray)
     (qt qc : BitVec 16) (now : UInt32)
     (h : foldNameCase n1 = foldNameCase n2) :
@@ -491,3 +422,9 @@ theorem lookupNegative_caseInsensitive (c : DnsCache) (n1 n2 : ByteArray)
   rw [h]
 
 end VeriDNS.Proof.Cache
+
+rfc_proves VeriDNS.Proof.Cache.truncated_cache_unchanged [1035][2585:2587]
+rfc_proves VeriDNS.Proof.Cache.accept_discard_unrequested [1035][2601:2605]
+rfc_proves VeriDNS.Proof.Cache.store_never_combined [1035][2607:2611]
+
+rfc_proves VeriDNS.Proof.Cache.store_never_combined [2181][313:342]

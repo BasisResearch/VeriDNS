@@ -1,6 +1,7 @@
-import VeriDNS.RFC.Macro
-
-namespace VeriDNS.Spec.RData.Cname
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
+import VeriDNS.RFC.Check
 include_rfc [1035][729:743] {
 3.3.1. CNAME RDATA format
 
@@ -17,11 +18,7 @@ CNAME           A <domain-name> which specifies the canonical or primary
 CNAME RRs cause no additional section processing, but name servers may
 choose to restart the query at the canonical name in certain cases.  See
 the description of name server logic in [RFC-1034] for details.
-}
-end VeriDNS.Spec.RData.Cname
-
-namespace VeriDNS.Spec.RData.Hinfo
-include_rfc [1035][745:764] {
+}include_rfc [1035][745:764] {
 3.3.2. HINFO RDATA format
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -42,11 +39,7 @@ Standard values for CPU and OS can be found in [RFC-1010].
 HINFO records are used to acquire general information about a host.  The
 main use is for protocols such as FTP that can use special procedures
 when talking between machines or operating systems of the same type.
-}
-end VeriDNS.Spec.RData.Hinfo
-
-namespace VeriDNS.Spec.RData.Mb
-include_rfc [1035][766:786] {
+}include_rfc [1035][766:786] {
 3.3.3. MB RDATA format (EXPERIMENTAL)
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -60,11 +53,7 @@ MADNAME         A <domain-name> which specifies a host which has the
                 specified mailbox.
 MB records cause additional section processing which looks up an A type
 RRs corresponding to MADNAME.
-}
-end VeriDNS.Spec.RData.Mb
-
-namespace VeriDNS.Spec.RData.Md
-include_rfc [1035][788:807] {
+}include_rfc [1035][788:807] {
 3.3.4. MD RDATA format (Obsolete)
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -85,11 +74,7 @@ MD is obsolete.  See the definition of MX and [RFC-974] for details of
 the new scheme.  The recommended policy for dealing with MD RRs found in
 a master file is to reject them, or to convert them to MX RRs with a
 preference of 0.
-}
-end VeriDNS.Spec.RData.Md
-
-namespace VeriDNS.Spec.RData.Mf
-include_rfc [1035][809:828] {
+}include_rfc [1035][809:828] {
 3.3.5. MF RDATA format (Obsolete)
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -110,11 +95,7 @@ MF is obsolete.  See the definition of MX and [RFC-974] for details ofw
 the new scheme.  The recommended policy for dealing with MD RRs found in
 a master file is to reject them, or to convert them to MX RRs with a
 preference of 10.
-}
-end VeriDNS.Spec.RData.Mf
-
-namespace VeriDNS.Spec.RData.Mg
-include_rfc [1035][841:853] {
+}include_rfc [1035][841:853] {
 3.3.6. MG RDATA format (EXPERIMENTAL)
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -128,11 +109,7 @@ MGMNAME         A <domain-name> which specifies a mailbox which is a
                 member of the mail group specified by the domain name.
 
 MG records cause no additional section processing.
-}
-end VeriDNS.Spec.RData.Mg
-
-namespace VeriDNS.Spec.RData.Minfo
-include_rfc [1035][855:883] {
+}include_rfc [1035][855:883] {
 3.3.7. MINFO RDATA format (EXPERIMENTAL)
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -162,11 +139,7 @@ EMAILBX         A <domain-name> which specifies a mailbox which is to
 MINFO records cause no additional section processing.  Although these
 records can be associated with a simple mailbox, they are usually used
 with a mailing list.
-}
-end VeriDNS.Spec.RData.Minfo
-
-namespace VeriDNS.Spec.RData.Mr
-include_rfc [1035][897:911] {
+}include_rfc [1035][897:911] {
 3.3.8. MR RDATA format (EXPERIMENTAL)
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -182,11 +155,7 @@ NEWNAME         A <domain-name> which specifies a mailbox which is the
 MR records cause no additional section processing.  The main use for MR
 is as a forwarding entry for a user who has moved to a different
 mailbox.
-}
-end VeriDNS.Spec.RData.Mr
-
-namespace VeriDNS.Spec.RData.Mx
-include_rfc [1035][913:933] {
+}include_rfc [1035][913:933] {
 3.3.9. MX RDATA format
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -208,11 +177,7 @@ EXCHANGE        A <domain-name> which specifies a host willing to act as
 MX records cause type A additional section processing for the host
 specified by EXCHANGE.  The use of MX RRs is explained in detail in
 [RFC-974].
-}
-end VeriDNS.Spec.RData.Mx
-
-namespace VeriDNS.Spec.RData.Null
-include_rfc [1035][935:955] {
+}include_rfc [1035][935:955] {
 3.3.10. NULL RDATA format (EXPERIMENTAL)
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -225,11 +190,7 @@ or less.
 NULL records cause no additional section processing.  NULL RRs are not
 allowed in master files.  NULLs are used as placeholders in some
 experimental extensions of the DNS.
-}
-end VeriDNS.Spec.RData.Null
-
-namespace VeriDNS.Spec.RData.Ns
-include_rfc [1035][957:978] {
+}include_rfc [1035][957:978] {
 3.3.11. NS RDATA format
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -252,11 +213,7 @@ not indicate the protocol family which should be used to communicate
 with the host, although it is typically a strong hint.  For example,
 hosts which are name servers for either Internet (IN) or Hesiod (HS)
 class information are normally queried using IN class protocols.
-}
-end VeriDNS.Spec.RData.Ns
-
-namespace VeriDNS.Spec.RData.Ptr
-include_rfc [1035][980:995] {
+}include_rfc [1035][980:995] {
 3.3.12. PTR RDATA format
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -273,11 +230,7 @@ in special domains to point to some other location in the domain space.
 These records are simple data, and don't imply any special processing
 similar to that performed by CNAME, which identifies aliases.  See the
 description of the IN-ADDR.ARPA domain for an example.
-}
-end VeriDNS.Spec.RData.Ptr
-
-namespace VeriDNS.Spec.RData.Soa
-include_rfc [1035][1009:1081] {
+}include_rfc [1035][1009:1081] {
 3.3.13. SOA RDATA format
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -341,11 +294,7 @@ MINIMUM should occur when the RRs are copied into the response and not
 when the zone is loaded from a master file or via a zone transfer.  The
 reason for this provison is to allow future dynamic update facilities to
 change the SOA RR with known semantics.
-}
-end VeriDNS.Spec.RData.Soa
-
-namespace VeriDNS.Spec.RData.Txt
-include_rfc [1035][1084:1095] {
+}include_rfc [1035][1084:1095] {
 3.3.14. TXT RDATA format
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -358,11 +307,7 @@ TXT-DATA        One or more <character-string>s.
 
 TXT RRs are used to hold descriptive text.  The semantics of the text
 depends on the domain where it is found.
-}
-end VeriDNS.Spec.RData.Txt
-
-namespace VeriDNS.Spec.RData.A
-include_rfc [1035][1099:1124] {
+}include_rfc [1035][1099:1124] {
 3.4.1. A RDATA format
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -379,11 +324,7 @@ A records cause no additional section processing.  The RDATA section of
 an A line in a master file is an Internet address expressed as four
 decimal numbers separated by dots without any imbedded spaces (e.g.,
 "10.2.0.52" or "192.0.5.6").
-}
-end VeriDNS.Spec.RData.A
-
-namespace VeriDNS.Spec.RData.Wks
-include_rfc [1035][1126:1167] {
+}include_rfc [1035][1126:1167] {
 3.4.2. WKS RDATA format
 
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -427,4 +368,97 @@ WKS RRs cause no additional section processing.
 In master files, both ports and protocols are expressed using mnemonics
 or decimal numbers.
 }
-end VeriDNS.Spec.RData.Wks
+@[blueprint "RData.Mx.MxRdata"]
+structure VeriDNS.Spec.RData.Mx.MxRdata  where
+  preference : BitVec 16
+  exchange : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Ptr.PtrRdata"]
+structure VeriDNS.Spec.RData.Ptr.PtrRdata  where
+  ptrdname : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Mg.MgRdata"]
+structure VeriDNS.Spec.RData.Mg.MgRdata  where
+  mgmname : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Ns.NsRdata"]
+structure VeriDNS.Spec.RData.Ns.NsRdata  where
+  nsdname : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Mb.MbRdata"]
+structure VeriDNS.Spec.RData.Mb.MbRdata  where
+  madname : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Cname.CnameRdata"]
+structure VeriDNS.Spec.RData.Cname.CnameRdata  where
+  cname : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Soa.SoaRdata"]
+structure VeriDNS.Spec.RData.Soa.SoaRdata  where
+  mname : ByteArray
+  rname : ByteArray
+  serial : BitVec 32
+  refresh : BitVec 32
+  retry : BitVec 32
+  expire : BitVec 32
+  minimum : BitVec 32
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Wks.WksRdata"]
+structure VeriDNS.Spec.RData.Wks.WksRdata  where
+  address : BitVec 32
+  protocol : BitVec 8
+  «<bit map>» : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Mf.MfRdata"]
+structure VeriDNS.Spec.RData.Mf.MfRdata  where
+  madname : ByteArray
+  deriving BEq, Inhabited
+
+def VeriDNS.Spec.RData.Wks.wksrdata_example_0 : Prop :=
+  ∀ (w : VeriDNS.Spec.RData.Wks.WksRdata) (getBit : ByteArray → Nat → Bool),
+  w.protocol = 6 → getBit w.«<bit map>» 25 = Bool.true
+
+@[blueprint "RData.Hinfo.HinfoRdata"]
+structure VeriDNS.Spec.RData.Hinfo.HinfoRdata  where
+  cpu : ByteArray
+  os : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Mr.MrRdata"]
+structure VeriDNS.Spec.RData.Mr.MrRdata  where
+  newname : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Minfo.MinfoRdata"]
+structure VeriDNS.Spec.RData.Minfo.MinfoRdata  where
+  rmailbx : ByteArray
+  emailbx : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Txt.TxtRdata"]
+structure VeriDNS.Spec.RData.Txt.TxtRdata  where
+  «txt-data» : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Null.NullRdata"]
+structure VeriDNS.Spec.RData.Null.NullRdata  where
+  «<anything>» : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.Md.MdRdata"]
+structure VeriDNS.Spec.RData.Md.MdRdata  where
+  madname : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "RData.A.ARdata"]
+structure VeriDNS.Spec.RData.A.ARdata  where
+  address : BitVec 32
+  deriving Repr, BEq, Inhabited

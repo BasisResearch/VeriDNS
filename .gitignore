@@ -16,7 +16,15 @@ _out/
 .mcp.json
 prompt.md
 
+# python + backups + scratch
+__pycache__/
+*.pyc
+.rfc-notes-backup/
+scratch_*.lean
+temp.lean
+
 # editor droppings
 \#*\#
 .\#*
 *~
+test/.venv/

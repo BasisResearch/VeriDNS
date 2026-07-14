@@ -1,11 +1,8 @@
-import VeriDNS.RFC.Macro
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
 import VeriDNS.Spec.Header
-
-namespace VeriDNS.Spec
-
--- RFC 1035 section 4.2.1: UDP usage
--- Prose-only section: generates structure UdpUsage { data : ByteArray }
--- with size constraint (≤ 512 bytes) and port constant (53).
+import VeriDNS.RFC.Check
 include_rfc [1035][1752:1779] {
 4.2.1. UDP usage
 
@@ -35,12 +32,7 @@ Internet and the needs of the client, but the following are recommended:
 
 More suggestions on server selection and retransmission policy can be
 found in the resolver section of this memo.
-}
-
--- RFC 1035 section 4.2.2: TCP usage
--- Prose-only section: generates structure TcpUsage { lengthField : BitVec 16, data : ByteArray }
--- with length field validity prop and port constant (53).
-include_rfc [1035][1781:1816] {
+}include_rfc [1035][1781:1816] {
 4.2.2. TCP usage
 
 Messages sent over TCP connections use server port 53 (decimal).  The
@@ -70,5 +62,31 @@ Several connection management policies are recommended:
      unilateral close or reset may be used instead of a graceful
      close.
 }
+def VeriDNS.Spec.tcpusage_limit_0 : Nat :=
+  53
 
-end VeriDNS.Spec
+@[blueprint "UdpUsage"]
+structure VeriDNS.Spec.UdpUsage  where
+  data : ByteArray
+  deriving BEq, Inhabited
+
+def VeriDNS.Spec.udpusage_prop_1 : VeriDNS.Spec.UdpUsage → VeriDNS.Spec.Header → Prop :=
+  fun msg ext => msg.data.size > 512 → ext.tc = 1
+
+def VeriDNS.Spec.udpusage_limit_0 : Nat :=
+  53
+
+def VeriDNS.Spec.udpusage_limit_1 : Nat :=
+  512
+
+def VeriDNS.Spec.udpusage_prop_0 : VeriDNS.Spec.UdpUsage → Prop :=
+  fun msg => msg.data.size ≤ 512
+
+@[blueprint "TcpUsage"]
+structure VeriDNS.Spec.TcpUsage  where
+  lengthfield : BitVec 16
+  data : ByteArray
+  deriving BEq, Inhabited
+
+def VeriDNS.Spec.tcpusage_prop_0 : VeriDNS.Spec.TcpUsage → Prop :=
+  fun msg => msg.lengthfield.toNat = msg.data.size
