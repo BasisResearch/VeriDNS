@@ -1,0 +1,27 @@
+; Fake ROOT zone "." for the VeriDNS differential-testing rig.
+; Served authoritatively by nsd in the `auth` namespace.
+; The NS names use the REAL root-server names/IPs because veri-dns has the
+; real root-server IPs (198.41.0.4, ...) hardcoded in VeriDNS/Main.lean; we
+; make those IPs answer from our fake hierarchy inside the netns.
+$TTL 3600
+$ORIGIN .
+@   IN SOA a.root-servers.net. hostmaster.root-servers.net. (
+        1          ; serial
+        3600       ; refresh
+        900        ; retry
+        604800     ; expire
+        3600 )     ; minimum
+@   IN NS a.root-servers.net.
+@   IN NS b.root-servers.net.
+@   IN NS c.root-servers.net.
+@   IN NS d.root-servers.net.
+@   IN NS e.root-servers.net.
+a.root-servers.net. IN A 198.41.0.4
+b.root-servers.net. IN A 199.9.14.201
+c.root-servers.net. IN A 192.33.14.30
+d.root-servers.net. IN A 199.7.91.13
+e.root-servers.net. IN A 192.203.230.10
+
+; Delegation of the fake TLD "test." to the tld nameserver.
+test.               IN NS a.tld.test.
+a.tld.test.         IN A 10.53.0.11

@@ -1,0 +1,12 @@
+; ROGUE example.test. zone served by the fake ROOT nsd (finding 005).
+; Models a compromised/rogue server high in the delegation chain answering
+; authoritatively for a grandchild zone it was never delegated. Poison = 6.6.6.6.
+; To activate: add a `zone: name "example.test." zonefile
+; "rogue-example.test.zone"` stanza to nsd-root.conf and restart veridns-auth-root.
+$TTL 3600
+$ORIGIN example.test.
+@       IN SOA ns.example.test. hostmaster.example.test. ( 99 3600 900 604800 3600 )
+@       IN NS  ns.example.test.
+ns      IN A   10.53.0.12
+host    IN A   6.6.6.6      ; real leaf serves 10.53.0.101 -- this POISONS it
+evil    IN A   6.6.6.6      ; does NOT exist on the real leaf (leaf -> NXDOMAIN)

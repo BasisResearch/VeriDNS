@@ -1,0 +1,354 @@
+* Review plan
+This is a review plan for the VeriDNS development.
+
+** Summary of the project
+Here's a summary, based on my understanding, of this project. The
+high-level goal of VeriDNS is to write a recursive DNS resolver that
+is fully compliant to the RFC spec and bug free. To rule out bugs, the
+project is implemented in the Lean prover, where the relevant parts of
+the RFC spec for a DNS resolver are linked to their Lean definitions.
+
+To reason about the correctness of the resolver itself, the repository
+models the network state and the configurations of the external
+servers. There is a correctness theorem somewhere that states that the
+response of the DNS resolver is exactly as specified by the RFC
+document.
+
+It is impossible to directly reason about effectful code that
+interacts with real socket. The project mitigates the problem to some
+degree by parameterizing the code by a monad and instantiates the
+monad to a pure monad for the actual reasoning. I think there is a
+purely functional model of the behavior of the DNS resolver somewhere
+that is then attached as refinements to the effectful functions.
+
+If I understand correctly, there are many places where a bug can still
+exist:
+- imprecision of the RFC specification itself
+- the gap between the RFC specification and the functional
+  specification of the project
+- the gap between the pure monad and the actual effectful monad
+- the incorrectly or imprecisely attached refinement
+
+Correct me though if the comment above is imprecise or wrong.
+
+The project explicitly marks certain features as out-of-scope. That's
+okay, but I want you to make sure no essential features are omitted
+and the project is not degenerate, meaning that it covers a reasonable
+portion of real use cases.
+
+** Bug finding
+What counts as a bug? Pragmatically, the application is buggy only if
+it exhibits incorrect behavior as we run it, which can be revealed through
+end-to-end testing. However, consider the following scenario: the
+project simply transliterates an existing mature implementation such
+as unbound into Lean. Unbound is a battle-tested resolver and it
+presumably contains very few bugs. If the project's bug-free claim is
+purely from copying an existing implementation rather than relying on
+the extra correctness guarantees provided by formal verification in
+Lean.
+
+Therefore, the bug finding process requires you to find the following:
+- flaws in the Lean specification :: if the specification is poorly
+  written, one could sneak in an incorrect implementation that
+  violates the RFC spec but makes the proofs go through
+- flaws with the implementation itself :: if the implementation is
+  genuinely wrong, one can observe the effect immediately. this is
+  simply the traditional type of software bugs that we'd like to
+  identify
+
+
+*** Bug finding techniques
+This section mentions a few bug finding techniques
+I'd like you to incorporate.
+
+**** Mutation testing
+You can inject bugs into the DNS server implementation and see if the
+correctness proof still goes through. Make sure the change actually
+introduces a bug that is observable by running the server.
+
+**** Differential testing
+Compare how the resolver resolves DNS request against an existing
+resolver. In this case, let's just use unbound.
+
+**** SPOTs
+Write small proof-oriented tests where you formally write down an
+interaction between the client and the servers and see if the
+specification is precise enough to let you prove that. Conversely, see
+if you can write less sensical properties and can still somehow prove
+it, which would indicate a flaw in the spec.
+
+**** Traditional penn testing
+There must be existing pennetration testing techniques around that
+exploits a DNS resolver in various ways. I want you to use tools that
+you know to exploit the DNS server and then validate whether the
+exploit is successful.
+
+**** Reading source
+You can refer to the RFC spec and the unbound implementation (checked
+out in the project root) and identify potential bugs by simply reading
+the code. (e.g. unbound has a bunch of code doing X, but VeriDNS isn't
+doing X, is something wrong?)
+
+This task would involve two agents --- one agent that reads the source
+and another agent that takes up requests from the first agent whenever
+a discrepancy is found. The second agent would actually attempt to run
+actual test to see if the discrepancy is real. The second agent
+doesn't have to be standalone. One architecture is to build a feedback
+loop where the bugs identified by the reading source agent is passed
+to one of the other testing agents at the beginning of the next round.
+
+*** Testing setup
+Since the DNS resolver will be running end-to-end, you should use the
+setup in the penn-testing directory to set up. You can feel free to
+set up multiple VMs or multiple network namespace inside the VM with
+veth pairs to simulate a test environment with your end-to-end testing
+infrastructure that would allow you to exercise those testing
+techniques.
+
+If you can do the testing within one VM with network namespace, that
+would be great. I also created a bridge device =brvm= on the host so
+you can do a mulitple VM setup if that works better for you.
+
+I want you to beware that I have limited amount of RAM. So as you spin
+up VMs, make sure to keep the total allocated RAM under 12 GiB,
+especially if you plan to spin up multiple VMs through multiple agents.
+
+*** A special tip
+LLM agents like to cut corners. If a theorem is too hard to prove or
+even state, the agent may add unreasonable premises that weakens the
+theorem so it's either vacuous or fails to cover real workloads. I'd
+like you to pay attention to such theorems or definitions.
+
+
+
+** Human review
+Whether you end up finding bugs or not, I want you to write a
+step-by-step report about your findings regarding the overall
+structure of the project. Give me a guide on how I should navigate the
+repository and tell me which part I should prioritize to read.
+
+The goal of this step is to build trust. The author claims that this
+repository is verified. From reading the report, I should be able to
+make a judgment whether  Ican trust the implementation or not.
+
+In particular, I'd like to see the following.
+
+*** Verification architecture
+When I run the DNS server, which part of the verified Lean code does
+the process actually use? Which part is unverified glue code?
+
+In particular, verification effort outside of the DNS server execution
+coverage is less useful. Flag these less useful properties so I can
+prioritize them less.
+
+*** Bug/bad spec reports
+For each bug, describe what it is, what setup triggers it, and link it
+to the experiment you've run to reproduce the observable effect. Link
+to the RFC spec or unbound implementation to indicate why the
+observable effect is undesirable.
+
+For each bad specification, tell me how you can inject bugs that slip
+through the correctness theorem. Reproduce the same steps as described
+previously for the injected bug.
+
+** Workflow
+To speed up the process, I expect you to use multiple worktrees and
+launch multiple agents to work on different forms of bug finding
+techniques. Note that each section in "Bug finding techniques" doesn't
+have to correspond to one agent except for "Reading source", which I
+expect one dedicated agent for. Allocate agents as you see fit.
+
+Before you start, I want you to flesh out the workflow for my
+approval.
+
+*** Agreed workflow (2026-07-07)
+Decisions locked with the reviewer:
+- Orchestration :: hybrid. Serial infrastructure is imperative (me + one
+  background agent); the bug-finding fan-out and the feedback loop are
+  Claude =Workflow= scripts under =review/workflows/=, written to files
+  for review before they run.
+- Topology :: one VM, network namespaces + veth, hosting a
+  self-contained authoritative hierarchy (root -> TLD -> leaf) plus an
+  attacker vantage, a resolver-under-test namespace (=veri-dns=), and a
+  reference namespace (=unbound=).
+- Cadence :: run end-to-end. No approval gates mid-run; I stop only for
+  destructive or scope-changing decisions. I re-enter the loop at
+  phase/round boundaries by reading each workflow's results and deciding
+  the next call.
+- Feedback loop :: lives *inside* =bug-hunt.mjs= as explicit rounds. The
+  script threads structured findings between stages; no inter-agent
+  messaging and no hand-relaying.
+
+**** Central question and the trust framing
+The report exists to let the reviewer judge whether the "verified"
+claim is load-bearing or merely inherited from mirroring unbound.
+Everything is organised around that. The spine is an *execution-path
+map*: trace =Main -> Server -> IO resume loop -> resolver/cache ->
+parse/serialise -> FFI=, and classify every major theorem/spec as
+- on-path :: constrains code the running server actually executes
+  (high value), or
+- off-path :: proves things about definitions never reached at runtime
+  (candidate decorative verification, and where a vacuous theorem hides
+  unnoticed -- flagged as lower priority).
+The trust chain has a link upstream of the reviewer's four gaps: the
+=include_rfc= embedding + =Scope.lean= out-of-scope machinery, which
+decides *which* RFC sentences get formalised at all. A green proof
+suite over an honestly-quoted but dishonestly-*selected* set of
+obligations still permits an RFC violation. That selection step is
+audited explicitly.
+
+**** Grounding requirement
+Every finding bottoms out in an observable runtime effect.
+- implementation bug :: reproduction experiment + RFC/unbound citation
+  for why the effect is wrong.
+- bad specification :: a concrete injected mutation that (a) keeps the
+  proofs green *and* (b) misbehaves when the server runs, reproduced the
+  same way. "This theorem looks weak" is not accepted until that chain
+  produces a running counterexample.
+
+**** Deliverables
+- review/REPORT.md :: trust verdict; verification-architecture table
+  (on-path vs off-path); repository navigation guide + prioritised
+  reading list; all findings.
+- review/findings/NNN-*.md :: one per finding -- what it is, the setup
+  that triggers it, a link to the reproduction, and the RFC/unbound
+  citation.
+- evidence :: SPOT =.lean= files, mutation diffs, pentest scripts,
+  differential logs.
+
+**** Phase 0 -- Foundation (serial; me, with env-setup in parallel)
+1. Make the binary runnable :: portable =getrandom=//dev/urandom= shim
+   for the =arc4random= link failure so =veri-dns= builds on Linux.
+   Logged as finding #0 (FFI portability, off-path). Isolated so it
+   cannot contaminate mutation results.
+2. Axiom audit :: =#print axioms= on =ioResumeLoop_sound=,
+   =resolveWithIO_sound=, the scrub theorems, etc. -- confirm no =sorry=
+   and no unexpected axioms. The cheapest high-value trust check.
+3. Execution-path map :: produce the on-path/off-path classification
+   above. Gates the rest so no effort is spent mutating off-path code.
+4. Environment (env-setup background agent, in parallel) :: build the
+   penn-testing VM image, boot one VM (~3-4 GiB), and inside it build the
+   netns+veth topology and the authoritative hierarchy; point both
+   =veri-dns= and =unbound= at the fake root.
+
+**** Phase 1 -- bug-hunt workflow (review/workflows/bug-hunt.mjs)
+Round-based, loop-until-dry. Each round:
+1. Fan out three roles in parallel:
+   - R, reading-source (dedicated, read-only) :: RFC <-> unbound <->
+     VeriDNS on-path code -> discrepancy reports (structured).
+   - S, spec-integrity (Lean, worktree) :: the "special tip" + SPOTs
+     (positive and nonsense-property) + generator/=Scope.lean=
+     faithfulness audit -> weak/vacuous/over-premised on-path theorem
+     flags (structured).
+   - D, dynamic (owns the VM) :: differential vs unbound + pentest
+     (poisoning/malformed/cache) + live =dig=.
+2. Triage in-script: route R's discrepancies to a verify stage on D;
+   route S's weak-theorem flags to the mutation stage.
+3. Weaponise + verify: =mutation.mjs= builds each weak-theorem mutant
+   (proof green?) and D runs it (observable?). Green + observable = a
+   confirmed bad-spec finding.
+4. Write reproduced findings to =review/findings/=; carry unresolved
+   items forward. Stop after K consecutive rounds surface nothing new.
+
+review/workflows/mutation.mjs :: worktree-per-mutant, warm =.lake= cache,
+=pipeline(mutants, apply -> build -> run-observe)=, <=3 concurrent.
+Called from =bug-hunt.mjs= each round for weaponised mutants; also
+runnable standalone for a curated on-path security-critical set.
+
+**** Phase 2 -- Synthesis
+Assemble =review/REPORT.md=: trust verdict; on/off-path architecture
+table; navigation guide + prioritised reading list; every impl bug with
+reproduction + citation; every bad spec with its injected-mutation
+counterexample.
+
+**** Resource discipline
+One VM (~3-4 GiB) + <=3 concurrent Lean builds keeps the total under the
+12 GiB ceiling. Worktrees and VM scratch live under the session
+scratchpad; deliverables under =review/=.
+
+** Executed methodology and how to reproduce it (2026-07-10)
+This section records what was actually done, so the pipeline can be re-run
+from scratch in a fresh session with no prior context.
+
+*** One-command reproduction
+The entire bug-finding pipeline is a single self-contained Claude =Workflow=
+script. A fresh session runs exactly one call — no human step, no main-agent
+step, nothing injected by hand:
+
+#+begin_src
+Workflow({ scriptPath: "review/workflows/full-review.mjs" })
+#+end_src
+
+It performs, in order: preflight (build + the required FFI fix, axiom audit,
+execution-path map) -> rig bring-up -> N iterative bug-hunt rounds (finders ->
+mutation synthesis -> serial weaponize -> serial isolated differential verify)
+-> report synthesis into =review/REPORT.md=. It loops until genuinely dry
+(two consecutive rounds where the finders ran and found nothing new) or a
+12-round cap.
+
+Supporting documents:
+- =review/HARNESS.md= :: what the harness IS — rig architecture, scripts, the
+  mutation-verdict table, and the non-negotiable method rules with the reason
+  each one exists.
+- =review/ENV.md= :: the rig runbook (bring-up, query, spoof, teardown).
+- =review/REPORT.md= :: the findings and the trust verdict (canonical index).
+- =review/pathmap.md= :: on-path vs off-path classification of every proof file.
+- =review/findings/= :: one file per finding, each with a reproduction.
+
+*** The method, and why it is shaped this way
+The central question — is the verification load-bearing, or is correctness just
+inherited from mirroring unbound? — cannot be answered by reading proofs. A green
+proof over a weak spec looks exactly like a green proof over a strong one. So the
+method is:
+
+- Mutation testing :: inject an observably-wrong implementation change and read
+  the PAIR (does the proof still pass?, does the server misbehave?).
+  - green + observable + a theorem ought to have caught it :: *bad-spec* — the
+    spec is too weak; a wrong implementation provably conforms. This is the
+    finding the review most wants.
+  - green + observable + nothing covers it :: *coverage-gap* (unverified glue).
+  - build BROKE because a theorem STATEMENT became false :: *proof-caught-semantic*
+    — a positive result: verification IS load-bearing there.
+  - build broke but only a tactic failed :: *proof-caught-brittle* — weak evidence.
+    Repair the script minimally and retry; if it then goes green with the impl
+    still wrong, it was a bad-spec all along. (This is how the case-fold question
+    was finally settled.)
+- Differential testing :: every claim is checked against unbound on the identical
+  path against identical data. If unbound does the same thing, it is the DNS trust
+  model, not a bug — report it *refuted*. Roughly nine candidates died this way;
+  that is the method working, not failing.
+- SPOTs :: small proof-oriented tests. Prove a sensible client/server interaction;
+  and try to prove a NONSENSE property — if that succeeds, the spec is vacuous.
+- Reading source :: a dedicated agent reads RFC vs unbound vs VeriDNS and hands
+  discrepancies to the verify stage. The loop closes: each round's verdicts (and
+  the REASON a mutant was caught) feed the next round's mutation synthesis.
+- Pentest :: off-path spoofing, bailiwick/glue/additional injection, rogue-ancestor
+  answers, lame servers, malformed packets, from an attacker namespace.
+
+*** Non-negotiable rules (each exists because violating it produced a WRONG result)
+1. Revert per-file, never =git checkout -- .= — the tree-wide form is blocked by
+   the harness safety classifier and silently killed ~15 mutations.
+2. A finding is not a finding until unbound disagrees.
+3. Restart BOTH resolvers before every differential. A warm unbound vs a cold
+   veri-dns is not a comparison — that asymmetry manufactured a false positive.
+4. Serialize all rig access; concurrent poisoning tests contaminate each other.
+5. Only the weaponize stage may build; everything else races the shared build tree.
+6. An API error is not "no findings" — it once faked a dry terminus and ended the
+   loop prematurely.
+7. A green-building mutant proves a SPEC gap; it is a BUG only if reachable at
+   runtime.
+
+*** Honest status at pause
+The loop never reached a genuine dry terminus: it was repeatedly killed by
+environment events (network drops, sustained API 529 overload, a laptop suspend),
+each time resumed losslessly from cache. Its late rounds were producing only
+long-tail coverage-gaps, so the meaningful finding space is effectively covered,
+but the run is formally unfinished. ~53 findings; the headline set is in REPORT.md.
+
+*** IMPORTANT before re-running
+This review was performed against commit =8e4e16d=. The upstream has since moved
+and could not be fetched from this environment (no SSH key for
+=git@github.com:BasisResearch/VeriDNS.git=). Cached workflow results
+(=resumeFromRunId=) and all mutation verdicts are valid ONLY for =8e4e16d=.
+Against a newer upstream, run =full-review.mjs= fresh rather than resuming, and
+re-validate the headline findings — some may already be fixed.

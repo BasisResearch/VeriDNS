@@ -1,0 +1,12 @@
+; Root hints for the reference resolver (unbound), pointing at OUR fake root.
+; Same names/IPs as the fake root zone so both resolvers use one hierarchy.
+.                        3600  IN  NS  a.root-servers.net.
+.                        3600  IN  NS  b.root-servers.net.
+.                        3600  IN  NS  c.root-servers.net.
+.                        3600  IN  NS  d.root-servers.net.
+.                        3600  IN  NS  e.root-servers.net.
+a.root-servers.net.      3600  IN  A   198.41.0.4
+b.root-servers.net.      3600  IN  A   199.9.14.201
+c.root-servers.net.      3600  IN  A   192.33.14.30
+d.root-servers.net.      3600  IN  A   199.7.91.13
+e.root-servers.net.      3600  IN  A   192.203.230.10
