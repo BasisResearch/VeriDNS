@@ -83,7 +83,10 @@ all proofs passing.
 | 009b | **CONFIRMED (rig, vs unbound).** QNAME parser dereferences a **compression pointer into the 12-byte header**, fabricates the root name, and runs a full recursion; unbound returns **FORMERR**. Malformed-packet handling (RFC 1035 §4.1.4). | impl-bug |
 | 006 | **No DNS-over-TCP** at all (RFC 7766 §5 MUST); TCP fallback absent (015b). "ANY fails" is a kernel RST from having no TCP listener. | impl-bug (scoped) |
 | 017 | Upstream `veri_dns_exchange` does one `recvmsg` then `close(fd)` (`recvfrom.c:291`) — one early **junk datagram drops the real reply** and forces re-query; a junk flood → SERVFAIL. unbound keeps its comm point open. | impl-bug (FFI) |
-| 002 | Query-ID source is unverified `@[extern]` FFI; a constant ID builds green. The RFC 5452 unpredictability the anti-poison proofs *assume* is untested glue. | coverage-gap |
+| 045 | **CONFIRMED (rig, vs unbound) — wrong answer, not just availability.** A bare empty NOERROR from the *first-tried (lame)* server makes veri-dns return a **spurious NODATA for a name that EXISTS**; unbound fails over to the good server and returns the record. Build green, proofs pass — the verification is not load-bearing here. Strengthens 041. | bad-spec |
+| 047 | **CONFIRMED (rig, vs unbound).** Attacker-injected **out-of-bailiwick ADDITIONAL A records are delivered to the client verbatim**; unbound strips the injected additional section. Forged-record delivery to stub resolvers / additional-trusting apps. | impl-bug (security) |
+| 044b | **CONFIRMED.** Meta/pseudo QTYPEs (OPT/MAILA/MAILB/AXFR/IXFR) are recursed as ordinary types (`Question.lean:12` keeps qtype as a raw `BV16`, never validated) — veri-dns emits a **malformed OPT-typed query on the wire**. | impl-bug |
+| 002 | Query-ID source is unverified `@[extern]` FFI; a constant-ID mutant **builds green** — no theorem constrains the RFC 5452 unpredictability the anti-poison proofs *assume*. **Correction (048): the real deployed binary DOES randomize both the upstream source port and the txid** — the entropy is genuinely present in practice; the finding is purely that *nothing in the proof enforces it*. | coverage-gap |
 | 008 | TC=1 gate on negative caching not tied to any obligation. | coverage-gap |
 
 ### Confirmed, low / provenance
@@ -97,11 +100,14 @@ all proofs passing.
 
 ### Robustness / availability cluster (Rounds 5–8; all sound-but-dead)
 Beyond 015, the extended loop surfaced a family of availability defects unbound
-handles: **026** upstream REFUSED/FORMERR-with-authority aborts resolution (no
-failover); **multi-homed failover broken** (only the first NS address is ever
-retried); **017** one early junk datagram on the ephemeral port drops the real
-reply; **upstream TC=1** truncated responses relayed with no retry; **upstream UDP
-buffer hard-capped at 512B** silently clips larger TC=0 responses. Worth isolated
+handles: **026 / 046** upstream REFUSED/FORMERR-with-authority aborts resolution and
+SERVFAILs instead of trying a sibling server (no failover); **multi-homed failover
+broken** (only the first NS address is ever retried); **041/045** a bare empty NOERROR
+from a lame server is taken at face value with no retry; **017** one early junk datagram
+on the ephemeral port drops the real reply; **upstream TC=1** truncated responses relayed
+with no retry; **upstream UDP buffer hard-capped at 512B** silently clips larger TC=0
+responses; **044a** the delivered-header spec leaves **TC unconstrained** — forcing TC=1
+builds green and **bricks all resolution**. Worth isolated
 repro before assigning final severity, but each is a plausible resolution-failure /
 DoS vector, and none is covered by any theorem.
 
@@ -127,6 +133,11 @@ DoS vector, and none is covered by any theorem.
   authoritative answer from a server you were configured/referred to reach is the
   standard non-DNSSEC trust model. Not a veri-dns-specific bug.
 - The "0x20 upstream case-randomization" half of 003.
+- **048 — "constant query ID" as a *deployed* behavior.** Wire capture shows the real
+  binary randomizes **both** the upstream source port **and** the DNS txid (RFC 5452
+  §4.3/§9.2 entropy is genuinely present). Finding 002 stands only in its precise form:
+  a constant-ID *mutant* builds green because nothing in the proof constrains the FFI —
+  not that the shipped resolver has a predictable ID.
 
 ### Coverage note
 Two harness/environment limits, honestly stated:
@@ -182,9 +193,9 @@ below the proof.
 - **Caveat on shared-rig contamination.** The loop ran its dynamic finders/verifiers *concurrently* against one shared veri-dns instance, so cache-poisoning experiments interfered — e.g. the loop reported 005 as CONFIRMED with unbound returning NXDOMAIN, but a **controlled, isolated re-run shows unbound accepts the rogue-root answer identically to veri-dns** (005 refuted). Every poisoning-class verdict in this report is therefore taken from an **isolated** re-run, not from the loop's concurrent observation. This is a lesson about the harness (the dynamic stage should have serialized on the rig), not just the target.
 - Finding-file numbering has collisions (parallel agents); this report is the canonical index.
 
-*Status: COMPLETE. The iterative loop ran to a natural finish — 97 agents, 8 rounds,
-63 distinct verdicts (16 proof-caught-semantic, 15 impl-bug, 10 bad-spec, 13
-coverage-gap, 9 refuted), 39 finding files. Isolation-verified observable
+*Status: PAUSED — substantively complete, formally unfinished (see "Resuming" below).
+The iterative loop ran many rounds across several sessions — ~53 finding files and 60+
+distinct verdicts (proof-caught-semantic, impl-bug, bad-spec, coverage-gap, refuted). Isolation-verified observable
 defects vs unbound: **015** (DoS), **004** (cache injection), **013** (negative-cache
 poisoning), **009** (malformed-packet handling), **036+021** (off-owner-CNAME
 attacker-directed egress / SSRF), **003**; plus code-confirmed **017/006/037** and the
@@ -192,3 +203,46 @@ Round-5–8 availability + coverage clusters above. Refuted: **005**. The 16
 `proof-caught-semantic` results are the positive core: the anti-poisoning machinery is
 genuinely load-bearing. See `findings/` for per-item detail; this report is the
 canonical index (finding-file numbers collided across parallel agents).*
+
+---
+
+## 7. Resuming this review
+
+**State at pause (this branch `review/bug-hunt`, based on `8e4e16d`):**
+- ~53 findings in `findings/`; this report is the canonical index (agent-assigned
+  numbers collided — there are two `004`s, two `009`s, two `010`s, two `015`s, two
+  `018`s and two `044`s; disambiguated in the tables above as e.g. 044a/044b).
+- The bug-hunt loop (`workflows/bug-hunt.mjs`, run id `wf_e49938ec-5fb`) **never reached
+  a genuine dry terminus**. It was repeatedly killed by environment events (network
+  drops, sustained API 529 overload, a laptop suspend), each time resumed losslessly
+  from cache. Its late rounds were producing only long-tail coverage-gaps, so the
+  *meaningful* finding space is effectively covered — but the loop is formally unfinished.
+- The dry-detection bug that once faked exhaustion (API errors → empty finders → counted
+  as "dry") **is fixed** (`agentR` retries; a round counts toward dry only if finders ran).
+
+**To resume:**
+```
+# 1. rig (one VM, ~2 GiB): the VM may be gone after a reboot/suspend
+cd penn-testing && make vm            # background; then:
+review/env/up.sh                      # idempotent: netns + nsd root/tld/leaf + unbound + veri-dns
+review/env/query.sh verid host.example.test A     # expect 10.53.0.101
+# 2. loop (rounds replay from cache; only uncached rounds run live)
+Workflow({scriptPath: "review/workflows/bug-hunt.mjs", resumeFromRunId: "wf_e49938ec-5fb"})
+```
+
+**IMPORTANT — upstream has moved.** This review was performed against `8e4e16d`
+(`main` = `5ea5109` locally). The user reports upstream updates that are **not fetched
+here** (`git fetch` fails in this environment: no SSH key for
+`git@github.com:BasisResearch/VeriDNS.git`). Before resuming, **fetch/rebase and re-validate**:
+several findings may already be fixed upstream, and the cached loop results
+(`resumeFromRunId`) were computed against the old tree — the mutation verdicts in
+particular are only valid for `8e4e16d`. Re-run the isolation-verified headline set
+(**015**, **004**, **013**, **036**+**021**, **009**, **045**, **047**) against the new
+upstream before repeating any claim from this report.
+
+**Known gaps to pick up:**
+- ~15 loop-synthesized mutations were **safety-blocked** (their auto-revert used a
+  tree-wide `git checkout -- .`). Fix: scope the revert per-file in the weaponize prompt.
+  The most important one (RFC 5452 source-match) was hand-verified — see §Coverage note.
+- Findings needing isolated re-verification before being relied on: `012`, `026`, `030`,
+  `031`, `035`, `037`, `044a/b`, `046`, and the Round-9+ long tail.

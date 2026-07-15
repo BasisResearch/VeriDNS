@@ -1,16 +1,16 @@
-Booting initrd of Arch Linux...
-[  OK  ] Created slice Slice /system/modprobe.
-[  OK  ] Started Dispatch Password Requests to Console Directory Watch.
-[  OK  ] Set up automount Arbitrary Executable File Formats File System Automount Point.
-[  OK  ] Reached target Image Downloads.
-[  OK  ] Reached target Initrd /usr File System.
-[  OK  ] Reached target Local Integrity Protected Volumes.
-[  OK  ] Reached target Path Units.
-[  OK  ] Reached target Remote Integrity Protected Volumes.
-[  OK  ] Reached target Remote Verity Protected Volumes.
-[  OK  ] Reached target Slice Units.
-[  OK  ] Reached target Swaps.
-[  OK  ] Reached target Local Verity Protected Volumes.
+qemu-system-x86_64: Unexpected end-of-file before all data were read
+qemu-system-x86_64: terminating on signal 2 from pid 1394464 (/usr/bin/python)
+qemu-system-x86_64: Failed to set msg fds.
+qemu-system-x86_64: Failed to set msg fds.
+qemu-system-x86_64: vhost VQ 0 ring restore failed: -22: Invalid argument (22)
+qemu-system-x86_64: Failed to set msg fds.
+qemu-system-x86_64: vhost VQ 1 ring restore failed: -22: Invalid argument (22)
+qemu-system-x86_64: Failed to set msg fds.
+qemu-system-x86_64: vhost_set_vring_call failed 22
+qemu-system-x86_64: Failed to set msg fds.
+qemu-system-x86_64: vhost_set_vring_call failed 22
+set virtio-user-fs status to 15 failed, old status: 15
+
 [  OK  ] Listening on Device-mapper event daemon FIFOs.
 [  OK  ] Listening on Query the User Interactively for a Password.
 [  OK  ] Listening on Process Core Dump Socket.
@@ -365,3 +365,5 @@ testvm login: root (automatic login)
 [71700.428916] Out of memory: Killed process 13598 (python3) total-vm:16908kB, anon-rss:5324kB, file-rss:1556kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:0
 [71700.516872] Out of memory: Killed process 13601 (python3) total-vm:16392kB, anon-rss:4840kB, file-rss:1932kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:0
 [71700.543830] Out of memory: Killed process 13577 (python3) total-vm:16700kB, anon-rss:5248kB, file-rss:1492kB, shmem-rss:0kB, UID:0 pgtables:72kB oom_score_adj:0
+‣ Interrupted
+make: *** [Makefile:62: vm] Error 1
