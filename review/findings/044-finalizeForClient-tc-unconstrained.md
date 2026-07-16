@@ -68,3 +68,62 @@ delivers a complete UDP payload, so tc=0 is the correct invariant; the spec shou
 ## Baseline restored
 `git checkout -- .`; `lake build` green; `restart-verid.sh` -> active; baseline resolves
 (`host.example.test` -> `10.53.0.101`). `git status` clean.
+
+---
+
+## REGRESSION 2026-07-15 (post-remediation 26b5849) — SPEC GAP UNFIXED (symptom not currently triggered by this exact mutation)
+
+`finalizeForClient_flags` (`VeriDNS/Proof/Refinement.lean:7939-7944`) STILL pins
+only `qr=1 ∧ aa=0 ∧ ra=1 ∧ z=0` — no delivered-`tc` conjunct — and its proof is
+still `⟨rfl, rfl, rfl, rfl⟩`. The original M-finalizeForClient-tc-force mutation
+would therefore STILL build green. The coverage gap is unfixed at the spec level.
+
+The observable symptom of *this specific mutation* is absent only because upstream
+did not apply it: `finalizeForClient` (`Impl/Server.lean:30-32`) does not force
+`tc`, so a normal fitting answer is delivered with tc=0 (verified:
+`www.example.test A` +ignore -> flags `qr rd ra`, no tc). But the delivered-tc bit
+remains unconstrained by any theorem, and finding 043 shows a reachable path
+(`truncateUdp` m2) where veri-dns delivers `tc=1` on a *complete* answer with the
+build green — the exact class of defect this coverage-gap predicts. Shared root
+cause with the still-present 032. Recommended fix (pin
+`(finalizeForClient resp).header.tc` to a faithful truncation predicate) not
+applied.
+
+## REGRESSION 2026-07-16 — STILL PRESENT, now confirmed by EXECUTING the mutation
+
+The 2026-07-15 note above reasoned from code-reading that "the original
+M-finalizeForClient-tc-force mutation would therefore STILL build green". That
+prediction has now been **executed and confirmed**, not merely inferred:
+
+```
+VeriDNS/Impl/Server.lean:32
+-  { resp with header := { resp.header with qr := 1, ra := 1, aa := 0, z := 0 } }
++  { resp with header := { resp.header with qr := 1, ra := 1, aa := 0, z := 0, tc := 1 } }
+
+$ lake build
+Build completed successfully (300 jobs).
+```
+
+Fully GREEN — no theorem statement, no `rfc_proves` line, and no `#guard` mock in
+`VeriDNS/Test/Loop.lean` rejects a delivered header that falsely claims truncation.
+`finalizeForClient_flags` (`VeriDNS/Proof/Refinement.lean:7939-7944`) still pins only
+`qr=1 ∧ aa=0 ∧ ra=1 ∧ z=0` with proof `⟨rfl, rfl, rfl, rfl⟩`; the four `rfl`s are
+undisturbed by `tc := 1`. Every `header.tc` occurrence in `Proof/` is a *hypothesis*
+(`resp.header.tc = 0 → …`, e.g. `NameTreeComplete.lean:1250,2253,2591,2893`), never a
+constraint **on** the delivered header.
+
+`docs/remediation-plan.md` does not mention finding 044 anywhere, so this gap is
+neither fixed, pinned, nor scoped out — it is simply absent from the plan, contradicting
+the plan's headline claim at line 32.
+
+Baseline (unmutated) behaviour re-verified on the renumbered rig — the symptom of *this*
+mutation is latent, not live, because upstream did not apply it:
+
+```
+$ ip netns exec attacker dig +noedns +ignore @203.0.113.2 -p 5300 www.example.test A
+;; flags: qr rd ra; QUERY: 1, ANSWER: 2      <-- no tc, correct
+```
+
+Recommended fix (add a `(finalizeForClient resp).header.tc = 0` conjunct, or pin delivered
+tc to a faithful truncation predicate) remains unapplied. Finding 043 still exhibits the
+reachable instance of this defect class.

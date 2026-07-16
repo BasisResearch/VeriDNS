@@ -95,3 +95,65 @@ State and prove, about the *live* path, e.g.
 delete `setAllTtls`/`rrset_setAllTtls_*` or strengthen to
 `(s.setAllTtls t).ttls = s.ttls.map (fun _ => t)` plus a caller obligation
 that `t` is the set minimum — and only then keep the `rfc_proves` lines.
+
+---
+
+## REGRESSION 2026-07-16 (post-remediation 26b5849) — STILL PRESENT (re-verified by mutation)
+
+**Status: still-present. Both defects are unchanged, and `docs/remediation-plan.md` never
+mentions finding 034 at all** — so the plan's headline claim ("every review finding is now
+fixed, theorem-pinned, or scoped out with rationale") does not hold for this finding: it is
+neither fixed, nor pinned, nor scoped out. It is simply absent from the plan.
+
+### 1. The code is byte-identical to the pre-remediation version
+
+`VeriDNS/Spec/Clarifications.lean:36-37` still reads:
+
+```lean
+def RRSet.setAllTtls (s : RRSet) (t : BitVec 32) : RRSet :=
+  { s with ttls := s.ttls.map (fun _ => t) }
+```
+
+and the two published theorems are still value-blind: `rrset_setAllTtls_uniform`
+(`:39`) asserts only `ttlsUniform` (all resulting TTLs equal *each other*), and
+`rrset_setAllTtls_preserves_records` (`:45`) pins only `rdatas` + list length.
+Neither constrains the chosen TTL *value*, so the RFC's load-bearing word — "lowest" —
+remains unverified.
+
+### 2. Still a phantom — zero implementation callers
+
+```
+$ grep -rn 'setAllTtls\|RRSet\b' VeriDNS/Impl/
+(no matches)
+```
+
+The only surviving reference outside `Spec/Clarifications.lean` is the ledger line
+`VeriDNS/RFC/ProofLinks.lean:169`. The resolver's real TTL normalization still runs
+through `minTtlB`/`normRaws` (`VeriDNS/Impl/Cache.lean`), still linked to no §5.2
+`rfc_proves`.
+
+### 3. The original mutation still builds fully GREEN
+
+Re-ran `M-setAllTtls-phantom-MAX` verbatim against 26b5849 — replacing the body with the
+per-set **MAXIMUM**, the exact semantic opposite of the mandated "lowest":
+
+```lean
+def RRSet.setAllTtls (s : RRSet) (t : BitVec 32) : RRSet :=
+  { s with ttls := s.ttls.map (fun _ => s.ttls.foldl (fun a b => if a.toNat < b.toNat then b else a) 0) }
+```
+
+```
+$ lake build
+Build completed successfully (300 jobs).
+```
+
+No theorem statement became false; no `rfc_proves` line failed. This is a **semantic hole
+in the statements**, not proof brittleness — no repair was needed to stay green.
+
+The ledger lines `[2181][203:214]`, `[2181][215:234]` (Clarifications.lean:64-66) and
+`[2181][204:214]` (ProofLinks.lean:169) continue to certify RFC text — including the
+"lowest TTL" clause at rfc-2181 lines 228-230 — that the proofs neither state nor connect
+to the running code.
+
+Suggested fix unchanged (see above): pin the value to the RRSet minimum on the *live*
+`minTtlB` path and link that, or drop the three `rfc_proves` lines.

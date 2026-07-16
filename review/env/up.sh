@@ -32,12 +32,30 @@ if ! timeout 20 "$SSH" true 2>/dev/null; then
 fi
 
 log "1. staging configs + veri-dns binary into $STAGE_HOST"
-rm -rf "$STAGE_HOST"
+# NOTE: /root/dev is a *virtiofs* share. Do NOT `rm -rf "$STAGE_HOST"` and
+# recreate it: the new directory gets a new inode while the guest still has the
+# old one cached, so every child lookup inside the VM fails with ENOENT
+# ("bash: /root/dev/_vmdns/vm-up.sh: No such file or directory", exit 127) until
+# the dentry cache revalidates. That made `down.sh && up.sh` fail on the first
+# try and succeed on a retry. Keep the directory inode stable and overwrite the
+# contents in place instead.
 mkdir -p "$STAGE_HOST"
+find "$STAGE_HOST" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 cp -a "$ENVDIR/nsd" "$ENVDIR/unbound" "$STAGE_HOST"/
 cp -a "$ENVDIR/vm-up.sh" "$ENVDIR/vm-down.sh" "$ENVDIR/spoof.py" "$STAGE_HOST"/
 cp -a "$BIN" "$STAGE_HOST/veri-dns"
 chmod +x "$STAGE_HOST"/vm-up.sh "$STAGE_HOST"/vm-down.sh
+
+# Belt-and-braces: wait until the guest actually sees the staged files, so any
+# residual virtiofs attr/dentry caching can't turn step 3 into a spurious 127.
+for _i in $(seq 1 20); do
+  if timeout 20 "$SSH" "test -f $STAGE_VM/vm-up.sh && test -x $STAGE_VM/veri-dns" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+timeout 20 "$SSH" "test -f $STAGE_VM/vm-up.sh && test -x $STAGE_VM/veri-dns" \
+  || { echo "staged files not visible in the VM at $STAGE_VM (virtiofs sync)"; exit 1; }
 
 log "2. ensuring the VM has unbound / nsd / dig (idempotent)"
 timeout 300 "$SSH" 'bash -s' <<'PREP'

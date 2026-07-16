@@ -17,16 +17,17 @@ const REPO = '/home/yiyun/Experiments/VeriDNS'
 // The controlled test rig (built by the env-setup agent) lives INSIDE the VM's
 // network namespaces — NOT reachable from the host directly. Observation loop:
 const RIG = `Controlled DNS rig (read ${REPO}/review/ENV.md for full detail):
-- Resolver under test: veri-dns @10.53.0.2:5300 (in netns 'verid').
-- Reference resolver: unbound @10.53.0.3:5301 (in netns 'unbound').
-- Authoritative (nsd): root . / tld 'test.' / leaf 'example.test.' (10.53.0.10-12).
-- Attacker/client vantage: netns 'attacker' (10.53.0.99).
+- Resolver under test: veri-dns @203.0.113.2:5300 (in netns 'verid').
+- Reference resolver: unbound @203.0.113.3:5301 (in netns 'unbound').
+- Authoritative (nsd): root . / tld 'test.' / leaf 'example.test.' (203.0.113.10-12).
+- Attacker/client vantage: netns 'attacker' (192.168.53.99).
+- ADDRESSING (do not "fix" it): the rig is on 203.0.113.0/24 (TEST-NET-3) but the CLIENT is on 192.168.53.99. Forced by two opposing ACLs in Impl/Server.lean: doNotQueryNets (egress) refuses to QUERY 10/8+192.168/16+..., while defaultAcl (ingress) ONLY accepts clients from 127/8, 10/8, 172.16/12, 192.168/16 — an exact subset. So no one subnet can be both. A client on 203.0.113.99 is SILENTLY DROPPED (UDP timeout, TCP accept-then-EOF, empty log). The egress filter is ACTIVE; never set VERI_DNS_ALLOW_LOOPBACK_EGRESS=1. See review/HARNESS.md 2.1.
 - The rig runs inside the VM; reach it only via '${REPO}/penn-testing/vm/ssh.sh <cmd>'.
-- Query veri-dns:   ${REPO}/penn-testing/vm/ssh.sh 'ip netns exec attacker dig @10.53.0.2 -p 5300 <name> <type>'
-- Query unbound:    ${REPO}/penn-testing/vm/ssh.sh 'ip netns exec attacker dig @10.53.0.3 -p 5301 <name> <type>'
+- Query veri-dns:   ${REPO}/penn-testing/vm/ssh.sh 'ip netns exec attacker dig @203.0.113.2 -p 5300 <name> <type>'
+- Query unbound:    ${REPO}/penn-testing/vm/ssh.sh 'ip netns exec attacker dig @203.0.113.3 -p 5301 <name> <type>'
 - To load a freshly host-built mutant into the VM and restart ONLY veri-dns:  ${REPO}/review/env/restart-verid.sh  (copies .lake/build/bin/veri-dns in, restarts, prints a verifying dig).
 - Poisoning/spoofing from the attacker ns: ${REPO}/review/env/spoof.py .
-- Zone data to observe against is in ${REPO}/review/env/nsd/zones (e.g. example.test A = 10.53.0.100).`
+- Zone data to observe against is in ${REPO}/review/env/nsd/zones (e.g. example.test A = 203.0.113.100).`
 
 // The curated set. Each targets on-path, security-relevant behavior the
 // README explicitly claims is proven. `oughtToCatch` names the theorem/spec
@@ -148,7 +149,7 @@ ${RIG}
 STEPS — do them in order and DO NOT SKIP the revert:
 1. Read the target source to find the exact site. Apply the mutation with a minimal edit. If you genuinely cannot locate the site, set applied=false and explain.
 2. From ${REPO}, run \`lake build\` and record whether it succeeds (proofs green) or fails (proof/type error rejected the mutation). This is the KEY signal. If it builds green, also \`lake build veri-dns\`.
-3. If it built green, load the mutant into the VM and restart just veri-dns with \`${REPO}/review/env/restart-verid.sh\`. Reproduce the wrong behavior by querying from the attacker ns (see RIG), comparing veri-dns @10.53.0.2:5300 against unbound @10.53.0.3:5301. Capture the actual dig/tcpdump output as evidence. (For FFI/spoofing mutants use ${REPO}/review/env/spoof.py from the attacker ns.)
+3. If it built green, load the mutant into the VM and restart just veri-dns with \`${REPO}/review/env/restart-verid.sh\`. Reproduce the wrong behavior by querying from the attacker ns (see RIG), comparing veri-dns @203.0.113.2:5300 against unbound @203.0.113.3:5301. Capture the actual dig/tcpdump output as evidence. (For FFI/spoofing mutants use ${REPO}/review/env/spoof.py from the attacker ns.)
 4. Classify per the schema: bad-spec vs coverage-gap vs proof-caught vs not-observable.
 5. If bad-spec or coverage-gap (a real finding), write a report to ${REPO}/review/findings/ named NNN-mutation-${m.id}.md (pick the next free NNN, zero-padded 3 digits) documenting: the claim, the exact mutation (diff), the build result proving proofs stayed green, the reproduction commands + output, and why it is undesirable with an RFC/unbound citation.
 6. MANDATORY CLEANUP: revert the source with \`git checkout -- <files>\` (and remove any stray files), then run \`lake build\` and \`${REPO}/review/env/restart-verid.sh\` to restore the green baseline binary in the VM. Set reverted=true only if git status shows the tracked source clean again and the baseline resolves normally.

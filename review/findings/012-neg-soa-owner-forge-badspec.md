@@ -1,5 +1,14 @@
 # Finding: Negative-cache SOA owner is attacker-substitutable (spec under-models the served SOA)
 
+> **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): FIXED (spec half).** The model now
+> constrains the negative-proof SOA's owner: `soaNegTtl (qname) (resp)`
+> (`Spec/NetworkSemantics.lean:833`) keeps an authority SOA only `if isAncestor r.owner qname`,
+> and `Cache.absorbNeg` passes `q.qname`. The impl mirror is `extractSoaNegative`
+> (`Impl/Server.lean:78`). The wire half is re-verified in `013-*.md` (poison SOA no longer
+> served or cached; unbound agrees). The mutation of *this* finding (rewriting the stored SOA's
+> owner to `.`) is now expected to break the build — NOT re-run here (this stage may not build);
+> see 013 for the runtime evidence.
+
 - ID: M-neg-soa-owner-forge
 - Classification: **bad-spec** (green build + observable wrong behavior on the wire)
 - Severity: high — RFC 2308 §3 bailiwick of the negative-proof SOA is unconstrained by the spec

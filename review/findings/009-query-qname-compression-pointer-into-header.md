@@ -86,3 +86,40 @@ this.
   header is not a name and a single-question query has no prior name.
 - unbound treats a query question carrying a compression pointer as malformed and
   answers FORMERR (rcode 1), as reproduced above.
+
+## Regression re-verification (2026-07-15, post-remediation commit 26b5849)
+
+**FIXED — verified on the rig.** `Impl/DomainName.lean:30` now guards
+`if 12 ≤ offset ∧ offset < pos`, rejecting pointers into the 12-byte header as
+well as forward/self pointers. The original wire repro no longer reproduces.
+Renumbered rig, both resolvers restarted:
+
+```
+ptr009b       (qname = C0 02, ptr -> header offset 2)
+  verid   203.0.113.2:5300  len=12 id=0x4242 qr=1 rd=1 ra=1 rcode=1 QD=0 AN=0 NS=0 AR=0
+                            hex=424281810000000000000000
+  unbound 203.0.113.3:5301  len=12 id=0x4242 qr=1 rd=1 ra=0 rcode=1 QD=0 AN=0 NS=0 AR=0
+                            hex=424281010000000000000000
+ptr009b_off0  (C0 00)  verid: FORMERR QD=0 12B   unbound: FORMERR QD=0 12B
+ptr009b_off11 (C0 0B, last header byte)
+                       verid: FORMERR QD=0 12B   unbound: FORMERR QD=0 12B
+cptrloop      (C0 0C, self)
+                       verid: FORMERR QD=0 12B   unbound: FORMERR QD=0 12B
+good          (control) verid: NOERROR QD=1 AN=1 -> host.example.test A 203.0.113.101
+```
+
+The old behaviour (99-byte NXDOMAIN, QD=1, fabricated root name, root SOA in
+authority, full recursion run) is gone: veri-dns now returns a 12-byte FORMERR
+and **matches unbound's rcode and QD=0**. The boundary case `C0 0B` (offset 11,
+the last header byte) is correctly rejected, so the `12 ≤ offset` bound is
+exact, and the positive control still resolves — the guard did not over-reject.
+
+Residual nit (not this finding): veri-dns's FORMERR carries `ra=1` where
+unbound sends `ra=0`. That is the error-flag-hygiene class tracked by finding
+033, not a regression of 009b.
+
+**Fix quality:** the remediation plan states the guard was tightened in place
+with "**zero proof diff**" — i.e. no theorem constrains `12 ≤ offset`. Reverting
+that one conjunct would build green; only the `headerPointerRejected` /
+`compressionStillAccepted` unit tests stand behind it. Correct at runtime but
+**unpinned** — a coverage-gap that can silently regress.

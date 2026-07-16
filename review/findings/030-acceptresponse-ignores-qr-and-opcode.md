@@ -107,3 +107,19 @@ forged upstream opcode can never reach the stub.
 `systemd-run --unit=veridns-auth-leaf --collect ip netns exec auth nsd -c /opt/dnsenv/nsd/nsd-leaf.conf -d`.
 Verified restored: `host.example.test A` → `10.53.0.101` on both resolvers;
 `poison9.example.test` → NXDOMAIN.
+
+## Regression re-verification (2026-07-15, post-remediation commit 26b5849)
+
+STILL PRESENT. `acceptResponse` (Server.lean:51-55) is verbatim the flagged
+code: checks only `resp.header.id == sent.header.id && questionMatches`, never
+QR or opcode. Re-run on the renumbered rig with a crafted leaf responder
+(qr0responder2.py on 203.0.113.12), both resolvers restarted:
+- Case A (QR=0 query-shaped forgery): veri-dns returns `poison2.example.test A
+  6.6.6.6` (NOERROR, landed poison); unbound SERVFAILs. Responder log shows
+  veri-dns sent ONE query and accepted the qr=0 reply; unbound retried ~7x and
+  refused every non-response.
+- Case B (opcode=2 STATUS, QR=1): veri-dns accepts and lands `7.7.7.7`; the
+  forged STATUS opcode leaks into the client reply (dig warns "Opcode mismatch:
+  got STATUS"). `prepareResponse`/`finalizeForClient` still never normalize
+  opcode. Not in the remediation plan; unpinned, unfixed. This is the highest-
+  severity item in the parser batch: a landed off-path poisoning primitive.

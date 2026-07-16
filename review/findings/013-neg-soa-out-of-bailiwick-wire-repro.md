@@ -1,5 +1,29 @@
 # 013 — Negative-response SOA is cached/served with an out-of-bailiwick owner (live wire reproduction of the RFC 2308 §3 gap)
 
+> **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): FIXED — verified on the rig (covers 012 too).**
+> `extractSoaNegative` (`Impl/Server.lean:78`) now takes a `qname` and requires
+> `Resolver.isAncestorB rr.name qname`; `deliveredResponse` (`:742`) additionally applies
+> `scrubAuthorityB` (same predicate) to the delivered authority section.
+> Re-run on 203.0.113.0/24 with a crafted leaf (`penn-testing/_vmdns/evilleaf.py soa013`)
+> emitting `NXDOMAIN aa=1` + `poison.attacker.test. SOA` (MINIMUM 10800) for `nx.example.test`,
+> both resolvers cold:
+>
+> ```
+> # rogue emits (direct dig @203.0.113.12): AUTHORITY: 1  poison.attacker.test. SOA ...
+> # veri-dns Q1: status NXDOMAIN, AUTHORITY: 0        <-- poison SOA stripped
+> # veri-dns Q2: status NXDOMAIN, AUTHORITY: 0        <-- and RE-QUERIED upstream:
+> [evilleaf] q nX.ExaMPlE.TEsT/1  from 203.0.113.2
+> [evilleaf] q nx.exampLe.Test/1  from 203.0.113.2    <-- nothing negatively cached
+> # unbound Q1: status NXDOMAIN, AUTHORITY: 0         <-- agrees
+> ```
+>
+> **Pinned** in the model: `soaNegTtl` (`Spec/NetworkSemantics.lean:833`) carries the
+> `isAncestor r.owner qname` conjunct inside the `findSome?` predicate, so dropping the impl
+> conjunct falsifies the impl/model lockstep obligation.
+> Residual (safe direction): a denial whose *only* SOA is off-owner is now cached **not at all**
+> (bare denial re-resolved every time), a small availability cost against a hostile server.
+> **Note:** this fix does *not* cover #039 — see that file.
+
 - **Classification:** bad-spec (build GREEN, behaviour observably wrong on the wire).
 - **Severity:** high — RFC 2308 §3 requires the negative-proof SOA to be the SOA
   of the zone that owns the queried name; veri-dns accepts, caches (up to the

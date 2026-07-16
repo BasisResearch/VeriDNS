@@ -108,3 +108,40 @@ answer path before size-checking.
   omitted misrepresents the message as truncated.
 - RFC 7766 §5 (TCP fallback expected when TC set).
 - unbound `util/data/msgencode.c:784, :809`.
+
+---
+
+## REGRESSION 2026-07-15 (post-remediation 26b5849) — SELF-INFLICTED TC STILL PRESENT; availability impact mitigated by new TCP listener
+
+The offending coupling is unchanged: `truncateUdp` stage `m2`
+(`VeriDNS/Impl/Server.lean:326`) still does `tc := 1, nscount := 0, authority := #[]`,
+and `Message.encode` (`VeriDNS/Impl/Message.lean:88`) still performs **no name
+compression**, so a positive answer whose ANSWER fits <512 but whose
+(uncompressed) ANSWER+AUTHORITY exceeds the client cap is emitted with a complete
+ANSWER yet TC=1.
+
+Re-reproduced with a leaf responder (`penn-testing/_vmdns/trunc_responder.py`,
+`fatns*` names: 1 A answer + 15 NS authority, 458 bytes compressed on the wire,
+TC=0) standing in for `nsd-leaf` on 203.0.113.12:53. Non-EDNS client:
+
+```
+verid  (+noedns +ignore):  flags: qr tc rd ra;  ANSWER: 1  (203.0.113.100 present)  72 bytes  <- FALSE TC=1
+unbound(+noedns +ignore):  flags: qr rd ra;     ANSWER: 1  (203.0.113.100)          53 bytes  <- no TC
+```
+
+Unbound still disagrees (drops the optional authority silently, TC=0), so this
+remains a genuine VeriDNS bug: a complete sub-cap answer is falsely flagged
+truncated.
+
+**What changed:** upstream shipped a client-facing TCP listener
+(`Impl/TcpFraming.lean`, `serveTcpDatagram`). So a TC-honoring stub now retries
+over TCP and *succeeds*:
+
+```
+verid  (+noedns):  ;; Truncated, retrying in TCP mode.  -> NOERROR ANSWER:1 203.0.113.100 (TCP)
+```
+
+Impact is therefore downgraded from "unresolvable / bricked" to a **spurious TC=1
+that forces an unnecessary TCP round-trip** (and still trips any UDP-only stub
+that does not retry). The self-inflicted-TC defect and its unpinned spec gap
+(see 044) are unfixed.

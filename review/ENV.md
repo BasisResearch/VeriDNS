@@ -21,15 +21,18 @@ RAM (well under the 12 GiB ceiling).
 
 ## 1. Layout (namespaces, IPs, ports)
 
-All nodes sit on bridge **`brdns` = 10.53.0.1/24** in the VM's root netns.
+All nodes sit on bridge **`brdns`** in the VM's root netns. The bridge carries
+**two** subnets: the rig on **203.0.113.0/24** (TEST-NET-3, `brdns` =
+203.0.113.1/24) and the client on **192.168.53.0/24**. Section 7 explains why —
+read it before changing any address.
 
 | namespace  | address(es)                              | runs                                   | port |
 |------------|------------------------------------------|----------------------------------------|------|
-| `auth`     | 10.53.0.10 (root), 10.53.0.11 (tld), 10.53.0.12 (leaf) | 3x `nsd` (root/tld/leaf zones) | 53 |
+| `auth`     | 203.0.113.10 (root), 203.0.113.11 (tld), 203.0.113.12 (leaf) | 3x `nsd` (root/tld/leaf zones) | 53 |
 | `auth`     | 198.41.0.4, 199.9.14.201, 192.33.14.30, 199.7.91.13, 192.203.230.10 | fake-root `nsd` also binds these | 53 |
-| `verid`    | 10.53.0.2                                | **veri-dns** (resolver under test)     | **5300** |
-| `unbound`  | 10.53.0.3                                | **unbound** (reference resolver)       | **5301** |
-| `attacker` | 10.53.0.99                               | `dig`, `spoof.py`, `tcpdump`           | -    |
+| `verid`    | 203.0.113.2                                | **veri-dns** (resolver under test)     | **5300** |
+| `unbound`  | 203.0.113.3                                | **unbound** (reference resolver)       | **5301** |
+| `attacker` | **192.168.53.99**                          | `dig`, `spoof.py`, `tcpdump`           | -    |
 
 **The five 198.x/199.x/192.x addresses are the real root-server IPs that
 `veri-dns` has hardcoded in `VeriDNS/Main.lean`.** We cannot change the resolver
@@ -42,10 +45,10 @@ The zones (`review/env/nsd/zones/`):
 
 ```
 .               NS a-e.root-servers.net (198.41.0.4 ...)   delegates: test.
-test.           NS a.tld.test (10.53.0.11)                 delegates: example.test.
-example.test.   NS ns.example.test (10.53.0.12)
-                @    A     10.53.0.100
-                host A     10.53.0.101
+test.           NS a.tld.test (203.0.113.11)                 delegates: example.test.
+example.test.   NS ns.example.test (203.0.113.12)
+                @    A     203.0.113.100
+                host A     203.0.113.101
                 www  CNAME example.test.
                 alias CNAME host.example.test.
 ```
@@ -92,21 +95,21 @@ Expected tail: five `veridns-*.service ... active running` lines and `>> done.`
 Helper (`query.sh`) digs from the `attacker` namespace:
 
 ```sh
-review/env/query.sh verid   host.example.test A     # veri-dns  @10.53.0.2:5300
-review/env/query.sh unbound host.example.test A     # unbound   @10.53.0.3:5301
+review/env/query.sh verid   host.example.test A     # veri-dns  @203.0.113.2:5300
+review/env/query.sh unbound host.example.test A     # unbound   @203.0.113.3:5301
 ```
 
 Or raw, over the VM shell:
 
 ```sh
 cd penn-testing
-./vm/ssh.sh 'ip netns exec attacker dig @10.53.0.2 -p 5300 host.example.test A'
-./vm/ssh.sh 'ip netns exec attacker dig @10.53.0.3 -p 5301 host.example.test A'
+./vm/ssh.sh 'ip netns exec attacker dig @203.0.113.2 -p 5300 host.example.test A'
+./vm/ssh.sh 'ip netns exec attacker dig @203.0.113.3 -p 5301 host.example.test A'
 ```
 
 **Verified agreement** (captured in `review/env/VERIFICATION.txt`): both
-resolvers return `host.example.test A 10.53.0.101`, `example.test A
-10.53.0.100`, and `www.example.test CNAME example.test A 10.53.0.100`.
+resolvers return `host.example.test A 203.0.113.101`, `example.test A
+203.0.113.100`, and `www.example.test CNAME example.test A 203.0.113.100`.
 
 ---
 
@@ -149,12 +152,12 @@ cd penn-testing
 # forge a poisoned answer for host.example.test, pretending to be the leaf NS,
 # aimed at unbound:
 ./vm/ssh.sh 'ip netns exec attacker python3 /opt/dnsenv/spoof.py \
-    --dst-ip 10.53.0.3 --dst-port 5301 --src-ip 10.53.0.12 \
+    --dst-ip 203.0.113.3 --dst-port 5301 --src-ip 203.0.113.12 \
     --qname host.example.test --answer-ip 6.6.6.6 --txid 0xbeef'
 
 # aim it at veri-dns instead:
 ./vm/ssh.sh 'ip netns exec attacker python3 /opt/dnsenv/spoof.py \
-    --dst-ip 10.53.0.2 --dst-port 5300 --src-ip 10.53.0.12 \
+    --dst-ip 203.0.113.2 --dst-port 5300 --src-ip 203.0.113.12 \
     --qname host.example.test --answer-ip 6.6.6.6 --txid 0x1234'
 ```
 
@@ -165,7 +168,7 @@ Watch it land / watch resolver traffic with tcpdump:
 ./vm/ssh.sh 'ip netns exec verid   tcpdump -n -i v-verid'
 ```
 
-Verified: the spoofed packet (`10.53.0.12.53 > 10.53.0.3.5301 ... A 6.6.6.6`)
+Verified: the spoofed packet (`203.0.113.12.53 > 203.0.113.3.5301 ... A 6.6.6.6`)
 reaches unbound and is correctly ignored (no matching outstanding query). To
 build a real poisoning race, run a legit query for a not-yet-cached name in one
 loop and flood `spoof.py` with guessed txids in another; a correct resolver
@@ -204,8 +207,29 @@ throwaway copy, so all in-guest state — packages, namespaces — vanishes; re-
 - **DNSSEC is off** (unbound `module-config: "iterator"`): the fake hierarchy is
   unsigned, so there is no trust anchor. Cache-poisoning tests here exercise the
   classic txid/port/bailiwick defences, not DNSSEC validation.
-- **RFC1918 answers:** the leaf serves `10.53.0.x` A records; unbound's rebind
-  protection would strip them, so `private-domain: "test."` permits them.
+- **Two subnets, and you may not collapse them.** The rig lives on
+  `203.0.113.0/24` (TEST-NET-3) but the client/attacker lives on
+  `192.168.53.99`. This is forced by two opposing ACLs in
+  `VeriDNS/Impl/Server.lean`:
+  - `doNotQueryNets` (egress, ~:336) refuses to **query** 0/8, 127/8, **10/8**,
+    100.64/10, 169.254/16, **172.16/12**, **192.168/16**, 240/4. That is why the
+    rig is no longer on `10.53.0.0/24`: veri-dns refused to query its own auth
+    servers there and every test failed spuriously.
+  - `defaultAcl` (ingress, ~:159) **only accepts clients** from 127/8, **10/8**,
+    **172.16/12**, **192.168/16** — an exact *subset* of the above. So no single
+    subnet can be both queryable and an allowed client. On `203.0.113.99` the
+    client's queries are silently dropped (`if !permitted acl clientAddr then
+    return cache`): UDP times out, TCP accepts-then-EOFs.
+
+  A client is never an egress target, so the split does **not** weaken the
+  filter — it stays **ACTIVE and honest**. Do **not** set
+  `VERI_DNS_ALLOW_LOOPBACK_EGRESS=1` to move the client back onto TEST-NET-3:
+  that disables the shipped filter and masks real egress bugs. `unbound.conf`
+  mirrors the split via `access-control: 192.168.53.0/24 allow`.
+- **Rebind protection:** the leaf serves `203.0.113.x` A records, which are
+  *not* in unbound's default `private-address` set, so nothing is stripped.
+  `private-domain: "test."` is retained as belt-and-braces (it was load-bearing
+  when the rig used RFC1918 `10.53.0.x`).
 - **The repo root is NOT bind-mounted in the VM** — only `penn-testing/` is
   (as `/root/dev`). That is why `up.sh` copies the `veri-dns` binary into
   `penn-testing/_vmdns/` rather than referencing `.lake/` directly.
@@ -230,6 +254,18 @@ throwaway copy, so all in-guest state — packages, namespaces — vanishes; re-
   `journalctl -u veridns-ref`.
 - **unbound returns NXDOMAIN for `*.test`** — the `local-zone: "test."
   nodefault` line is missing from `unbound.conf`.
+- **veri-dns times out on every query, but unbound answers fine, and
+  `/run/veridns-verid.log` is empty** — the client's source address is outside
+  veri-dns's `defaultAcl` (127/8, 10/8, 172.16/12, 192.168/16), so
+  `serveDatagram` drops it silently with no reply and no log line. Check the
+  attacker really is on `192.168.53.99`
+  (`./vm/ssh.sh 'ip netns exec attacker ip addr show v-attacker'`) and that
+  `verid` has a route back to `192.168.53.0/24`. Symptom over TCP is
+  `communications error: end of file` (connection accepted, then closed). See
+  section 7.
+- **unbound REFUSEs queries that veri-dns answers** — `access-control:
+  192.168.53.0/24 allow` is missing from `unbound.conf`; the client subnet is
+  not TEST-NET-3.
 - **veri-dns can't reach the root** — confirm the `/32` routes to the root IPs
   exist: `./vm/ssh.sh 'ip netns exec verid ip route'` should list
   `198.41.0.4/32 dev v-verid` etc.

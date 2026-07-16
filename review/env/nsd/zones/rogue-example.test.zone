@@ -7,6 +7,6 @@ $TTL 3600
 $ORIGIN example.test.
 @       IN SOA ns.example.test. hostmaster.example.test. ( 99 3600 900 604800 3600 )
 @       IN NS  ns.example.test.
-ns      IN A   10.53.0.12
-host    IN A   6.6.6.6      ; real leaf serves 10.53.0.101 -- this POISONS it
+ns      IN A   203.0.113.12
+host    IN A   6.6.6.6      ; real leaf serves 203.0.113.101 -- this POISONS it
 evil    IN A   6.6.6.6      ; does NOT exist on the real leaf (leaf -> NXDOMAIN)

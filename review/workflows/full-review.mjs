@@ -29,13 +29,14 @@ const DRY_ROUNDS_TO_STOP = 2   // two consecutive GENUINE dry rounds = exhausted
 
 // --- the rig, as every agent must understand it ------------------------------
 const RIG = `RIG (full runbook: ${REPO}/review/ENV.md; architecture: ${REPO}/review/HARNESS.md):
-- veri-dns (system under test) @10.53.0.2:5300 in netns 'verid'; unbound (reference oracle) @10.53.0.3:5301 in netns 'unbound'.
-- nsd authoritative, one per level: root '.' / tld 'test.' / leaf 'example.test.' at 10.53.0.10-12 (root also binds the 5 real root IPs, which veri-dns hardcodes).
-- Zones in ${REPO}/review/env/nsd/zones: example.test A=10.53.0.100, host.example.test A=10.53.0.101, www CNAME example.test. Plus rogue-example.test.zone for rogue-ancestor tests.
-- attacker/client vantage: netns 'attacker' 10.53.0.99 (dig, tcpdump, spoof.py, crafted responders).
+- veri-dns (system under test) @203.0.113.2:5300 in netns 'verid'; unbound (reference oracle) @203.0.113.3:5301 in netns 'unbound'.
+- nsd authoritative, one per level: root '.' / tld 'test.' / leaf 'example.test.' at 203.0.113.10-12 (root also binds the 5 real root IPs, which veri-dns hardcodes).
+- Zones in ${REPO}/review/env/nsd/zones: example.test A=203.0.113.100, host.example.test A=203.0.113.101, www CNAME example.test. Plus rogue-example.test.zone for rogue-ancestor tests.
+- attacker/client vantage: netns 'attacker' 192.168.53.99 (dig, tcpdump, spoof.py, crafted responders).
+- ADDRESSING (do not "fix" it): the rig is on 203.0.113.0/24 (TEST-NET-3) but the CLIENT is on 192.168.53.99. Forced by two opposing ACLs in Impl/Server.lean: doNotQueryNets (egress) refuses to QUERY 10/8+192.168/16+..., while defaultAcl (ingress) ONLY accepts clients from 127/8, 10/8, 172.16/12, 192.168/16 — an exact subset. So no one subnet can be both. A client on 203.0.113.99 is SILENTLY DROPPED (UDP timeout, TCP accept-then-EOF, empty log). The egress filter is ACTIVE; never set VERI_DNS_ALLOW_LOOPBACK_EGRESS=1. See review/HARNESS.md 2.1.
 - The rig lives INSIDE the VM. Reach it ONLY via: ${REPO}/penn-testing/vm/ssh.sh '<cmd>'
-- Query veri-dns: ${REPO}/penn-testing/vm/ssh.sh 'ip netns exec attacker dig @10.53.0.2 -p 5300 <name> <type>'
-- Query unbound:  ${REPO}/penn-testing/vm/ssh.sh 'ip netns exec attacker dig @10.53.0.3 -p 5301 <name> <type>'
+- Query veri-dns: ${REPO}/penn-testing/vm/ssh.sh 'ip netns exec attacker dig @203.0.113.2 -p 5300 <name> <type>'
+- Query unbound:  ${REPO}/penn-testing/vm/ssh.sh 'ip netns exec attacker dig @203.0.113.3 -p 5301 <name> <type>'
 - Load a freshly host-built binary into the VM + restart ONLY veri-dns (fresh cache): ${REPO}/review/env/restart-verid.sh
 - Rebuild the whole rig idempotently (after reboot/suspend): ${REPO}/review/env/up.sh`
 
@@ -177,8 +178,8 @@ Design constraints that MATTER:
 - ONE nsd PER LEVEL (root/tld/leaf). A single nsd serving all zones answers grandchild names authoritatively from the root IP, which destroys the differential.
 - unbound needs 'local-zone: "test." nodefault' or it returns a built-in RFC 6761 NXDOMAIN for .test and is useless as an oracle.
 VERIFY before reporting ok=true: from the attacker ns, BOTH resolvers must answer from the fake hierarchy —
-  ssh.sh 'ip netns exec attacker dig @10.53.0.2 -p 5300 example.test A +short'   -> 10.53.0.100
-  ssh.sh 'ip netns exec attacker dig @10.53.0.3 -p 5301 example.test A +short'   -> 10.53.0.100
+  ssh.sh 'ip netns exec attacker dig @203.0.113.2 -p 5300 example.test A +short'   -> 203.0.113.100
+  ssh.sh 'ip netns exec attacker dig @203.0.113.3 -p 5301 example.test A +short'   -> 203.0.113.100
 Put the actual dig output in 'details'. If you cannot get the rig up, report ok=false with exactly what failed.`,
   { label: 'env:bringup', phase: 'Env', model: 'fable', schema: PREFLIGHT })
 log(`Env: ok=${env?.ok} — ${env?.summary || 'no result'}`)
@@ -294,7 +295,7 @@ STEPS:
 1. Apply the minimal mutation.
 2. 'lake build' — record GREEN vs BROKE, and if broke the exact file:line + error. This is the key proof signal.
 3. If BROKE: decide SEMANTIC (a theorem STATEMENT became false -> verification is load-bearing here) vs BRITTLE (only a tactic failed; statement still true). If brittle, attempt a MINIMAL local proof-script repair and rebuild — if it then goes green, continue to step 4; that is the real test.
-4. If GREEN (with or without a minimal repair): 'lake build veri-dns', then '${REPO}/review/env/restart-verid.sh' to load the mutant, then reproduce the wrong behavior from the attacker ns. RESTART BOTH RESOLVERS FIRST (rule 3) and compare veri-dns@10.53.0.2:5300 vs unbound@10.53.0.3:5301. Capture dig/tcpdump output. Set unboundDiffers honestly (rule 2).
+4. If GREEN (with or without a minimal repair): 'lake build veri-dns', then '${REPO}/review/env/restart-verid.sh' to load the mutant, then reproduce the wrong behavior from the attacker ns. RESTART BOTH RESOLVERS FIRST (rule 3) and compare veri-dns@203.0.113.2:5300 vs unbound@203.0.113.3:5301. Capture dig/tcpdump output. Set unboundDiffers honestly (rule 2).
 5. Classify per the schema.
 6. If it is a real finding (bad-spec / coverage-gap / impl-bug AND unboundDiffers), write ${REPO}/review/findings/NNN-<slug>.md (next free 3-digit NNN) with: the claim, the mutation diff, the build result proving proofs stayed green, the reproduction commands+output, and an RFC/unbound citation for why it is wrong.
 7. MANDATORY CLEANUP (rule 1 + 7): 'git checkout -- <ONLY the exact files you edited>' — NEVER 'git checkout -- .' — then 'lake build' and '${REPO}/review/env/restart-verid.sh'. Confirm 'git status' shows tracked source clean and the baseline resolves correctly.

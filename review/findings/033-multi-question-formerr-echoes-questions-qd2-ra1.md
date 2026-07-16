@@ -87,3 +87,16 @@ of error-path section/flag hygiene divergence as findings 007 (rd echo),
 010/017 (undecodable-drop), and 032 (client TC reflected): veri-dns's error
 responses are assembled from the raw client packet rather than emitted as a
 minimal normalized error.
+
+## Regression re-verification (2026-07-15, post-remediation commit 26b5849)
+
+STILL PRESENT. Re-run on renumbered rig (verid @203.0.113.2:5300 vs unbound
+@203.0.113.3:5301), both restarted. QDCOUNT=2 query (host + www .example.test):
+- veri-dns: len=57 `qr=1 rd=1 ra=1 rcode=1(FORMERR) QD=2 AN=0 NS=0 AR=0`,
+  echoes BOTH questions verbatim (hex ends ...04686f7374...03777777...).
+- unbound: len=12 `qr=1 rd=1 ra=0 rcode=1(FORMERR) QD=0`, bare header.
+Identical to the original observation. Note this is the SAME QD-not-zeroed /
+ra-forced-1 error-hygiene class that the 010b FORMERR fix did NOT address: the
+010b path zeroes counts, but the multi-question FORMERR flows through
+`buildErrorResponse`/`finalizeForClient`, which keep query.header.qdcount and
+force ra:=1. Not in the remediation plan; low severity, unpinned.

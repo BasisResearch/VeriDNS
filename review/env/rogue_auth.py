@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rogue authoritative for example.test on 10.53.0.12:53 (auth ns).
+"""Rogue authoritative for example.test on 203.0.113.12:53 (auth ns).
 
 Answers `example.test A` with aa=1, NOERROR, ancount=1, a SINGLE CNAME RR whose
 OWNER is `x.attacker.test` (deliberately != the query name example.test) and
@@ -10,7 +10,7 @@ Everything else -> REFUSED (keeps the experiment clean).
 """
 import socket, struct, sys
 
-BIND = ("10.53.0.12", 53)
+BIND = ("203.0.113.12", 53)
 
 def encode_name(name):
     out = b""

@@ -108,3 +108,47 @@ design rationale, not a hard correctness violation.
 - unbound behaviour observed directly above (FORMERR rcode=1 on all three
   undecodable cases and on `twoq`).
 - RFC 1035 §4.1 (message format / RCODE 1 = Format error).
+
+## Regression re-verification (2026-07-15, post-remediation commit 26b5849)
+
+**FIXED — verified on the rig.** `rawDatagramReply` (`Impl/Server.lean:124`) is
+no longer the hardcoded `none`: it header-decodes the failed datagram and, for a
+decodable **query** header (`qr == 0 && opcode == query`), emits a minimal
+12-byte FORMERR with all four counts zeroed; header-undecodable / `QR=1` /
+non-QUERY-opcode datagrams still drop (anti-reflection). The original silent-drop
+repro no longer reproduces. Renumbered rig, both resolvers restarted:
+
+```
+trunclabel  verid 203.0.113.2:5300  len=12 rcode=1 QD=0 AN=0 NS=0 AR=0  (was: NO REPLY)
+trunclabel  unbound 203.0.113.3:5301 len=12 rcode=1 QD=0
+badlablen   verid   len=12 rcode=1 QD=0 AN=0 NS=0 AR=0                  (was: NO REPLY)
+badlablen   unbound len=12 rcode=1 QD=0
+cptrloop    verid   len=12 rcode=1 QD=0 AN=0 NS=0 AR=0                  (was: NO REPLY)
+cptrloop    unbound len=12 rcode=1 QD=0
+good        verid   len=68 rcode=0 QD=1 AN=1 (control, resolves normally)
+```
+
+veri-dns now reaches **unbound parity on rcode and QD=0** for every undecodable
+case originally reported, and the reply is 12 bytes — never larger than the
+request, so no amplification was introduced. The in-source rationale that used
+to claim "hardened resolvers (unbound) silently drop such datagrams" (the
+empirically false premise this finding called out) is gone along with the blanket
+drop.
+
+Residual divergence: veri-dns's FORMERR sets `ra=1`, unbound `ra=0`. Minor
+error-flag hygiene, tracked under finding 033.
+
+**Not fixed by this change (still open, separate findings):**
+- `twoq` / QDCOUNT=2 still returns `QD=2` with both questions echoed and `ra=1`
+  (finding **033**) — that path flows through `buildErrorResponse` /
+  `finalizeForClient`, not `rawDatagramReply`, so the count-zeroing here does not
+  reach it.
+- Opcodes 3-7 still black-hole (finding **023**): `rawDatagramReply` calls
+  `Header.decode`, which fails on an unrepresentable opcode, taking the
+  header-undecodable drop branch before the FORMERR branch can fire.
+
+**Fix quality:** genuinely **theorem-pinned**, unlike most of this batch. The
+plan cites `rawDatagramReply_formerr` (pins the reply shape),
+`_no_amplification`, `_headerUndecodable_drops` and `_response_drops`. The
+anti-reflection policy that previously rested on a blanket `none` is now carried
+by statements that would go red if the behaviour were reverted.

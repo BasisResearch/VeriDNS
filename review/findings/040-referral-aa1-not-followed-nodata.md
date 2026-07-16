@@ -1,5 +1,56 @@
 # 040 — Referral with AA=1 is not followed: veri-dns returns spurious NOERROR/NODATA
 
+---
+
+## ⚠️ REGRESSION STATUS 2026-07-15 (vs upstream 26b5849): **STILL PRESENT — never addressed**
+
+`docs/remediation-plan.md` **does not mention finding 040 anywhere**. Neither
+fixed, nor pinned, nor scoped out.
+
+The cited gate is **verbatim unchanged** — `VeriDNS/Impl/Resolver.lean:397-400`:
+```lean
+if hasRRTypeIn (RR := RR) resp.authority 2
+    && resp.header.aa == 0                     -- <-- still here
+    && resp.header.rcode == Rcode.noError
+    && !hasRRTypeIn (RR := RR) resp.authority 6 then
+```
+and the NODATA fallthrough it drops into still sits at `:421-422`
+(`else if resp.header.rcode == Rcode.noError && resp.answer.isEmpty then
+.answer (finalizeAnswer s resp) s`).
+
+### Re-run of the ORIGINAL repro on the current rig
+
+`tld_referral.py` impersonates the fake TLD on `203.0.113.11:53` (nsd-tld stopped)
+and returns an identical delegation for every query — NOERROR, ANCOUNT=0,
+AUTHORITY `example.test. NS ns.example.test.`, ADDITIONAL glue
+`ns.example.test. A 203.0.113.12`. The **only** variable is the AA bit. Both
+resolvers restarted cold before each run.
+
+**Control — AA=0 (both follow the referral):**
+```
+-- veri-dns -- status: NOERROR ; ANSWER: 1 ; host.example.test. 3600 IN A 203.0.113.101
+-- unbound  -- status: NOERROR ; ANSWER: 1 ; host.example.test. 3600 IN A 203.0.113.101
+```
+
+**Bug — same referral, AA=1:**
+```
+-- veri-dns --
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 63934
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+example.test.		3600	IN	NS	ns.example.test.
+   --> spurious NODATA; never descends to the leaf.
+
+-- unbound --
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 391
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+host.example.test.	3600	IN	A	203.0.113.101
+   --> follows the AA=1 referral, returns the real record.
+```
+
+The AA bit remains the sole differentiator, exactly as originally reported.
+
+---
+
 - **Component:** `VeriDNS/Impl/Resolver.lean` `stepAnalyzeResponse`, referral branch
 - **Location:** `VeriDNS/Impl/Resolver.lean:396-421`; gate at `:397` `&& resp.header.aa == 0`; NODATA fallthrough at `:419-420`
 - **Reference:** unbound `iterator/iter_resptype.c` — a below-origzone NS set is classified `RESPONSE_TYPE_REFERRAL` *regardless of the AA bit* (the AA-forces-ANSWER branch is deliberately commented out).

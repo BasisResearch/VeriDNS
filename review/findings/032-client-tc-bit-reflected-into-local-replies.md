@@ -105,3 +105,32 @@ network path is unaffected because the upstream response's TC is used there inst
 - RFC 1035 §4.2.1 / RFC 7766 §5: a client receiving a TC=1 response over UDP
   discards it and retries over TCP. veri-dns has no TCP listener (KB TCP-RST).
 - unbound reference behavior: rejects query-header TC with FORMERR (observed above).
+
+---
+
+## REGRESSION 2026-07-15 (post-remediation commit 26b5849) — STILL PRESENT
+
+Re-ran the original repro on the renumbered rig (203.0.113.0/24) after
+`systemctl restart veridns-verid veridns-ref`. `finalizeForClient`
+(`VeriDNS/Impl/Server.lean:30-32`) STILL rewrites only `qr,ra,aa,z` and never
+clears `tc`; `truncateUdp` passes a sub-cap reply through unchanged, so the
+client's TC bit survives into the delivered reply. Identical to the original
+finding; unbound still disagrees (FORMERR, tc=0).
+
+```
+# cache-hit path, TC+RD query (0x0300):
+verid:   RECV flags=0x8380 {qr=1 tc=1 rd=1 ra=1 rcode=0}  RAW ...0004cb007165 (=203.0.113.101, full answer, TC=1)
+unbound: RECV flags=0x8101 {qr=1 tc=0 rd=1 ra=0 rcode=1}  (FORMERR, 12 bytes)
+
+# REFUSED path, TC+noRD query (0x0200):
+verid:   RECV flags=0x8285 {qr=1 tc=1 rd=0 ra=1 rcode=5}  (REFUSED, TC=1)
+unbound: RECV flags=0x8001 {qr=1 tc=0 rd=0 ra=0 rcode=1}  (FORMERR, tc=0)
+
+# control, RD-only (0x0100):
+verid:   RECV flags=0x8180 {qr=1 tc=0 rd=1 ra=1 rcode=0}  (correct: tc=0, full answer)
+```
+
+The remediation plan's blanket "every finding fixed/pinned/scoped" does NOT cover
+032: no `tc := 0` was added to `finalizeForClient`, and `finalizeForClient_flags`
+(`VeriDNS/Proof/Refinement.lean:7939`) still omits any delivered-tc conjunct
+(shared root cause with 044). Probe script: `penn-testing/_vmdns/tcprobe.py`.

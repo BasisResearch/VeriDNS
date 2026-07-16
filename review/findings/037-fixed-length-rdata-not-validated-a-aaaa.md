@@ -114,3 +114,39 @@ inappropriate length".
 `badlen-resp` stopped, `veridns-auth-leaf` (nsd) restarted; `host.example.test A`
 → `10.53.0.101` on veri-dns again. Responder script left at
 `penn-testing/_vmdns/badlen_responder.py` for re-runs.
+
+## Regression re-verification (2026-07-15, post-remediation commit 26b5849)
+
+**STILL PRESENT.** Re-run on the renumbered rig (verid @203.0.113.2:5300 vs
+unbound @203.0.113.3:5301), both resolvers restarted, leaf `nsd` replaced by
+`penn-testing/_vmdns/badlen_responder2.py` on 203.0.113.12. Baseline through the
+responder first: `host.example.test A` → 203.0.113.101 on veri-dns.
+
+```
+=== bad A (RDLENGTH=16) ===
+  VERID:   ;; Got bad packet: extra input data
+  UNBOUND: status: NOERROR, ANSWER: 0            (record stripped)
+=== bad7 A (RDLENGTH=7) ===
+  VERID:   ;; Got bad packet: extra input data
+  UNBOUND: status: NOERROR, ANSWER: 0            (record stripped)
+=== badaaaa AAAA (RDLENGTH=4) ===
+  VERID:   status: NOERROR, ANSWER: 1
+           ;; WARNING: Message has 4 extra bytes at end
+  UNBOUND: status: NOERROR, ANSWER: 0            (record stripped)
+```
+
+Identical to the original observation: veri-dns delivers the mis-sized A/AAAA
+records to the stub (unparseable for the two A cases), unbound sanitizes them
+away. `ResourceRecord.decode` still does `readBytes rdlength.toNat` with no
+per-type fixed-length gate.
+
+**Numbering note — this file is NOT the "037" of `REPORT.md`.** `REPORT.md:81`
+lists 037 as "name-bearing RDATA for MX/SRV forwarded verbatim with compression
+pointers", which is the subject of finding **029** and which upstream **did**
+fix (verified: MX exchange now decompressed, rdlen 9 → 21, no pointer in the
+re-emitted rdata). The remediation plan's "### 037 — name-bearing RDATA
+forwarded with compression pointers intact — ✅ FIXED" therefore closes the
+*MX/SRV* issue and says nothing about A/AAAA rdata length validation. This
+fixed-length-rdata finding is **unaddressed and unmentioned** by the plan — it
+is not covered by the plan's "every review finding is now fixed, theorem-pinned,
+or scoped out" claim under any number. Unpinned, unfixed.

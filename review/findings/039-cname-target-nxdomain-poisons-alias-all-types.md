@@ -4,6 +4,27 @@
 - **Component:** negative caching of CNAME-chain NXDOMAIN
 - **Verdict:** impl-bug — confirmed on the rig with a differential vs unbound
 - **Classification:** impl-bug
+- **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): STILL PRESENT.** Not addressed by
+  `docs/remediation-plan.md`. The #012/#013 fix does **not** cover this: `extractSoaNegative`'s
+  new `isAncestorB rr.name qname` conjunct *passes* here, because the target zone's SOA (`test.`)
+  genuinely **is** an ancestor of the alias (`broken.example.test`). The defect is the
+  type-agnostic negative entry keyed on the **alias**, which is untouched.
+  Re-run on 203.0.113.0/24 (`penn-testing/_vmdns/evilleaf.py cnamenx039`), both resolvers cold:
+
+  ```
+  # veri-dns Q1 (A): NXDOMAIN, CNAME present
+  ;; status: NXDOMAIN;  ANSWER: 1
+  broken.example.test.  300  IN  CNAME  nothere.test.
+  # veri-dns Q2 (AAAA) and Q3 (TXT): BARE NXDOMAIN, CNAME DROPPED, zero upstream egress
+  ;; status: NXDOMAIN;  ANSWER: 0
+  # unbound Q1/Q2/Q3: all NXDOMAIN but the CNAME is PRESERVED for every type
+  ;; status: NXDOMAIN;  ANSWER: 1
+  broken.example.test.  300  IN  CNAME  nothere.test.
+  ```
+
+  Smoking gun — the leaf's query log shows veri-dns asked **once**, for type A only:
+  `[evilleaf] q BrOKeN.EXamplE.tEsT/1 from 203.0.113.2`. The AAAA and TXT queries never left
+  the resolver: a name that provably exists as a CNAME is asserted non-existent for every type.
 
 ## Summary
 

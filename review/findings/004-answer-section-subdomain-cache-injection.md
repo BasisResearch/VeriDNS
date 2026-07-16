@@ -1,5 +1,28 @@
 # 004 — Answer-section caching admits any subdomain of the query name (occluded/delegated-child cache injection)
 
+> **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): FIXED — verified on the rig.**
+> `Resolver.ownerRaws` (`Impl/Resolver.lean:125`, `nameEqCI (rrName rr) sname`) replaces
+> `bailiwickRaws` on both answer-cache writes (`:381`, `:430`, keyed on `echoedQname resp`)
+> and the client-boundary write (`Server.lean:765`, keyed `clientQname query`).
+> Re-run of the original repro on 203.0.113.0/24 (`penn-testing/_vmdns/evilleaf.py sub004`,
+> both resolvers cold), the crafted leaf injecting `sub.example.test A 6.6.6.6` on the
+> `example.test A` answer:
+>
+> ```
+> # veri-dns Q1: injected RR not even delivered (ANSWER: 1)
+> example.test.  3600  IN  A  203.0.113.100
+> # veri-dns Q2 sub.example.test A -> NXDOMAIN (identical to unbound)
+> # crafted-leaf log — veri-dns RE-QUERIED, i.e. nothing was cached:
+> [evilleaf] q EXAmPlE.test/1     from 203.0.113.2
+> [evilleaf] q suB.examPLe.TESt/1 from 203.0.113.2   <-- the pre-fix run had NO such line
+> ```
+>
+> **Pinned**, not just patched: the model image is `Response.answerOwned`
+> (`Spec/NetworkSemantics.lean:635`, `answer.filter (nameEq rr.owner qname)`) at the
+> `trustedReply`/`answerCname` absorb sites, bridged by `αSection_ownerRaws_eq`
+> (`Proof/AnswerTerminal.lean:543`); reverting the impl filter to `bailiwickRaws` breaks the
+> refinement obligation, not merely a tactic.
+
 - **Severity:** high (cache poisoning / injection — an authoritative server can pre-load or override cache entries for names it should not control).
 - **Class:** bad-spec. The Lean model's `Cache.absorb` `keep := isAncestor bw r.owner` (at-or-below the bailiwick) is strictly weaker than unbound's answer rule (owner **==** qname). The implementation (`bailiwickRaws`) faithfully matches the model, so the on-path soundness theorems prove conformance to a spec that *permits* this injection. Build is green; behaviour is observably wrong.
 - **On/off-path:** on-path (a malicious/compromised authoritative answer, no spoofing needed).

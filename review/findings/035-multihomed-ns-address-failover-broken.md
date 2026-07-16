@@ -1,5 +1,58 @@
 # 035 — Multi-homed nameserver address failover is broken: veri-dns re-queries the first glue address forever (or drops both on one REFUSED) and never tries a sibling address of the same NS
 
+---
+
+## ⚠️ REGRESSION STATUS 2026-07-15 (vs upstream 26b5849): **STILL PRESENT — never addressed**
+
+`docs/remediation-plan.md` **does not mention finding 035 anywhere** (the plan was
+triaged against `47efe79` and stops at #037 + "Item 4"). The claim that *"every
+review finding is now fixed, theorem-pinned, or scoped out with rationale"* does
+not hold for this finding: it is neither fixed, nor pinned, nor scoped out.
+
+The cited root cause is **unchanged in the current source**:
+- `VeriDNS/Impl/SList.lean:79-81` — `markQueried` still keys on `e.name == name`,
+  so it bumps `transmissionCount` on *every* address entry sharing that NS name.
+- `VeriDNS/Impl/SList.lean:26-27` — `removeServer` still keys on `e.name != name`.
+- `VeriDNS/Impl/Server.lean:655` — `slist.markQueried entry.name` (name, not address).
+- `VeriDNS/Impl/Server.lean:684`, `:414` — `removeServer entry.name` / `entryName`.
+There is still no per-address `attempts` counter and no address-level splice.
+
+### Re-run of the ORIGINAL repro on the current rig (renumbered to 203.0.113.0/24)
+
+TLD hands out two glue A records for the single NS `ns.example.test.`, dead
+address first (verified via `dig @203.0.113.11`):
+```
+ns.example.test.	3600	IN	A	203.0.113.6     ; dead (nobody answers ARP)
+ns.example.test.	3600	IN	A	203.0.113.12    ; real nsd
+```
+
+**veri-dns**, cold — SERVFAIL after ~6 s; capture on `v-verid` filtered to both
+glue addresses:
+```
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 3389
+;; Query time: 6147 msec
+
+to 203.0.113.6 : 6      <- every attempt goes to the dead address
+to 203.0.113.12: 0      <- the live sibling is NEVER contacted
+```
+
+**unbound**, same zone, 5 cold restarts (fresh cache each; PID verified to change)
+— it tries the dead `.6`, fails over to `.12`, and answers every time:
+```
+unbound iter 1: ->.6=0 ->.12=1  answer=[host.example.test. 3600 IN A 203.0.113.101]
+unbound iter 2: ->.6=1 ->.12=1  answer=[host.example.test. 3600 IN A 203.0.113.101]
+unbound iter 3: ->.6=1 ->.12=1  answer=[host.example.test. 3600 IN A 203.0.113.101]
+unbound iter 4: ->.6=1 ->.12=1  answer=[host.example.test. 3600 IN A 203.0.113.101]
+unbound iter 5: ->.6=1 ->.12=1  answer=[host.example.test. 3600 IN A 203.0.113.101]
+```
+Iterations 2-5 are the airtight comparison: unbound sends exactly one datagram to
+the dead address, then one to the live sibling, and resolves. veri-dns sends six
+to the dead address and none to the sibling.
+
+Rig restored to baseline afterwards (single glue A, both resolvers agreeing).
+
+---
+
 - **Classification:** impl-bug (observable client-visible divergence from unbound)
 - **Component:**
   - `VeriDNS/Impl/SList.lean:58-65` (`fromNsWithGlueAll` — one `SlistEntry` per address, all sharing the same `name`)

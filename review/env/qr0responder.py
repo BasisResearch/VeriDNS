@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Malicious leaf responder: answers upstream A queries with a QR=0
 (query-shaped) datagram that nonetheless carries a forged A record and the
-correct txid + question. Binds 10.53.0.12:53 (the real leaf-NS address that
+correct txid + question. Binds 203.0.113.12:53 (the real leaf-NS address that
 veri-dns/unbound reach via referral), so datagramMatches (source==queried)
 passes; only the QR bit distinguishes it from a legitimate response.
 
@@ -22,7 +22,7 @@ def main():
     ap.add_argument("answer_ip")
     ap.add_argument("--qr", type=int, default=0, help="QR bit to set (default 0)")
     ap.add_argument("--opcode", type=int, default=0, help="opcode (default 0=query)")
-    ap.add_argument("--bind", default="10.53.0.12")
+    ap.add_argument("--bind", default="203.0.113.12")
     a = ap.parse_args()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

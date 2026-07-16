@@ -1,5 +1,47 @@
 # 015 — A single benign `. NS` query permanently bricks all root-descending resolution
 
+---
+
+## ✅ REGRESSION STATUS 2026-07-15 (vs upstream 26b5849): **FIXED — verified on the rig**
+
+Re-ran the original repro against the current rig (binary md5 `aecb30f9033559304160e082a145ee39`,
+renumbered to 203.0.113.0/24). Both resolvers restarted cold before the differential.
+
+The root cause is genuinely repaired: `VeriDNS/Impl/Resolver.lean:321` now carries
+the SBELT fallback in `stepFindServers`'s rebuild arm:
+```lean
+if glue.isEmpty && mc == 0 then
+  .goto .sendQueries { s with resources := { s.resources with slist := s.resources.sbelt } }
+```
+
+**The old repro no longer reproduces.** After a cold `. NS`:
+```
+dig @203.0.113.2 -p5300 . NS   -> NOERROR ; . 3598 IN NS a..e.root-servers.net.
+dig @203.0.113.2 -p5300 host.example.test A
+  -> NOERROR ; host.example.test. 3600 IN A 203.0.113.101     (was SERVFAIL, zero egress)
+dig @203.0.113.2 -p5300 newB1.example.test A -> NXDOMAIN      (was SERVFAIL)
+```
+Differential after `. NS` — veri-dns and unbound now agree on both:
+```
+                       veri-dns            unbound
+host.example.test A    203.0.113.101       203.0.113.101
+newB1.example.test A   NXDOMAIN            NXDOMAIN
+```
+
+### Fix quality: NOT theorem-pinned — guarded only by a `#guard` mock
+
+`stepFindServers_cases` (`VeriDNS/Proof/Refinement.lean:6317`) is a **disjunction**
+("slist is unchanged ∨ rebuilt ∨ sbelt"). Deleting the sbelt arm would drop the
+result into the *rebuilt* disjunct, so the statement stays TRUE and the build stays
+GREEN. It does not pin this fix.
+
+The only build-enforced guard is the mock `#guard addresslessRootNsSbeltFallback`
+(`VeriDNS/Test/Loop.lean:296-303`), which does turn the build red on revert. That is
+a real but narrow regression guard (one cache shape, mock transport) rather than a
+semantic theorem: no theorem states "a resolvable name is resolved", so the
+liveness property this finding is about remains outside the verified core.
+
+
 **Severity:** High (remote, unauthenticated, persistent DoS of the whole resolver)
 **Component:** `VeriDNS/Impl/Resolver.lean:296-329` (`stepFindServers`) +
 `VeriDNS/Impl/Server.lean:346-367` (`ioResumeLoop` glueless recovery)

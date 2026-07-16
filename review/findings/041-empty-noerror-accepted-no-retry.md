@@ -1,5 +1,41 @@
 # 041 — Entirely-empty NOERROR accepted as final NODATA on first receipt (no retry); unbound throws it away and re-queries
 
+---
+
+## ⚠️ REGRESSION STATUS 2026-07-15 (vs upstream 26b5849): **STILL PRESENT — never addressed**
+
+`docs/remediation-plan.md` **does not mention finding 041 anywhere**. Neither
+fixed, nor pinned, nor scoped out. `classifiableB` (`Resolver.lean:360`) and the
+catch-all accept at `Resolver.lean:435-436` are unchanged. See **045** for the
+2-NS escalation of this same defect into a wrong answer.
+
+### Re-run of the ORIGINAL repro on the current rig
+
+To force unbound onto a lame server (rather than letting it pick a healthy
+sibling), **both** nameservers of the `flaky.test.` delegation were bound to the
+bare-empty-NOERROR responder. Both resolvers restarted cold; upstream exchanges
+for the test name counted from the responder logs:
+
+```
+=== veri-dns (both NS bare) ===
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 209
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 0
+VERIDNS upstream exchanges for the test name: ns1=1 ns2=0 TOTAL=1
+
+=== unbound (both NS bare) ===
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 21953
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 1
+UNBOUND upstream exchanges for the test name: ns1=1 ns2=1 TOTAL=2
+```
+
+Both return NODATA (as the original finding noted for the single-server case —
+hence coverage-gap, not a wrong answer *here*), but the retry-count divergence is
+reproduced exactly: veri-dns accepts on **1** datagram; unbound throws the bare
+message away and re-queries the **sibling** (`EMPTY_NODATA_RETRY_COUNT` = 2).
+That discarded-and-retried datagram is precisely what rescues unbound in 045.
+
+---
+
 - **Component:** `VeriDNS/Impl/Resolver.lean` `stepAnalyzeResponse` (:434-435), `classifiableB` (:353-358)
 - **Class:** coverage-gap (robustness / anti-spoofing hardening absent; the answer itself is RFC-2308-legal)
 - **Status:** CONFIRMED on the rig — differential vs unbound reproduced.

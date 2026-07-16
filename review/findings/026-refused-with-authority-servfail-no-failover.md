@@ -1,5 +1,44 @@
 # 026 — Upstream REFUSED/FORMERR/NOTIMP carrying an authority record aborts the whole resolution with SERVFAIL — no failover to sibling nameservers
 
+---
+
+## ✅ REGRESSION STATUS 2026-07-15 (vs upstream 26b5849): **FIXED — verified on the rig, and theorem-pinned**
+
+Re-ran the original repro on the current rig (binary md5 `aecb30f9033559304160e082a145ee39`).
+The terminal `.error "4b: no NS records in authority"` is **gone from the tree entirely**;
+`VeriDNS/Impl/Resolver.lean` now ends that branch with
+`else .goto .sendQueries { s with lastResponse := none }`, i.e. the throw-away-and-retry
+path unbound takes.
+
+Rig: `flaky.test.` delegated to two glued nameservers, lame ns1 (203.0.113.20) listed
+FIRST, good ns2 (203.0.113.21) second. ns1 answers `rcode, aa=0, ANSWER=0, AUTHORITY=[SOA]`.
+Both resolvers restarted cold before each run.
+
+**The old repro no longer reproduces** — veri-dns now fails over to ns2 across the whole
+trigger set:
+
+| ns1 rcode | veri-dns (was) | veri-dns (now) | unbound |
+|-----------|----------------|----------------|---------|
+| 5 REFUSED | SERVFAIL | **NOERROR, A 203.0.113.111** | NOERROR, A 203.0.113.111 |
+| 1 FORMERR | SERVFAIL | **NOERROR, A 203.0.113.111** | NOERROR, A 203.0.113.111 |
+| 4 NOTIMP  | SERVFAIL | **NOERROR, A 203.0.113.111** | NOERROR, A 203.0.113.111 |
+
+Per-server hit counts on the REFUSED run confirm the failover is real (lame ns1 tried,
+then good ns2 reached): `ns1 hits=2, ns2 hits=3`.
+
+### Fix quality: load-bearing
+
+`stepAnalyzeResponse_lame` (`VeriDNS/Proof/Refinement.lean:5499`) states that under exactly
+this response shape `stepAnalyzeResponse s = .goto .sendQueries { s with lastResponse := none }`.
+Reverting the impl to `.error` makes that theorem's **statement false** ⇒ build red. This is a
+genuine pin, not a shape-only cases lemma.
+
+**Note the carve-out:** the theorem's hypothesis `hnodata : (rcode == noError && answer.isEmpty) = false`
+explicitly *excludes* the bare-empty-NOERROR shape. The pin therefore stops precisely where
+findings **041 / 045** begin — those remain STILL-PRESENT (045 is a wrong answer). The
+remediation fixed the non-empty-authority shape and the theorem documents that it went no further.
+
+
 - **Classification:** impl-bug (observable client-visible divergence from unbound)
 - **Component:** `VeriDNS/Impl/Resolver.lean:388-421` (`stepAnalyzeResponse`), terminal `.error "4b: no NS records in authority"` at :421; delivered as SERVFAIL via `VeriDNS/Impl/Server.lean:426-427` → `replyForResolution` error→serverFailure.
 - **Trigger set:** an upstream answer with `rcode ∈ {1 FORMERR, 4 NOTIMP, 5 REFUSED}`, empty ANSWER, and a **non-empty AUTHORITY that is not a followable delegation** (e.g. a lone SOA — the classic lame-server shape).

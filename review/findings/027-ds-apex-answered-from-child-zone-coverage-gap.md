@@ -1,5 +1,23 @@
 # 027: DS query at a zone apex is answered from the CHILD zone, not the parent side of the cut
 
+> **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): STILL PRESENT.** Not addressed by
+> `docs/remediation-plan.md`; `walkNs` still starts the NS walk at the qname for every qtype —
+> there is no DS special case anywhere in `Impl/Resolver.lean`. Re-run on the honest
+> 203.0.113.0/24 rig, both resolvers cold:
+>
+> ```
+> # veri-dns — denial from the CHILD zone
+> $ dig @203.0.113.2 -p 5300 example.test DS
+> ;; status: NOERROR, ANSWER: 0, AUTHORITY: 1
+> ExaMpLE.TeSt.  3600  IN  SOA  ns.ExaMpLE.TeSt. ...        <-- child apex SOA (wrong side of the cut)
+> # unbound — denial from the PARENT
+> $ dig @203.0.113.3 -p 5301 example.test DS
+> test.          3600  IN  SOA  a.tld.test. ...             <-- parent zone SOA
+> ```
+>
+> (The `ExaMpLE.TeSt.` casing is the resolver's 0x20 randomisation leaking into the delivered
+> authority section — see the separate 0x20-case-leak candidate.)
+
 **Classification:** coverage-gap (RFC 4034 §5 / RFC 4035 §3.1.4.1 not modeled; observable wrong-zone negative answer)
 
 **Location:** `VeriDNS/Impl/Resolver.lean` — `stepFindServers` / `walkNs` (lines ~296-345)

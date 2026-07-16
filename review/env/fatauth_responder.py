@@ -5,7 +5,7 @@ section, all name-compressed so the wire datagram fits under 512 (no TC).
 Models a non-minimal authoritative server (BIND default) that includes the
 apex NS RRset in a positive answer's authority.
 
-Binds 10.53.0.12:53 (the leaf-NS address veri-dns/unbound reach via referral).
+Binds 203.0.113.12:53 (the leaf-NS address veri-dns/unbound reach via referral).
 Run inside the 'auth' namespace after stopping nsd-leaf:
     ip netns exec auth python3 fatauth_responder.py [--count N] [--pad K]
 """
@@ -28,8 +28,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--count", type=int, default=13, help="number of NS records in authority")
     ap.add_argument("--pad", type=int, default=18, help="label length for each NS target")
-    ap.add_argument("--answer-ip", default="10.53.0.100")
-    ap.add_argument("--bind", default="10.53.0.12")
+    ap.add_argument("--answer-ip", default="203.0.113.100")
+    ap.add_argument("--bind", default="203.0.113.12")
     a = ap.parse_args()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -53,7 +53,7 @@ def main():
         nscount = a.count
         header = txid + struct.pack(">HHHHH", flags, 1, ancount, nscount, 0)
 
-        # ANSWER: example.test A 10.53.0.100 (owner = ptr to question name)
+        # ANSWER: example.test A 203.0.113.100 (owner = ptr to question name)
         answer = (struct.pack(">H", SUF)
                   + struct.pack(">HHIH", 1, 1, 3600, 4)
                   + socket.inet_aton(a.answer_ip))

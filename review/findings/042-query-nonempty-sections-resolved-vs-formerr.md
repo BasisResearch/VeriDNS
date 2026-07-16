@@ -85,3 +85,16 @@ the question and reply NOERROR.
 
 **CONFIRMED** (impl-bug, low severity, no poisoning). veri-dns answers a malformed standard
 query NOERROR where unbound answers FORMERR; the injected record is not ingested.
+
+## Regression re-verification (2026-07-15, post-remediation commit 26b5849)
+
+STILL PRESENT. Re-run on renumbered rig, both resolvers restarted. Standard
+query (opcode 0) for host.example.test A carrying a non-empty section:
+- ANCOUNT=1: veri-dns NOERROR QD=1 AN=1 (resolves normally, ignores the
+  injected record); unbound FORMERR QD=0.
+- NSCOUNT=1: veri-dns NOERROR; unbound FORMERR.
+- ARCOUNT=1: veri-dns NOERROR; unbound FORMERR (QD=1 AN=0, unbound tolerates the
+  additional section marginally differently but still FORMERRs).
+`queryProblem` (Server.lean) still never validates ANCOUNT/NSCOUNT/ARCOUNT==0
+for a query. Not in the remediation plan; low severity (no ingestion/poisoning),
+unpinned.

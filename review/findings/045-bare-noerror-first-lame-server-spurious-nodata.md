@@ -1,5 +1,59 @@
 # 045 — Bare empty NOERROR from the first-tried (lame) server yields a spurious NODATA for a name that EXISTS; unbound fails over to the good server and returns the real record
 
+---
+
+## ⚠️ REGRESSION STATUS 2026-07-15 (vs upstream 26b5849): **STILL PRESENT — never addressed. This is a WRONG ANSWER.**
+
+`docs/remediation-plan.md` **does not mention finding 045 anywhere**. Neither
+fixed, nor pinned, nor scoped out — despite being the batch's only confirmed
+*wrong answer* (not merely an availability loss).
+
+Both cited causes are **unchanged in the current source**:
+- `VeriDNS/Impl/Resolver.lean:360` — `classifiableB` still returns true for any
+  `rcode == Rcode.noError`, so a bare-empty NOERROR never routes back to
+  `.sendQueries` at `:391`.
+- `VeriDNS/Impl/Resolver.lean:435-436` — the catch-all
+  `else if resp.header.rcode == Rcode.noError && resp.answer.isEmpty then
+  .answer (finalizeAnswer s resp) s` still accepts it as final on first receipt.
+
+Note the contrast with **026/046**, which *were* fixed in this same function (the
+`.error "4b: no NS records in authority"` terminal became
+`.goto .sendQueries`). That fix covers the *non-empty-authority* shape only; the
+bare-empty shape (authority empty ⇒ the `:394` branch is not entered at all)
+still falls to `:435`. The remediation reached the neighbouring line and stopped.
+
+### Re-run of the ORIGINAL repro on the current rig
+
+Two-nameserver delegation for `flaky.test.`, lame server listed **first** in the
+TLD zone (so it heads veri-dns's SLIST):
+```
+flaky           IN NS ns1.flaky.test.    ; 203.0.113.20 LAME: bare empty NOERROR
+flaky           IN NS ns2.flaky.test.    ; 203.0.113.21 GOOD: www/v45 A 203.0.113.111
+```
+Lame server direct probe — `qr aa`, ANSWER/AUTHORITY/ADDITIONAL all 0:
+```
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 50237
+;; flags: qr aa; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 0
+```
+
+Both resolvers restarted cold; `v45.flaky.test` is a never-before-seen name that
+**exists** (A 203.0.113.111 on ns2):
+```
+-- veri-dns --
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 13632
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 0
+VERIDNS: lame-ns1 hits=1  good-ns2 hits=0      <- accepts the lame reply, never tries ns2
+
+-- unbound --
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 25291
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+v45.flaky.test.		3600	IN	A	203.0.113.111
+UNBOUND: lame-ns1 hits=0  good-ns2 hits=1
+```
+veri-dns denies a name that exists; unbound serves it. Rig restored afterwards.
+
+---
+
 - **Component:** `VeriDNS/Impl/Resolver.lean` `stepAnalyzeResponse` (:434-435), `classifiableB` (:353-358); server selection `VeriDNS/Impl/SList.lean` `bestWithAddress`/`pickBest` (:76-87)
 - **Class:** bad-spec — build green, proofs pass, yet the resolver returns an observably wrong answer (denies an existing record). The verification is not load-bearing for this behaviour.
 - **Status:** CONFIRMED on the rig — differential vs unbound reproduced deterministically.

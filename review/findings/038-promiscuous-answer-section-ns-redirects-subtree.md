@@ -2,6 +2,42 @@
 cached at answer credibility and redirects the whole in-bailiwick subtree;
 unbound strips it
 
+> **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): STILL PRESENT — full subtree
+> hijack reproduced end-to-end.** Not addressed by `docs/remediation-plan.md`.
+> The #004 remediation (`Resolver.ownerRaws`, exact-owner `nameEqCI rrName sname`) does
+> **not** help here: the promiscuous NS is smuggled with **owner == qname**, so it passes
+> both the new exact-owner cache filter and the pre-existing `scrubAnswerB` reachability
+> filter. unbound's defence is a **type** filter (`iter_scrub.c:659-664`, `qinfo->qtype !=
+> rrset->type` → remove) plus `iter_scrub_promiscuous` (`:723-747`); veri-dns still has
+> **no per-type answer filter** at all.
+>
+> Re-run on 203.0.113.0/24 (`penn-testing/_vmdns/evilleaf.py ns038`, plus a `marker`
+> responder on 203.0.113.20 standing in for the attacker-chosen NS; the redirect target is
+> on TEST-NET-3 so the shipped `doNotQueryNets` egress filter stays active and honest):
+>
+> ```
+> # veri-dns: promiscuous NS both DELIVERED to the client and cached at answer credibility
+> $ dig @203.0.113.2 -p 5300 www.example.test A
+> ;; ANSWER: 2
+> www.example.test.  300  IN  A   1.2.3.4
+> www.example.test.  300  IN  NS  evil.example.test.     <-- promiscuous, delivered
+>
+> # veri-dns: the whole subtree is now hijacked to the attacker's server
+> $ dig @203.0.113.2 -p 5300 host.www.example.test A
+> host.www.example.test.  300  IN  A  6.6.6.6            <-- attacker's answer
+>
+> # marker (203.0.113.20 = attacker-chosen NS) log — PROOF of the redirect:
+> [evilleaf] q HOsT.wWW.examPLe.TeST/1 from 203.0.113.2
+>
+> # unbound: strips the promiscuous NS, resolves from the legitimate leaf
+> $ dig @203.0.113.3 -p 5301 www.example.test A          ;; ANSWER: 1  (A only, NS stripped)
+> $ dig @203.0.113.3 -p 5301 host.www.example.test A
+> host.www.example.test.  300  IN  A  203.0.113.101      <-- real address
+> ```
+> The marker log line is the smoking gun: veri-dns sent a descendant query to an
+> attacker-nominated nameserver purely on the strength of an unsolicited NS RRset in a
+> positive answer.
+
 - **Component:** `VeriDNS/Impl/Resolver.lean:423-429` (answer branch caches
   `bailiwickRaws(sname, resp.answer)` via `cacheUnlessTruncated` at
   `credAnswer(aa)=authoritativeSection`, **type-agnostically**) +

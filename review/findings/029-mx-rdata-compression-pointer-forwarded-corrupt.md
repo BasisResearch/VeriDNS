@@ -97,3 +97,68 @@ common case). The fix is to decompress name-bearing RDATA for all such types
 - Rig restored afterward: `mx-responder` stopped, `veridns-auth-leaf` re-launched
   via `systemd-run`, `veridns-verid` restarted; `host.example.test A` →
   10.53.0.101 and `www.example.test` → example.test A 10.53.0.100 confirmed.
+
+## Regression re-verification (2026-07-15, post-remediation commit 26b5849)
+
+**FIXED — verified on the rig.** (This finding is the one `REPORT.md:81` and the
+remediation plan track as **037**; the file named `037-*.md` on disk is the
+unrelated, still-unfixed A/AAAA rdlength issue.) `decodeRRCanonical`
+(`Impl/Message.lean:39-47`) gained a unified fixed-prefix-then-name arm for
+MX(15) and SRV(33) that decodes and re-encodes the embedded name with the same
+rdlength-agreement check as NS/CNAME/PTR/SOA.
+
+Repro rebuilt as `penn-testing/_vmdns/mx_responder3.py` on 203.0.113.12 (leaf
+`nsd` stopped), emitting the real-world BIND case — an MX whose EXCHANGE ends in
+a legitimate **backward** pointer `0xC00C` → the question name:
+`rdata = 000a | 04 "mail" | c00c`, rdlen=9.
+
+The decisive tell is the re-emitted RDLENGTH, since a verbatim `c00c` would
+coincidentally still dereference to the question name in veri-dns's own packet:
+
+```
+=== VERID 203.0.113.2:5300 ===
+  len=75 rcode=0 AN=1
+  ANSWER type=15 rdlen=21 rdata=000a046d61696c074558614d506c4504546553540 0
+  -> no pointer: name written literally (DECOMPRESSED)
+  dig: example.test. 3600 IN MX 10 mail.EXaMPlE.TeST.
+=== UNBOUND 203.0.113.3:5301 ===
+  len=51 rcode=0 AN=1
+  ANSWER type=15 rdlen=9 rdata=000a046d61696cc00c
+  dig: example.test. 3600 IN MX 10 mail.example.test.
+```
+
+veri-dns re-emits the exchange with **rdlen 9 → 21 and no compression pointer**:
+it decompressed on ingest and wrote the name out literally. (unbound's rdlen=9 /
+`c00c` is unbound legitimately *re-compressing* against its own question name at
+offset 12 — self-consistent within its own packet, not the bug.) The original
+symptom — `;; Got bad packet: bad label type`, the stale pointer landing
+mid-TTL-field — is gone.
+
+Independent confirmation that the rdata name is now genuinely **parsed** rather
+than copied: a crafted MX with a *forward* pointer (target in the authority
+section, `mx_responder2.py`) makes veri-dns **SERVFAIL** where it previously
+copied the bytes through — the new arm runs `decodeName`, which rejects
+forward pointers. unbound resolves that same packet to
+`10 mail.bigmailserver.example.test`. Forward pointers are malformed under
+RFC 1035 §4.1.4, so veri-dns's strictness is defensible, but it is a
+**fix-introduced availability divergence** vs the reference: a nonconformant
+compressing authoritative that veri-dns previously "served" (corruptly) now
+fails the whole resolution. Logged as a low-severity candidate.
+
+**Scope of the fix — still opaque:** only MX(15) and SRV(33) were added. Other
+non-obsolete name-bearing RDATA types remain on the `readBytes rdlen`
+fall-through and would still forward pointers verbatim: **NAPTR(35), RP(17),
+KX(36)**. The plan justifies the remaining opaque types as "obsolete
+(MB/MG/MR/MINFO)", which does not cover NAPTR/RP/KX. Original finding text cites
+exactly these types. Partial fix; the residue is untested here (no rig repro
+run for NAPTR/RP/KX).
+
+**Fix quality:** **theorem-pinned.** The plan adds a `CanonicalRdata.prefixedName`
+constructor with one new arm per canonicity theorem (~230 lines), plus
+`mxPointerDecompressed`, `srvPointerDecompressed`, `mxBadRdlenRejected`. The new
+constructor means reverting the arm would not merely fail a unit test — the
+canonicity proofs are stated over the datatype and would go red.
+
+Cosmetic side effect observed: the decompressed exchange inherits the **0x20
+case randomization** of the upstream question name and is served to the client
+that way (`mail.EXaMPlE.TeST.`). Logged as a separate candidate.

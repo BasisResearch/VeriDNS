@@ -1,5 +1,17 @@
 # 024 — Negative-cache spec MANDATES aa-blindness; hardening (REC_LAME) is proof-forbidden
 
+> **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): STILL PRESENT.** Both artifacts are
+> verbatim unchanged: `Server.negativelyCacheable` (`Impl/Server.lean:104`) is still
+> `tc == 0 && (rcode == nameError || (rcode == noError && answer.isEmpty))` with no `aa` term,
+> and the pinning IFF `negativelyCacheable_iff_absorbNeg_trigger` has merely moved to
+> `Proof/Refinement.lean:5195` with the same aa-free statement — so adding `&& aa == 1` still
+> falsifies the `←` direction. The mutation itself was **not** re-run (this stage may not build).
+> Runtime reachability re-confirmed on the rig (`penn-testing/_vmdns/evilleaf.py lamenx024`, a
+> leaf emitting **aa=0** NXDOMAIN + zone SOA): veri-dns negatively cached the non-authoritative
+> denial — Q2 came back at TTL 3599 with a single upstream query in the leaf log. unbound
+> accepted the same denial here (sole server for the zone), so this is a spec/hardening gap,
+> not a differential.
+
 - id: M-negcache-aa-harden-reveals-mandated-lameness
 - classification: **bad-spec** (spec obligation forbids a security fix)
 - build: **broke** (reverse probe: the mutation is a hardening, and verification rejects it)

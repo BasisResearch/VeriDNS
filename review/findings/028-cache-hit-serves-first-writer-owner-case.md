@@ -1,5 +1,26 @@
 # 028 — Cache hit serves the FIRST writer's owner-name case; answer owner is never re-canonicalized to the client's QNAME
 
+> **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): FIXED — verified on the rig
+> (apparently as a side effect, not by intent).** Every client reply now goes through
+> `Server.deliveredResponse` (`Impl/Server.lean:742`) → `scrubAnswerB (clientQname query)`,
+> whose `setOwnerB` rewrites each surviving answer owner to the *client's* QNAME bytes
+> (the reach set is seeded with `#[qname]`). Re-run of the original repro, cold cache:
+>
+> ```
+> $ dig @203.0.113.2 -p 5300 host.example.test A   ->  host.example.test.  3600 IN A 203.0.113.101
+> $ dig @203.0.113.2 -p 5300 HOST.EXAMPLE.TEST A   ->  HOST.EXAMPLE.TEST.  3599 IN A 203.0.113.101
+> $ dig @203.0.113.2 -p 5300 HoSt.ExAmPlE.tEsT A   ->  HoSt.ExAmPlE.tEsT.  3600 IN A 203.0.113.101
+> # cache-hit proof: TTL aged to 3599 AND tcpdump on v-verid counted 0 upstream packets
+> # during the uppercase query. unbound behaves identically.
+> ```
+>
+> **Unpinned for the *case* property**: `deliveredResponse_answer` pins the delivered answer to
+> `scrubAnswerB`'s output, but the abstraction is case-folding (`nameEqCI`/`αName`), so no
+> theorem statement obligates the owner *bytes* to equal the client's QNAME. The fix is real but
+> can silently regress; #003's underlying gap (names modelled up-to-case) is unchanged.
+> Note the sibling leak is *not* fixed: delivered **RDATA** names still carry the resolver's
+> 0x20 case (`www.example.test` → `CNAME EXAMple.TESt.`), see #053 and the 0x20-leak candidate.
+
 - **Severity:** low (cosmetic / protocol hygiene; RDATA and resolution identical to reference).
 - **Class:** coverage-gap (refines finding 003; the verified spec models names up-to-case-fold, so no theorem obligates the answer owner's case, and the cache-serving path is entirely outside the verified case surface).
 - **On/off-path:** client-delivery boundary, cache-hit path (`Server.replyForResolution` serving a `DnsCache` RRset stored with first-seen owner bytes).

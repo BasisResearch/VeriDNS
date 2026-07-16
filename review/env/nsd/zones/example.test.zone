@@ -4,10 +4,10 @@ $ORIGIN example.test.
 @       IN SOA ns.example.test. hostmaster.example.test. (
             1 3600 900 604800 3600 )
 @       IN NS  ns.example.test.
-ns      IN A   10.53.0.12
+ns      IN A   203.0.113.12
 
 ; Records used for differential testing / cache experiments.
-@       IN A     10.53.0.100
-host    IN A     10.53.0.101
+@       IN A     203.0.113.100
+host    IN A     203.0.113.101
 www     IN CNAME example.test.
 alias   IN CNAME host.example.test.

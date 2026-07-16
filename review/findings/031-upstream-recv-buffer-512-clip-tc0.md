@@ -135,3 +135,60 @@ TCP (see 015). Do not set the Lean array size to a count that severs a record.
 - Orchestration: `penn-testing/_vmdns/run-big.sh` (`big` / `small` modes)
 - Rig restored afterwards: `nsd-leaf` relaunched, `host.example.test A
   10.53.0.101` served again.
+
+---
+
+## REGRESSION 2026-07-16 (post-remediation 26b5849) — PARTIALLY FIXED: cap raised 512→1232, mechanism intact above 1232
+
+**Original repro window (>512B, ≤1232B TC=0) no longer reproduces — verified on the rig.**
+Upstream bumped the FFI constant only: `ffi/recvfrom.c:1` is now
+`#define VERI_DNS_UPSTREAM_BUFSIZE 1232` (was 512). Combined with the new EDNS0
+advertisement (`Impl/Edns.advertisedUdpSize = 1232`, emitted at
+`Impl/Resolver.lean:486`), a sub-1232 answer now survives:
+
+Leaf responder on 203.0.113.12:53 returning 25 A records, TC=0, single datagram
+(886B non-EDNS / 923B to veri-dns's EDNS query):
+
+```
+verid:   status: NOERROR  ANSWER: 25   (203.0.113.101 + 24 more)   <- was SERVFAIL
+unbound: status: NOERROR  ANSWER: 25
+responder log: UDP ('203.0.113.2', 38873) qtype=1 edns=True -> 923B tc=0     # ONE query, no storm
+```
+
+**But the defect mechanism is unchanged — only the constant moved.** The FFI still
+ignores datagram truncation: `ffi/recvfrom.c:270` is still `recvmsg(fd, &msg, 0)`
+(flags=0, `MSG_TRUNC` never requested) and `:280` still does
+`lean_to_sarray(buf)->m_size = (size_t)n` with **no `msg.msg_flags & MSG_TRUNC`
+check**. The finding's own suggested fix ("inspect `msg.msg_flags & MSG_TRUNC`")
+was not applied. So the identical pathology — silent clip → mid-record decode
+failure → `forwardQuery none` → re-query storm → SERVFAIL — simply relocated to
+>1232B, where unbound (msg-buffer-size 65552, accepts oversized datagrams beyond
+its own advertisement) still succeeds:
+
+Same responder, 60 A records → 2087B TC=0 single datagram:
+
+```
+verid:   status: SERVFAIL  ANSWER: 0
+unbound: status: NOERROR   ANSWER: 60
+upstream queries fired for the one name:  veri-dns 41   vs   unbound 2
+```
+
+The ~40x re-query amplification storm from the original finding reproduces
+*exactly* (41 queries). Unbound disagrees on the identical path against the
+identical datagram, so this remains a genuine VeriDNS bug, not the trust model.
+
+**Reachability caveat:** an authority sending 2087B when the resolver advertised
+1232 is itself misbehaving, so the >1232 trigger is rarer than the original
+>512 one (which needed no misbehaviour at all — any non-EDNS-truncating server
+hit it). Severity accordingly drops from medium to low-medium. But the class is
+unchanged and real-world triggers remain (middleboxes, servers ignoring the
+advertised size, DNSSEC/large-TXT responses).
+
+**Fix quality: UNPINNED.** No theorem constrains the FFI receive path or relates
+the received byte count to the advertised size — `VERI_DNS_UPSTREAM_BUFSIZE` is a
+C preprocessor constant with no Lean-side counterpart, so nothing links it to
+`Edns.advertisedUdpSize`. Reverting `1232` to `512` in `ffi/recvfrom.c` would
+rebuild green and silently restore the original bug. The two constants are keyed
+to each other by comment/convention only; a future bump of
+`Edns.advertisedUdpSize` without a matching FFI bump re-opens the exact original
+window. This is a coverage-gap, not a verified fix.

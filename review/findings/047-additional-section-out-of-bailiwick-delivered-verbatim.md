@@ -1,5 +1,22 @@
 # 047 — Attacker-injected out-of-bailiwick ADDITIONAL A records are delivered to the client verbatim; unbound strips the entire injected additional section
 
+> **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): STILL PRESENT — UNFIXED.**
+> Not addressed by `docs/remediation-plan.md` (it is absent from the plan entirely).
+> The remediation added `Server.scrubAuthorityB` and wired it into `deliveredResponse`
+> for the #012/#013 residual, but `resp.additional` is still carried through verbatim by
+> the record spread at `VeriDNS/Impl/Server.lean:743-752` — and `arcount` is not even
+> recomputed (only `ancount`/`nscount` are). Re-run on the renumbered 203.0.113.0/24 rig
+> with `penn-testing/_vmdns/evilleaf.py addl047`, both resolvers restarted cold:
+> veri-dns returns `ADDITIONAL: 2` carrying `bank.example.test. A 6.6.6.6` **and the
+> out-of-bailiwick `evil.attacker.test. A 6.6.6.6`**; unbound returns `ADDITIONAL: 1`
+> (the EDNS OPT only). Exactly the original behaviour.
+>
+> **Coverage:** the delivered additional section is *unpinned*. `VeriDNS/Proof/DeliveredWire.lean`
+> constrains it only for **count and canonicity** (`msg.header.arcount.toNat = msg.additional.size`,
+> `CanonicalSection msg.additional`) — no obligation whatsoever on record *ownership*. Contrast
+> `deliveredResponse_authority_owned` (`VeriDNS/Proof/Server.lean:639`), which now pins the
+> authority section. A fix here would need a matching `deliveredResponse_additional_owned`.
+
 **Classification:** impl-bug (observable client-visible divergence from unbound; forged-record delivery to stub resolvers / additional-trusting apps)
 
 **Component:** `VeriDNS/Impl/Server.lean` `replyForResolution` (:460-481) + `finalizeForClient` (:29-31)

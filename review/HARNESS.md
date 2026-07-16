@@ -22,14 +22,46 @@ name* against the *same authoritative data*, and we diff the wire.
 ## 2. Rig architecture
 
 One VM (~2 GiB, under the 12 GiB host budget), all resolvers and servers in
-Linux network namespaces on a bridge `brdns` (10.53.0.0/24) inside it:
+Linux network namespaces on a bridge `brdns` (203.0.113.0/24) inside it:
 
 | netns | address(es) | runs | port |
 |---|---|---|---|
-| `auth` | 10.53.0.10/.11/.12 **and the 5 real root IPs** (198.41.0.4, 199.9.14.201, 192.33.14.30, 199.7.91.13, 192.203.230.10) | 3× `nsd`: root `.`, tld `test.`, leaf `example.test.` | 53 |
-| `verid` | 10.53.0.2 | **veri-dns** (system under test) | **5300** |
-| `unbound` | 10.53.0.3 | **unbound** (reference oracle) | **5301** |
-| `attacker` | 10.53.0.99 | `dig`, `tcpdump`, `spoof.py`, crafted-packet responders | — |
+| `auth` | 203.0.113.10/.11/.12 **and the 5 real root IPs** (198.41.0.4, 199.9.14.201, 192.33.14.30, 199.7.91.13, 192.203.230.10) | 3× `nsd`: root `.`, tld `test.`, leaf `example.test.` | 53 |
+| `verid` | 203.0.113.2 | **veri-dns** (system under test) | **5300** |
+| `unbound` | 203.0.113.3 | **unbound** (reference oracle) | **5301** |
+| `attacker` | **192.168.53.99** (not TEST-NET-3 — see below) | `dig`, `tcpdump`, `spoof.py`, crafted-packet responders | — |
+
+### 2.1 Why two subnets (read this before "fixing" the addressing)
+
+The rig was renumbered off `10.53.0.0/24`, and the client sits on a *different*
+subnet from the servers. Both facts are forced by veri-dns itself — two ACLs in
+`VeriDNS/Impl/Server.lean` that point in opposite directions:
+
+| ACL | direction | covers |
+|---|---|---|
+| `doNotQueryNets` (~:336) | egress — refuses to **query** | 0/8, 127/8, **10/8**, 100.64/10, 169.254/16, **172.16/12**, **192.168/16**, 240/4 |
+| `defaultAcl` (~:159) | ingress — only **accepts clients** from | 127/8, **10/8**, **172.16/12**, **192.168/16** |
+
+`defaultAcl` is an exact **subset** of `doNotQueryNets`, so the set of addresses
+veri-dns will both talk to *and* accept queries from is **empty**. One subnet
+cannot host both roles:
+
+- **Auth servers must be outside `doNotQueryNets`** → `203.0.113.0/24`
+  (TEST-NET-3). On the old `10.53.0.0/24` the resolver refused to query its own
+  auth servers and every test failed spuriously.
+- **The client must be inside `defaultAcl`** → `192.168.53.99`. On
+  `203.0.113.99` its queries are **silently dropped** by
+  `if !permitted acl clientAddr then return cache` (UDP: timeout; TCP:
+  accept-then-EOF). That is correct resolver behavior toward a stranger, not a
+  bug — it just means the rig must split the two roles.
+
+A client address is never an egress target, so putting the client in 192.168/16
+does **not** weaken the egress filter. The filter stays **ACTIVE and honest**;
+`VERI_DNS_ALLOW_LOOPBACK_EGRESS` is **not** set (setting it would disable the
+shipped filter and mask real egress bugs). Both subnets share the one bridge, so
+plain on-link routes carry traffic between them. `unbound.conf` mirrors the
+split with `access-control: 192.168.53.0/24 allow` — omit it and the oracle
+REFUSEs the very queries veri-dns answers.
 
 **The key trick:** veri-dns has the real root-server IPs hardcoded
 (`VeriDNS/Main.lean:12-18`) and the review may not patch the source. So the fake
@@ -43,8 +75,8 @@ grandchild names authoritatively from the root IP, which changes both resolvers'
 behavior and destroys the differential. Root/TLD/leaf must be separate so real
 referrals happen.
 
-Zone data (`review/env/nsd/zones/`): `example.test A 10.53.0.100`,
-`host.example.test A 10.53.0.101`, `www.example.test CNAME example.test`,
+Zone data (`review/env/nsd/zones/`): `example.test A 203.0.113.100`,
+`host.example.test A 203.0.113.101`, `www.example.test CNAME example.test`,
 plus `rogue-example.test.zone` (attacker-controlled variant, activated by adding
 a zone stanza to `nsd-root.conf` — used for rogue-ancestor experiments).
 

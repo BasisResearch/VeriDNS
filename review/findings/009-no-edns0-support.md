@@ -79,3 +79,77 @@ upstream query path and is anchored to RFC 1035's 512-byte text; RFC 6891 is not
 among the RFCs in `rfc/`, so no theorem constrains the client-facing OPT
 handling. Closing the gap requires importing RFC 6891 and specifying
 responder-side OPT echo + BADVERS.
+
+---
+
+## REGRESSION 2026-07-16 (post-remediation 26b5849) — PARTIALLY FIXED (plan's "scoped out" is STALE — EDNS0 landed)
+
+`docs/remediation-plan.md:760` still lists **016 "no EDNS0 / OPT ignored" as
+"scoped out"** ("same stance as TCP … Revisit only if >512-byte answers become a
+requirement"). **That row is stale.** EDNS0 in fact shipped in 26b5849:
+`VeriDNS/Impl/Edns.lean` is new (`advertisedUdpSize := 1232`, `optRR`, `clientCap`,
+`stripOpt`), wired at `Impl/Resolver.lean:486` (upstream query carries an OPT) and
+`Impl/Server.lean:797` (`truncateUdp … (Edns.clientCap query)`). The commit message
+says so explicitly ("EDNS0 (stage E, 1232-byte advertisement end-to-end incl. the
+FFI recv buffer)"). Two of the finding's defects are genuinely fixed; two remain.
+
+### FIXED and verified on the wire
+
+**Upstream OPT is now emitted** (tcpdump on `v-auth`, `[1au]` = one additional/OPT;
+0x20 case-randomization also visible):
+
+```
+IP 203.0.113.2.35789 > 203.0.113.12.53: 36507 [1au] A? EdnSTest3.exampLE.tESt. (51)
+```
+
+**The client's advertised size is honored** — a 25-A-record (886B) answer is now
+delivered to an EDNS client over UDP intact, where the legacy 512 cap would have
+truncated it (this is also what closes the original half of #031):
+
+```
+verid (dig default, EDNS): status: NOERROR  ANSWER: 25   no truncation
+```
+
+`Edns.clientCap` correctly floors sub-512 advertisements at 512 per RFC 6891
+§6.2.3 (`max 512 (min adv 1232)`), and `clientCap_le` pins the 1232 ceiling.
+
+### STILL PRESENT — both halves of the original finding's client-facing side
+
+**1. No OPT in responses (RFC 6891 §6.1.1 MUST).** veri-dns consumes the client's
+OPT (to size `clientCap`) but never returns one — `Edns.optRRBytes` is referenced
+*only* at `Resolver.lean:486`, the upstream query; no client reply path adds an
+OPT. Across every probe in this run veri-dns emitted no `; EDNS:` line while
+unbound always did:
+
+```
+verid   (+edns=0 +bufsize=4096):  status: NOERROR  ANSWER: 1   (no EDNS: line — no OPT)
+unbound (+edns=0 +bufsize=4096):  status: NOERROR  ANSWER: 1   ; EDNS: version: 0, flags:; udp: 1232
+```
+
+RFC 6891 §6.1.1: "If an OPT record is present in a received request, compliant
+responders MUST include an OPT record in their respective responses." veri-dns
+takes EDNS's benefit (sends up to 1232B to the client) without signalling EDNS
+support, so a client cannot learn the server is EDNS-capable.
+
+**2. No BADVERS on unsupported EDNS version (RFC 6891 §6.1.3).** Unchanged from
+the original finding — an EDNS version 1 query is answered NOERROR-with-data:
+
+```
+verid   (+edns=1):  status: NOERROR, host.example.test A 203.0.113.101      <- must be BADVERS (RCODE 16)
+unbound (+edns=1):  ;; BADVERS, retrying with EDNS version 0.  -> NOERROR
+```
+
+Unbound disagrees on both halves, so both remain genuine VeriDNS defects.
+
+### Fix quality
+
+The landed half is **partially pinned**: `Edns.clientCap_le` and
+`ResolveWithIOSound.lean:3794` (`clientCap query ≤ 1232`) constrain the cap, and
+`Spec/NetworkSemantics.lean:4015-4018` pins `truncateToCap (negotiatedUdp 1232)`.
+But the **FFI receive buffer is unpinned and uncoupled**: `ffi/recvfrom.c:1`'s
+`VERI_DNS_UPSTREAM_BUFSIZE 1232` and `Edns.advertisedUdpSize := 1232` are two
+independent literals with no theorem relating them (grep confirms no shared
+definition). Advertising 1232 while receiving into a differently-sized buffer is
+exactly the #031 failure mode; the two constants are keyed by convention only.
+The two still-present halves (response OPT, BADVERS) are pinned by nothing —
+no spec obligation mentions either.

@@ -1,6 +1,33 @@
 # 019 — Client-answer scrub authenticates by CNAME-reachability, not bailiwick: out-of-zone A for a CNAME target is delivered verbatim
 
 - **Status:** CONFIRMED (impl-bug) — reproduced on the rig against the running binary.
+- **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): STILL PRESENT.** Not addressed by
+  `docs/remediation-plan.md`. `reachStepB` still adds CNAME **targets** to the reach set with
+  **no bailiwick/zonename check** (`VeriDNS/Impl/AnswerScrub.lean`), so an out-of-zone target's
+  inline A still survives `scrubAnswerB` and is delivered. Re-run on 203.0.113.0/24
+  (`penn-testing/_vmdns/evilleaf.py cname019`), both resolvers cold:
+
+  ```
+  # veri-dns — DELIVERS the out-of-bailiwick A verbatim, status NOERROR
+  $ dig @203.0.113.2 -p 5300 conduit.example.test A
+  ;; status: NOERROR;  ANSWER: 2
+  conduit.example.test.  300  IN  CNAME  evil.attacker.test.
+  evil.attacker.test.    300  IN  A      6.6.6.6        <-- foreign zone, attacker-chosen
+
+  # unbound — strips the inline A and re-resolves the target independently
+  $ dig @203.0.113.3 -p 5301 conduit.example.test A
+  ;; status: NXDOMAIN;  ANSWER: 1
+  conduit.example.test.  300  IN  CNAME  evil.attacker.test.
+  ```
+
+  The original finding's "never cached, only delivered" characterisation still holds and is
+  now **confirmed against the remediated binary**: a direct `dig @203.0.113.2 evil.attacker.test A`
+  returns NXDOMAIN, so the answerable cache is clean (the new `ownerRaws` exact-owner filter on
+  the cache-write path keeps it that way). The leak is client-delivery only — same shape as #047.
+  **Note the interaction with #004:** the pre-remediation cache filter was
+  `isAncestorB sname owner`, which would have *rejected* `evil.attacker.test`; the delivery-side
+  `scrubAnswerB` reachability rule is strictly *more* permissive for out-of-bailiwick CNAME
+  targets. Any fix must intersect reachability with a bailiwick check, not replace one with the other.
 - **Component:** `VeriDNS/Impl/AnswerScrub.lean` (`reachTarget?`/`reachStepB`/`scrubAnswerB`) +
   classification short-circuit `VeriDNS/Impl/Resolver.lean:75-82` (`answersQueryB`/`cnameToChase`) +
   delivery `VeriDNS/Impl/Server.lean` (`replyForResolution`).

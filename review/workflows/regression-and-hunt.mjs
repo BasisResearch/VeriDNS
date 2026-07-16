@@ -41,12 +41,17 @@ const MAX_ROUNDS = 12
 const DRY_ROUNDS_TO_STOP = 2
 
 const NET = '203.0.113'
+// The client/attacker canNOT live on NET: veri-dns's defaultAcl (Server.lean
+// ~:159) only accepts clients from 127/8, 10/8, 172.16/12, 192.168/16 — an
+// exact SUBSET of doNotQueryNets. So no single subnet can be both queryable by
+// veri-dns and an allowed client; the rig splits the two roles. See HARNESS.md 2.1.
+const CLIENT = '192.168.53.99'
 const RIG = `RIG (runbook: ${REPO}/review/ENV.md; architecture: ${REPO}/review/HARNESS.md):
 - The rig is RENUMBERED to ${NET}.0/24 (TEST-NET-3). The old docs/scripts say 10.53.0.0/24 — that is STALE. Upstream's doNotQueryNets (VeriDNS/Impl/Server.lean:336) blocks 10/8, so on the old addresses veri-dns refuses to query its own auth servers. ${NET}.0/24 is NOT filtered, so the shipped egress filter stays ACTIVE and honest.
 - veri-dns (system under test) @${NET}.2:5300 in netns 'verid'; unbound (reference oracle) @${NET}.3:5301 in netns 'unbound'.
 - nsd authoritative, one per level: root '.' / tld 'test.' / leaf 'example.test.' at ${NET}.10/.11/.12 (root ALSO binds the 5 real root IPs, which veri-dns hardcodes in Main.lean).
 - Zones in ${REPO}/review/env/nsd/zones: example.test A=${NET}.100, host.example.test A=${NET}.101, www CNAME example.test. Plus rogue-example.test.zone.
-- attacker/client vantage: netns 'attacker' ${NET}.99 (dig, tcpdump, spoof.py, crafted responders).
+- attacker/client vantage: netns 'attacker' ${CLIENT} (dig, tcpdump, spoof.py, crafted responders). NOTE the client is on 192.168.53.0/24, NOT on ${NET}.0/24: veri-dns's defaultAcl only accepts clients from 127/8, 10/8, 172.16/12, 192.168/16, so a client on ${NET}.99 has its queries SILENTLY DROPPED (UDP times out, TCP accept-then-EOF, no log line). Both subnets share the bridge. This does NOT weaken the egress filter — a client is never an egress target.
 - The rig lives INSIDE the VM. Reach it ONLY via: ${REPO}/penn-testing/vm/ssh.sh '<cmd>'
 - Query veri-dns: ${REPO}/penn-testing/vm/ssh.sh 'ip netns exec attacker dig @${NET}.2 -p 5300 <name> <type>'
 - Query unbound:  ${REPO}/penn-testing/vm/ssh.sh 'ip netns exec attacker dig @${NET}.3 -p 5301 <name> <type>'

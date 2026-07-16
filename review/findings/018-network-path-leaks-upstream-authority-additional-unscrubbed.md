@@ -4,6 +4,27 @@
 - **Class:** impl-bug (response hygiene / non-minimal responses; unscrubbed pass-through surface)
 - **Severity:** low — benign against the honest rig, but any record a queried server places in AUTHORITY/ADDITIONAL reaches the client verbatim
 - **Status:** CONFIRMED on the running rig (differential vs unbound)
+- **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): PARTIALLY FIXED — the leak persists.**
+  `deliveredResponse` (`VeriDNS/Impl/Server.lean:743-752`) now applies `scrubAuthorityB`, but that
+  filter only keeps `isAncestorB rr.name qname` — i.e. it strips **out-of-bailiwick** authority
+  (the #012/#013 poison-SOA case, now genuinely fixed) while the ordinary in-bailiwick delegation
+  NS still passes, and **`resp.additional` is untouched entirely** (see #047; `arcount` is not even
+  recomputed). Re-run on the honest 203.0.113.0/24 rig, cache-miss, both resolvers cold:
+
+  ```
+  # veri-dns — still non-minimal
+  ;; ANSWER: 1, AUTHORITY: 1, ADDITIONAL: 1
+  host.example.test.  3600  IN  A   203.0.113.101
+  EXAmPLe.TEst.       3600  IN  NS  ns.EXAmPLe.TEst.     <-- authority leaked
+  ns.EXAmPLe.TEst.    3600  IN  A   203.0.113.12         <-- glue leaked
+  # unbound — minimal-responses
+  ;; ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1   (ADDITIONAL is the EDNS OPT only)
+  ```
+
+  The severity remains low on its own, but #047 shows the same unscrubbed additional path carries
+  **arbitrary attacker-chosen out-of-bailiwick records**. Note also the `EXAmPLe.TEst.` casing: the
+  resolver's 0x20 upstream randomisation is leaking into the client-delivered authority/additional
+  (see the new candidate on 0x20 case leakage).
 
 ## Summary
 

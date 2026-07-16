@@ -107,3 +107,16 @@ section). Here OPT is the *question* QTYPE and is actively recursed.
 - RFC 6895 §3.1 — OPT(41) is a meta-type; 251-254 are "QTYPE only" request codes.
 - RFC 1035 §3.2.3 — AXFR(252), MAILB(253), MAILA(254 obsolete) are QTYPE-only.
 - Reference resolver: unbound returns FORMERR (OPT/MAILA/MAILB) / REFUSED (AXFR/IXFR).
+
+## Regression re-verification (2026-07-15, post-remediation commit 26b5849)
+
+STILL PRESENT. Re-run on renumbered rig, both resolvers restarted.
+- QTYPE=41 (OPT): veri-dns recurses to NXDOMAIN (123B, NS=1 SOA); unbound
+  FORMERR.
+- QTYPE=253/254 (MAILB/MAILA): veri-dns NXDOMAIN; unbound FORMERR.
+- QTYPE=252/251 (AXFR/IXFR): veri-dns SERVFAIL; unbound REFUSED.
+Malformed OPT egress confirmed on the wire (tcpdump v-verid):
+`203.0.113.2.48342 > 203.0.113.12.53: 25550 [1au] OPT? fREshoPt-EG11.exaMPle.TesT.`
+— veri-dns still emits a question-section OPT QTYPE upstream (now additionally
+0x20-case-randomized). `queryProblem` still screens only opcode/qcount/RD, never
+`question[0].qtype`. Not in the remediation plan; unpinned, unfixed.

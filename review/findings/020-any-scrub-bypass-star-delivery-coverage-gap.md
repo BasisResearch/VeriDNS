@@ -1,5 +1,21 @@
 # 020 — QTYPE=ANY client-delivery scrub bypass leaks foreign answer records (coverage-gap)
 
+> **REGRESSION RE-TEST vs upstream 26b5849 (2026-07-15): the coverage gap looks CLOSED —
+> code/proof-statement evidence only (this stage may not build, so the mutation was not re-run).**
+> The delivery step is now a named function `Server.deliveredResponse` (`Impl/Server.lean:742`)
+> with two **unconditional, qtype-free** pins:
+> - `deliveredResponse_answer` (`Proof/Server.lean:620`): delivered answer **=**
+>   `scrubAnswerB (clientQname query) resp.answer`;
+> - `deliveredResponse_authentic` (`Proof/Server.lean:651`): *every* delivered answer record is
+>   `CnameReachableB` from `clientQname query`.
+>
+> A `if qtype == 255 then resp.answer else scrubAnswerB …` mutation makes both **statements**
+> false for a star query carrying a foreign RR, so this is a semantic pin, not a tactic. The old
+> vacuous `q.qtype ≠ QType.star` premise still exists in `Proof/IoResumeSound.lean:3505`, but it
+> is no longer the only thing standing between an ANY query and the scrub.
+> **Caveat:** the pin is only as strong as `scrubAnswerB`, which authenticates by CNAME
+> reachability with no bailiwick test — see #019, still unfixed.
+
 ## Classification
 coverage-gap — build stays GREEN, resolver is observably wrong, and no theorem's
 statement constrains `replyForResolution`'s delivered answer for the star case.

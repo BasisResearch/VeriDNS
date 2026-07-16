@@ -2,6 +2,80 @@
 
 **Classification:** impl-bug (robustness / availability; spoof-race window). Observably weaker than unbound.
 
+---
+
+## ⚠️ REGRESSION STATUS 2026-07-15 (vs upstream 26b5849): **STILL PRESENT — the fix is INCOMPLETE**
+
+`docs/remediation-plan.md:376` claims *"✅ FIXED 2026-07-09"*. The C code did change
+(`ffi/recvfrom.c:244-281`: a `recvmsg` loop against a monotonic 2 s deadline with
+`SO_RCVTIMEO` re-arm), **but the loop only skips datagrams whose SOURCE ADDRESS
+does not match `dest`**:
+
+```c
+if (sender.sin_addr.s_addr != dest.sin_addr.s_addr ||
+    sender.sin_port != dest.sin_port)
+    continue;              /* only a THIRD-PARTY source is skipped */
+lean_to_sarray(buf)->m_size = (size_t)n;
+break;                     /* FIRST source-matching datagram wins, junk or not */
+```
+
+A junk datagram arriving from the **legitimate source IP:port** — an on-path
+attacker, or a misbehaving/hostile authoritative server, **which is exactly what
+the original repro (`dblsend.py`, junk sent from the responder's own socket)
+does** — still satisfies the source match, still `break`s the loop, is still
+handed to Lean as *the* reply, still fails the Lean gate, and still forces a
+re-query. The original repro reproduces unchanged.
+
+**Upstream's own verification tested the wrong case.** The plan describes
+`exchange-junk-test` as a *"mock server + **third-source** junk socket on
+loopback"* — i.e. it exercises the source-mismatch path the fix added, not the
+same-source junk the finding reported.
+
+### Re-run of the ORIGINAL repro on the current rig (binary md5 `aecb30f9033559304160e082a145ee39`, matches the host build of 26b5849)
+
+Setup: warm both resolvers, stop `veridns-auth-leaf`, bind `dblsend.py` on the
+same `203.0.113.12:53`. Both resolvers restarted before the differential.
+
+DOUBLE mode (junk from the responder's own socket, then the real answer):
+```
+-- veri-dns d1.example.test --
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 48375
+-- unbound  d1.example.test --
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 16483
+d1.example.test.	300	IN	A	203.0.113.101
+```
+
+dblsend log — veri-dns burns its round budget re-querying from a fresh ephemeral
+port each time (11+ attempts); unbound queries once and is answered:
+```
+[dblsend] JUNK+ANSWER -> ('203.0.113.2', 47324) qtype=1 b'\x02d1\x07exAmPLE\x04TEsT\x00'
+[dblsend] JUNK+ANSWER -> ('203.0.113.2', 49632) qtype=1 b'\x02D1\x07EXAMPLE\x04Test\x00'
+[dblsend] JUNK+ANSWER -> ('203.0.113.2', 32927) qtype=1 b'\x02D1\x07exAmplE\x04TEST\x00'
+... 11 total from 203.0.113.2 ...
+[dblsend] JUNK+ANSWER -> ('203.0.113.3', 51202) qtype=1 b'\x02d1\x07example\x04test\x00'   <- unbound: ONE
+```
+
+SINGLE mode control (answer only, identical setup) — the single differentiator
+is the one junk datagram:
+```
+-- veri-dns c9.example.test --  status: NOERROR ; c9.example.test. 300 IN A 203.0.113.101
+-- unbound  c9.example.test --  status: NOERROR ; c9.example.test. 300 IN A 203.0.113.101
+(responder saw 2 queries from 203.0.113.2, no re-query storm)
+```
+
+### Corrected fix direction
+
+Source-matching is necessary but **not sufficient**. The loop must continue
+receiving until a datagram *passes the Lean acceptance gate* (id + question +
+0x20 echo), or the deadline expires — mirroring unbound's "drop unwanted, keep
+listening" comm-point model. Since the gate lives above the FFI boundary, this
+cannot be fixed by source-matching in C alone: either `exchangeRaw` must return
+multiple datagrams (the option the plan explicitly rejected as "would change the
+extern signature"), or the C layer must be given enough of the match predicate
+to filter on. The rejected option is the one that actually fixes the reported bug.
+
+---
+
 ## Summary
 
 `veri_dns_exchange` (the FFI that performs one upstream UDP round) does a single

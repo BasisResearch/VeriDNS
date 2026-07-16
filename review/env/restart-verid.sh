@@ -21,4 +21,4 @@ timeout 60 "$PENN/vm/ssh.sh" '
     ip netns exec verid /opt/dnsenv/veri-dns
   sleep 1
   systemctl is-active veridns-verid
-  ip netns exec attacker dig @10.53.0.2 -p 5300 host.example.test A +short'
+  ip netns exec attacker dig @203.0.113.2 -p 5300 host.example.test A +short'
