@@ -74,16 +74,24 @@ generated via symbolic NLP on the RFC prose.
   concrete tree exercises all of it at compile time, including the
   missing-node NXDOMAIN path.
 - **Wire safety.** `decodeName` has machine-checked bounds on
-  arbitrary input bytes; compression-pointer loops
-  terminate. Malformed packets produce FORMERR, never a crash (RFC
-  1035 §3.1, §4.1.4).
+  arbitrary input bytes; compression-pointer loops terminate, and
+  pointers must point strictly backward (no forward/self pointers,
+  RFC 1035 §4.1.4). Names are bounded to 255 octets (§3.1), and
+  name-bearing rdata (NS/CNAME/PTR/SOA) is validated to consume
+  exactly `RDLENGTH` bytes (§3.3). Malformed packets produce FORMERR,
+  never a crash.
 - **Poisoning resistance.** Responses must echo the unpredictable
   query ID and question (RFC 5452 §9.1), bogus delegations are
   rejected before they reach the cache (RFC 1034 §5.3.3), and cached
   data carries the RFC 2181 §5.4.1 credibility ranking, generated as
   an ordered enum from the section's ranked list. Forged glue provably
   can never be returned as an answer and can never evict more
-  trustworthy data.
+  trustworthy data. On the client-return path the delivered answer is
+  scrubbed to records whose owner is the queried name or a genuine link
+  on its CNAME chain (`scrubAnswer_no_foreign`,
+  `scrubAnswerB_excludes_foreign`), so an answering server or off-path
+  spoofer cannot smuggle an unrelated record through for the client to
+  cache.
 - **Cache discipline.** FIFO-bounded memory, absolute-expiry
   freshness, TTL clamping (RFC 1035 §7.3), and all-or-none RRset
   replacement (§7.4).
@@ -96,8 +104,13 @@ generated via symbolic NLP on the RFC prose.
   1035 §4.1.1.
 - **Case-insensitive comparison.** As above (RFC 1035 §3.1).
 
-Everything is additionally exercised live against the real DNS with
-`dig`, since the IO loop and FFI sit outside the proof boundary.
+The recursive IO loop itself is inside the proof boundary: `resolveWithIO_sound`
+(tree soundness) and `ioResumeLoop_sound` (impl-refines-model, in the
+build and axiom-clean) both reason about the real IO action, so
+retries, glueless NS sub-resolution, and deadline handling are covered.
+Only the FFI transport and the real network sit outside — that is where
+the honesty oracle is assumed rather than proven, so the whole path is
+additionally exercised live against the real DNS with `dig`.
 
 ## Building and running
 
@@ -141,7 +154,53 @@ literate cache is not invalidated by `lake build`.
 
 ## Scope
 
-VeriDNS is a recursive-only UDP resolver. TCP fallback, EDNS(0),
-DNSSEC validation, DNS-over-TLS, and concurrent serving are out of
-scope; truncated answers set TC=1 and are excluded from the cache per
-RFC 1035 §7.4.
+VeriDNS is a deliberately **minimal recursive-only UDP resolver**. It
+implements a subset of DNS and is explicit about what it does *not*
+do, so the security assurances below can be read precisely.
+
+**Out of scope (not implemented):**
+
+- **DNSSEC validation.** Records are not cryptographically
+  authenticated. Trust rests entirely on bailiwick scoping, the
+  RFC 5452 off-path defenses, and the RFC 2181 credibility ranking —
+  *not* on signatures. A malicious *in-bailiwick* authoritative server
+  is trusted for its own zone, as in any non-validating resolver.
+- **TCP transport and TCP fallback.** UDP only. Answers that exceed
+  512 bytes set TC=1 and are excluded from the cache (RFC 1035 §7.4);
+  there is no TCP retry.
+- **EDNS(0) and DNS Cookies (RFC 7873), DNS-over-TLS/HTTPS.**
+- **DNS 0x20 query-name case randomization**, response-rate limiting,
+  and client ACLs. The resolver answers recursively for any source, so
+  it should be deployed behind an access-control list / rate limiter
+  rather than exposed directly to the open internet.
+- **Concurrent serving** (single-threaded request loop).
+- **Non-IN classes and `ANY` (QTYPE=\*) queries** are neither
+  specifically supported nor proven. The resolver does not *reject*
+  them, but answer matching is by exact QTYPE — an `ANY` query is only
+  ever satisfied through the fallback non-empty-answer branch, and a
+  CNAME in an `ANY` response is chased rather than returned whole — so
+  treat them as unsupported, and outside the soundness proof.
+
+**Security assurances (what is proven, and its boundary).** For the
+covered path — recursive IN-class, non-`ANY` resolution — the
+implementation is proven to refine an RFC-derived model
+(`ioResumeLoop_sound`, axiom-clean): every answer the running server
+returns is one the model authorizes. Concretely this gives off-path
+spoofing resistance (RFC 5452: unpredictable query ID + source port,
+question and source/destination matching), bailiwick-scoped caching
+with credibility ranking (RFC 2181 §5.4.1), TTL clamping, and
+client-delivery answer authenticity — no record whose owner is not the
+queried name or a genuine link on its CNAME chain is ever returned or
+cached (`scrubAnswer_no_foreign` / `scrubAnswerB_excludes_foreign`).
+
+The proof is *scoped* to IN-class, non-`ANY` queries, but this is an
+assurance-completeness boundary, **not** an exploitable gap: the
+concrete anti-poisoning defenses — the bailiwick cache filter, the
+credibility gate, and the client-delivery answer scrub — run
+**unconditionally**, independent of query class or type. Extending the
+end-to-end theorem to CHAOS-class or `ANY` queries (which are not
+poisoning vectors) would broaden the formal coverage without changing
+what the server actually enforces. The remaining scope hypotheses of
+`ioResumeLoop_sound` (`rd=0` upstream sub-queries, glueless-provenance
+and cache well-formedness invariants, ≤127-label names) are internal
+invariants that always hold on the real entry path.

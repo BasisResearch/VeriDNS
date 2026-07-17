@@ -1,12 +1,7 @@
-import VeriDNS.RFC.Macro
-
-namespace VeriDNS.Spec
-
--- RFC 1034 §5.3.2 CACHE glossary entry is now codegen'd as part of
--- Spec/Resolver.lean's full §5.3.2 block (Resources.cache field).
-
--- RFC 1035 section 7.4: Using the cache
--- Prose-only section: generates cache usage constraint props
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
+import VeriDNS.RFC.Check
 include_rfc [1035][2577:2613] {
 7.4. Using the cache
 
@@ -44,11 +39,7 @@ already existing RRs.  Depending on the circumstances, either the data
 in the response or the cache is preferred, but the two should never be
 combined.  If the data in the response is from authoritative data in the
 answer section, it is always preferred.
-}
-
--- RFC 1035 section 6.1.3: Time
--- Prose-only section: generates timer struct + expiry props
-include_rfc [1035][2132:2147] {
+}include_rfc [1035][2132:2147] {
 6.1.3. Time
 
 Both the TTL data for RRs and the timing data for refreshing activities
@@ -65,5 +56,26 @@ to some known origin and converted to relative values when placed in the
 response to a query.  When an absolute TTL is negative after conversion
 to relative, then the data is expired and should be ignored.
 }
+def VeriDNS.Spec.usingthecache_discard_unrequested : (ρ : Type) → (ρ → Bool) → (ρ → Bool) → Prop :=
+  fun ρ requested cached => ∀ (r : ρ), requested r = Bool.false → cached r = Bool.false
 
-end VeriDNS.Spec
+def VeriDNS.Spec.usingthecache_truncated_not_cached : (κ ρ : Type) → (ρ → Bool) → (κ → ρ → κ) → Prop :=
+  fun κ ρ truncated cache => ∀ (c : κ) (r : ρ), truncated r = Bool.true → cache c r = c
+
+@[blueprint "Time"]
+structure VeriDNS.Spec.Time  where
+  timer : BitVec 32
+  expired : BitVec 1
+  data : ByteArray
+  deriving BEq, Inhabited
+
+@[blueprint "UsingTheCache"]
+structure VeriDNS.Spec.UsingTheCache  where
+  cacheable : BitVec 1
+  sourcesmerged : BitVec 1
+  data : ByteArray
+  deriving BEq, Inhabited
+
+def VeriDNS.Spec.usingthecache_never_combined : (ρ : Type) → (ρ → Prop) → (ρ → Prop) → (ρ → Prop) → Prop :=
+  fun ρ response cache preferred =>
+  (∀ (r : ρ), preferred r → response r) ∨ ∀ (r : ρ), preferred r → cache r

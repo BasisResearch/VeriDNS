@@ -4,10 +4,6 @@ namespace VeriDNS.Proof.Parsec
 
 open VeriDNS.Impl
 
--- ============================================================
--- BitVec conversion roundtrips
--- ============================================================
-
 theorem bv16_roundtrip (v : BitVec 16) :
     bv16OfUInt16 (uint16OfBv16 v) = v := by
   simp [bv16OfUInt16, uint16OfBv16]

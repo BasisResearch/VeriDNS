@@ -1,10 +1,7 @@
-import VeriDNS.RFC.Macro
-
-namespace VeriDNS.Spec
-
--- Verify and parse RFC 1035 section 3.1.
--- Prose-only section: generates structure NameSpace { labels : Array ByteArray }
--- and formal ∀ constraints from NLP analysis of prose.
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
+import VeriDNS.RFC.Check
 include_rfc [1035][533:552] {
 3.1. Name space definitions
 
@@ -27,5 +24,34 @@ existing host naming conventions.  Name servers and resolvers must
 compare labels in a case-insensitive manner (i.e., A=a), assuming ASCII
 with zero parity.  Non-alphabetic codes must match exactly.
 }
+@[blueprint "NameSpace"]
+structure VeriDNS.Spec.NameSpace  where
+  labels : Array ByteArray
+  deriving BEq, Inhabited
 
-end VeriDNS.Spec
+def VeriDNS.Spec.namespace_prop_0 : VeriDNS.Spec.NameSpace → Prop :=
+  fun msg => ∀ (elem : ByteArray), elem ∈ msg.labels → elem.size ≤ 255
+
+def VeriDNS.Spec.namespace_limit_1 : Nat :=
+  255
+
+def VeriDNS.Spec.namespace_nonalphabetic_match_exactly : (UInt8 → UInt8 → Bool) → (UInt8 → Bool) → Prop :=
+  fun compare alphabetic =>
+  ∀ (a b : UInt8), alphabetic a = Bool.false → alphabetic b = Bool.false → compare a b = (a == b)
+
+def VeriDNS.Spec.namespace_compare_example : (UInt8 → UInt8 → Bool) → Prop :=
+  fun compare => compare 65 97 = Bool.true
+
+def VeriDNS.Spec.namespace_limit_0 : Nat :=
+  63
+
+def VeriDNS.Spec.namespace_compare_caseinsensitive : (α : Type) → (α → α → Bool) → (α → α) → Prop :=
+  fun α compare foldCase => ∀ (a b : α), foldCase a = foldCase b → compare a b = Bool.true
+
+def VeriDNS.Spec.namespace_casefold_exact : (UInt8 → UInt8) → Prop :=
+  fun foldCase => ∀ (b : UInt8),
+    (65 ≤ b.toNat ∧ b.toNat ≤ 90 → (foldCase b).toNat = b.toNat + 32) ∧
+    (¬(65 ≤ b.toNat ∧ b.toNat ≤ 90) → foldCase b = b)
+
+def VeriDNS.Spec.namespace_compare_complete : (α : Type) → (α → α → Bool) → (α → α) → Prop :=
+  fun α compare foldCase => ∀ (a b : α), compare a b = Bool.true → foldCase a = foldCase b

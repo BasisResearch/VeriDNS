@@ -1,11 +1,7 @@
-import VeriDNS.RFC.Macro
-
-namespace VeriDNS.Spec
-
--- Verify and parse RFC 1035 section 4.1.3.
--- Custom syntax generates: structure ResourceRecord
--- Fields: name (ByteArray), type/class (BitVec 16), ttl (BitVec 32),
---         rdlength (BitVec 16), rdata (ByteArray)
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
+import VeriDNS.RFC.Check
 include_rfc [1035][1572:1632] {
 4.1.3. Resource record format
 
@@ -59,5 +55,19 @@ RDATA           a variable length string of octets that describes the
                 For example, the if the TYPE is A and the CLASS is IN,
                 the RDATA field is a 4 octet ARPA Internet address.
 }
+@[blueprint "ResourceRecord", uses := ["RData.A.ARdata", "RData.Ns.NsRdata",
+  "RData.Md.MdRdata", "RData.Mf.MfRdata", "RData.Cname.CnameRdata", "RData.Soa.SoaRdata",
+  "RData.Mb.MbRdata", "RData.Mg.MgRdata", "RData.Mr.MrRdata", "RData.Null.NullRdata",
+  "RData.Wks.WksRdata", "RData.Ptr.PtrRdata", "RData.Hinfo.HinfoRdata",
+  "RData.Minfo.MinfoRdata", "RData.Mx.MxRdata", "RData.Txt.TxtRdata"]]
+structure VeriDNS.Spec.ResourceRecord  where
+  name : ByteArray
+  type : BitVec 16
+  «class» : BitVec 16
+  ttl : BitVec 32
+  rdlength : BitVec 16
+  rdata : ByteArray
+  deriving BEq, Inhabited
 
-end VeriDNS.Spec
+def VeriDNS.Spec.rdlength_prop_0 : VeriDNS.Spec.ResourceRecord → Prop :=
+  fun h => h.rdlength.toNat = h.rdata.size

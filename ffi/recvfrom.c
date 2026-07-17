@@ -1,8 +1,5 @@
-/*
- * UDP socket FFI for veri-dns.
- * Provides: socket creation, bind, sendto, recvfrom.
- * All addresses use a 6-byte encoding: 4-byte IPv4 (big-endian) + 2-byte port (big-endian).
- */
+#define VERI_DNS_UPSTREAM_BUFSIZE 1232
+
 #include <lean/lean.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -12,27 +9,26 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdlib.h>
+#ifdef __linux__
+#include <fcntl.h>
+#if defined(__has_include)
+#if __has_include(<sys/random.h>)
+#include <sys/random.h>
+#define VERI_DNS_HAVE_GETRANDOM 1
+#endif
+#endif
+#endif
 
-/* ----------------------------------------------------------------
- * veri_dns_udp_socket : IO UInt32
- * Creates a UDP (AF_INET, SOCK_DGRAM) socket, returns fd.
- * C ABI: (lean_obj_arg world) → lean_obj_res
- * ---------------------------------------------------------------- */
 LEAN_EXPORT lean_obj_res veri_dns_udp_socket(lean_obj_arg world) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
         return lean_io_result_mk_error(lean_decode_io_error(errno, NULL));
     }
-    /* SO_REUSEADDR for quick restart */
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     return lean_io_result_mk_ok(lean_box_uint32((uint32_t)fd));
 }
 
-/* ----------------------------------------------------------------
- * veri_dns_upstream_socket : IO UInt32
- * Creates a UDP socket with SO_RCVTIMEO=2s for upstream queries.
- * ---------------------------------------------------------------- */
 LEAN_EXPORT lean_obj_res veri_dns_upstream_socket(lean_obj_arg world) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
@@ -45,11 +41,6 @@ LEAN_EXPORT lean_obj_res veri_dns_upstream_socket(lean_obj_arg world) {
     return lean_io_result_mk_ok(lean_box_uint32((uint32_t)fd));
 }
 
-/* ----------------------------------------------------------------
- * veri_dns_bind : UInt32 → UInt16 → IO Unit
- * Binds socket fd to 0.0.0.0:port.
- * C ABI: (uint32_t fd, uint16_t port, lean_obj_arg world) → lean_obj_res
- * ---------------------------------------------------------------- */
 LEAN_EXPORT lean_obj_res veri_dns_bind(uint32_t fd, uint16_t port, lean_obj_arg world) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -63,16 +54,10 @@ LEAN_EXPORT lean_obj_res veri_dns_bind(uint32_t fd, uint16_t port, lean_obj_arg 
     return lean_io_result_mk_ok(lean_box(0));
 }
 
-/* ----------------------------------------------------------------
- * veri_dns_sendto : UInt32 → @& ByteArray → @& ByteArray → IO Unit
- * Sends data to a 6-byte encoded address.
- * C ABI: (uint32_t fd, b_lean_obj_arg data, b_lean_obj_arg addr6, lean_obj_arg world) → lean_obj_res
- * ---------------------------------------------------------------- */
 LEAN_EXPORT lean_obj_res veri_dns_sendto(uint32_t fd, b_lean_obj_arg data, b_lean_obj_arg addr6, lean_obj_arg world) {
     size_t dataLen = lean_sarray_size(data);
     uint8_t *dataPtr = lean_sarray_cptr(data);
 
-    /* Decode 6-byte address: bytes 0-3 = IPv4, bytes 4-5 = port (big-endian) */
     uint8_t *ap = lean_sarray_cptr(addr6);
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
@@ -90,26 +75,34 @@ LEAN_EXPORT lean_obj_res veri_dns_sendto(uint32_t fd, b_lean_obj_arg data, b_lea
     return lean_io_result_mk_ok(lean_box(0));
 }
 
-/* ----------------------------------------------------------------
- * veri_dns_recvfrom : UInt32 → USize → IO (ByteArray × ByteArray)
- * Receives a UDP datagram. Returns (data, 6-byte sender address).
- * C ABI: (uint32_t fd, size_t maxBytes, lean_obj_arg world) → lean_obj_res
- * ---------------------------------------------------------------- */
 LEAN_EXPORT lean_obj_res veri_dns_recvfrom(uint32_t fd, size_t maxBytes, lean_obj_arg world) {
     int i_fd = (int)fd;
 
-    /* Allocate receive buffer */
     lean_object *buf = lean_alloc_sarray(1, 0, maxBytes);
 
     struct sockaddr_in sender;
-    socklen_t senderLen = sizeof(sender);
     memset(&sender, 0, sizeof(sender));
 
-    ssize_t n = recvfrom(i_fd, lean_sarray_cptr(buf), maxBytes, 0,
-                         (struct sockaddr *)&sender, &senderLen);
+    /* Finding 031: use recvmsg (not recvfrom) so a datagram larger than
+     * maxBytes is *detected* via MSG_TRUNC instead of being silently
+     * clipped to a decodable-looking prefix.  A truncated inbound query is
+     * returned as an empty payload (with the sender address), which the
+     * Lean serve path treats as an undecodable datagram and drops. */
+    struct iovec r_iov;
+    r_iov.iov_base = lean_sarray_cptr(buf);
+    r_iov.iov_len = maxBytes;
+    struct msghdr r_msg;
+    memset(&r_msg, 0, sizeof(r_msg));
+    r_msg.msg_name = &sender;
+    r_msg.msg_namelen = sizeof(sender);
+    r_msg.msg_iov = &r_iov;
+    r_msg.msg_iovlen = 1;
+
+    ssize_t n = recvmsg(i_fd, &r_msg, 0);
+    if (n >= 0 && (r_msg.msg_flags & MSG_TRUNC))
+        n = 0;
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            /* Timeout: return empty ByteArray + zero address (Lean handles as decode failure) */
             lean_sarray_object *arrObj = lean_to_sarray(buf);
             arrObj->m_size = 0;
             lean_object *addrBuf = lean_alloc_sarray(1, 6, 6);
@@ -123,15 +116,9 @@ LEAN_EXPORT lean_obj_res veri_dns_recvfrom(uint32_t fd, size_t maxBytes, lean_ob
         return lean_io_result_mk_error(lean_decode_io_error(errno, NULL));
     }
 
-    /* Set actual received size */
     lean_sarray_object *arrObj = lean_to_sarray(buf);
     arrObj->m_size = (size_t)n;
 
-    /*
-     * Encode sender address as 6-byte ByteArray:
-     *   bytes 0-3: IPv4 address (big-endian / network order octets)
-     *   bytes 4-5: port (big-endian)
-     */
     lean_object *addrBuf = lean_alloc_sarray(1, 6, 6);
     uint8_t *aptr = lean_sarray_cptr(addrBuf);
     uint32_t ip = ntohl(sender.sin_addr.s_addr);
@@ -143,7 +130,6 @@ LEAN_EXPORT lean_obj_res veri_dns_recvfrom(uint32_t fd, size_t maxBytes, lean_ob
     aptr[4] = (port >> 8) & 0xFF;
     aptr[5] = port & 0xFF;
 
-    /* Construct Prod.mk : ByteArray × ByteArray */
     lean_object *pair = lean_alloc_ctor(0, 2, 0);
     lean_ctor_set(pair, 0, buf);
     lean_ctor_set(pair, 1, addrBuf);
@@ -151,21 +137,58 @@ LEAN_EXPORT lean_obj_res veri_dns_recvfrom(uint32_t fd, size_t maxBytes, lean_ob
     return lean_io_result_mk_ok(pair);
 }
 
-/* Current Unix time in seconds (for cache TTL expiry, RFC 1035 §6.1.3). */
 LEAN_EXPORT lean_obj_res veri_dns_now(lean_obj_arg world) {
     (void)world;
     return lean_io_result_mk_ok(lean_box_uint32((uint32_t)time(NULL)));
 }
 
-/* Unpredictable 16-bit query ID (RFC 5452 resilience). */
 LEAN_EXPORT lean_obj_res veri_dns_random_u16(lean_obj_arg world) {
     (void)world;
+#ifdef __linux__
+    uint16_t id;
+#ifdef VERI_DNS_HAVE_GETRANDOM
+    for (;;) {
+        ssize_t r = getrandom(&id, sizeof(id), 0);
+        if (r == (ssize_t)sizeof(id)) {
+            return lean_io_result_mk_ok(lean_box(id));
+        }
+        if (r < 0 && errno == EINTR) continue;
+        break;
+    }
+#endif
+    {
+        int rfd = open("/dev/urandom", O_RDONLY);
+        if (rfd >= 0) {
+            uint8_t b[2];
+            size_t got = 0;
+            while (got < 2) {
+                ssize_t n = read(rfd, b + got, 2 - got);
+                if (n > 0) { got += (size_t)n; continue; }
+                if (n < 0 && errno == EINTR) continue;
+                break;
+            }
+            close(rfd);
+            if (got == 2) {
+                id = (uint16_t)(((uint16_t)b[0] << 8) | (uint16_t)b[1]);
+                return lean_io_result_mk_ok(lean_box(id));
+            }
+        }
+    }
+    return lean_io_result_mk_error(lean_decode_io_error(EIO, NULL));
+#else
     return lean_io_result_mk_ok(lean_box((uint16_t)(arc4random() & 0xFFFF)));
+#endif
 }
 
-/* Encode a (ip4, port) pair as a fresh 6-byte Lean ByteArray
- * (4-byte IPv4 big-endian + 2-byte port big-endian). ip and port are
- * in HOST byte order. */
+static uint16_t veri_dns_upstream_port(uint16_t nominal) {
+    const char *p = getenv("VERI_DNS_UPSTREAM_PORT");
+    if (p != NULL && *p != '\0') {
+        int v = atoi(p);
+        if (v > 0 && v <= 0xFFFF) return (uint16_t)v;
+    }
+    return nominal;
+}
+
 static lean_object *mk_addr6(uint32_t ip, uint16_t port) {
     lean_object *buf = lean_alloc_sarray(1, 6, 6);
     uint8_t *p = lean_sarray_cptr(buf);
@@ -178,28 +201,46 @@ static lean_object *mk_addr6(uint32_t ip, uint16_t port) {
     return buf;
 }
 
-/* ----------------------------------------------------------------
- * veri_dns_exchange : @& ByteArray → @& ByteArray
- *   → IO (Option (ByteArray × ByteArray × ByteArray × ByteArray))
- * One query exchange on a fresh UNCONNECTED socket (RFC 5452 §9.2:
- * fresh socket per exchange → unpredictable ephemeral local port).
- *
- * This function makes NO acceptance decision. It returns the first
- * datagram (payload, source6, destination6, local6) and the Lean gate
- * (`datagramMatches`) decides the RFC 5452 §9.1 source/destination
- * match. The socket is briefly connect(2)-ed ONLY to learn the
- * kernel's local address selection for this destination (getsockname),
- * then dissolved (AF_UNSPEC) before the receive, so datagrams from any
- * source reach the Lean gate.
- *
- *   - source6: sender of the datagram (recvfrom)
- *   - destination6: destination IP from packet metadata
- *     (IP_RECVDSTADDR / IP_PKTINFO) + the socket's delivery port
- *   - local6: the socket's local binding when the query was sent
- *
- * Returns none on timeout (2s) or send/recv error.
- * C ABI: (b_lean_obj_arg data, b_lean_obj_arg addr6, lean_obj_arg world) → lean_obj_res
- * ---------------------------------------------------------------- */
+/* Length in bytes of the first question of a DNS message: an uncompressed
+ * QNAME (labels terminated by a zero length byte) followed by QTYPE+QCLASS
+ * (4 bytes). Returns 0 if the message is malformed (no room for a header, a
+ * label runs off the end, or a compression pointer appears — a query's own
+ * question is never compressed). The span starts at the fixed 12-byte header. */
+static size_t veri_dns_question_span(const uint8_t *msg, size_t len) {
+    if (len < 12) return 0;
+    size_t i = 12;
+    for (;;) {
+        if (i >= len) return 0;
+        uint8_t lab = msg[i];
+        if (lab == 0) { i += 1; break; }          /* root label ends QNAME */
+        if ((lab & 0xC0) != 0) return 0;          /* compression / reserved */
+        i += 1 + (size_t)lab;                     /* length octet + label   */
+        if (i > len) return 0;
+    }
+    if (i + 4 > len) return 0;                    /* QTYPE + QCLASS          */
+    return (i + 4) - 12;
+}
+
+/* The trusted floor of finding 017's fix: a received datagram is the reply to
+ * the query in `qdata` only if it (a) is long enough for a header, (b) has the
+ * QR (response) bit set, (c) echoes the query's transaction id, and (d) echoes
+ * the query's question section verbatim (same 0x20-cased QNAME, QTYPE, QCLASS,
+ * QDCOUNT). This mirrors, below the shim, exactly the content check that
+ * `VeriDNS.Impl.Server.acceptResponse` performs at the Lean edge, so a junk
+ * datagram from the legitimate source cannot be mistaken for the real reply. */
+static int veri_dns_reply_matches(const uint8_t *qdata, size_t qlen,
+                                  const uint8_t *rdata, size_t rlen) {
+    if (rlen < 12) return 0;
+    if ((rdata[2] & 0x80) == 0) return 0;         /* QR bit must be set      */
+    if (rdata[0] != qdata[0] || rdata[1] != qdata[1]) return 0; /* txid      */
+    if (rdata[4] != qdata[4] || rdata[5] != qdata[5]) return 0; /* QDCOUNT   */
+    size_t qspan = veri_dns_question_span(qdata, qlen);
+    if (qspan == 0) return 0;
+    size_t rspan = veri_dns_question_span(rdata, rlen);
+    if (rspan != qspan) return 0;
+    return memcmp(qdata + 12, rdata + 12, qspan) == 0;
+}
+
 LEAN_EXPORT lean_obj_res veri_dns_exchange(b_lean_obj_arg data, b_lean_obj_arg addr6, lean_obj_arg world) {
     (void)world;
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -209,7 +250,6 @@ LEAN_EXPORT lean_obj_res veri_dns_exchange(b_lean_obj_arg data, b_lean_obj_arg a
     struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    /* Ask the kernel to report each datagram's destination address. */
     int on = 1;
 #ifdef IP_RECVDSTADDR
     setsockopt(fd, IPPROTO_IP, IP_RECVDSTADDR, &on, sizeof(on));
@@ -217,7 +257,6 @@ LEAN_EXPORT lean_obj_res veri_dns_exchange(b_lean_obj_arg data, b_lean_obj_arg a
     setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &on, sizeof(on));
 #endif
 
-    /* Decode 6-byte address: bytes 0-3 = IPv4, bytes 4-5 = port (big-endian) */
     uint8_t *ap = lean_sarray_cptr(addr6);
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
@@ -225,60 +264,92 @@ LEAN_EXPORT lean_obj_res veri_dns_exchange(b_lean_obj_arg data, b_lean_obj_arg a
     uint32_t ip = ((uint32_t)ap[0] << 24) | ((uint32_t)ap[1] << 16) |
                   ((uint32_t)ap[2] << 8)  | (uint32_t)ap[3];
     dest.sin_addr.s_addr = htonl(ip);
-    dest.sin_port = htons(((uint16_t)ap[4] << 8) | (uint16_t)ap[5]);
+    uint16_t nominalPort = ((uint16_t)ap[4] << 8) | (uint16_t)ap[5];
+    dest.sin_port = htons(veri_dns_upstream_port(nominalPort));
 
-    /* Learn the local binding the kernel selects for this destination
-     * (source IP by route, fresh ephemeral port), then dissolve the
-     * association so the receive is unconnected: acceptance is decided
-     * in Lean, not by kernel source-filtering. */
     if (connect(fd, (struct sockaddr *)&dest, sizeof(dest)) < 0) {
         close(fd);
-        return lean_io_result_mk_ok(lean_box(0)); /* none */
+        return lean_io_result_mk_ok(lean_box(0));
     }
     struct sockaddr_in local;
     socklen_t localLen = sizeof(local);
     memset(&local, 0, sizeof(local));
     if (getsockname(fd, (struct sockaddr *)&local, &localLen) < 0) {
         close(fd);
-        return lean_io_result_mk_ok(lean_box(0)); /* none */
+        return lean_io_result_mk_ok(lean_box(0));
     }
     struct sockaddr unspec;
     memset(&unspec, 0, sizeof(unspec));
     unspec.sa_family = AF_UNSPEC;
-    /* Dissolving may "fail" with EAFNOSUPPORT on BSDs while still
-     * disconnecting; ignore the return value. */
     (void)connect(fd, &unspec, sizeof(unspec));
 
     if (sendto(fd, lean_sarray_cptr(data), lean_sarray_size(data), 0,
                (struct sockaddr *)&dest, sizeof(dest)) < 0) {
         close(fd);
-        return lean_io_result_mk_ok(lean_box(0)); /* none */
+        return lean_io_result_mk_ok(lean_box(0));
     }
 
-    /* Receive ONE datagram from any source, with its metadata. */
-    lean_object *buf = lean_alloc_sarray(1, 0, 512);
+    lean_object *buf = lean_alloc_sarray(1, 0, VERI_DNS_UPSTREAM_BUFSIZE);
     struct sockaddr_in sender;
-    memset(&sender, 0, sizeof(sender));
-    struct iovec iov = { .iov_base = lean_sarray_cptr(buf), .iov_len = 512 };
+    struct iovec iov;
     char cbuf[128];
     struct msghdr msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_name = &sender;
-    msg.msg_namelen = sizeof(sender);
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cbuf;
-    msg.msg_controllen = sizeof(cbuf);
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long remaining_ms = 2000
+            - (long)(now.tv_sec - start.tv_sec) * 1000
+            - (long)((now.tv_nsec - start.tv_nsec) / 1000000);
+        if (remaining_ms <= 0) {
+            close(fd);
+            lean_dec(buf);
+            return lean_io_result_mk_ok(lean_box(0));
+        }
+        struct timeval rtv = { .tv_sec = remaining_ms / 1000,
+                               .tv_usec = (remaining_ms % 1000) * 1000 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
 
-    ssize_t n = recvmsg(fd, &msg, 0);
-    close(fd);
-    if (n < 0) {
-        lean_dec(buf);
-        return lean_io_result_mk_ok(lean_box(0)); /* none (timeout/error) */
+        memset(&sender, 0, sizeof(sender));
+        iov.iov_base = lean_sarray_cptr(buf);
+        iov.iov_len = VERI_DNS_UPSTREAM_BUFSIZE;
+        memset(&msg, 0, sizeof(msg));
+        msg.msg_name = &sender;
+        msg.msg_namelen = sizeof(sender);
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cbuf;
+        msg.msg_controllen = sizeof(cbuf);
+
+        ssize_t n = recvmsg(fd, &msg, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            lean_dec(buf);
+            return lean_io_result_mk_ok(lean_box(0));
+        }
+        if (sender.sin_addr.s_addr != dest.sin_addr.s_addr ||
+            sender.sin_port != dest.sin_port)
+            continue;
+        /* Finding 031: a reply larger than our advertised 1232-octet EDNS
+         * buffer arrives silently clipped by the kernel (MSG_TRUNC).  A
+         * clipped payload is worse than a drop -- treat it as junk and keep
+         * draining the socket, same discipline as the 017 shim below. */
+        if (msg.msg_flags & MSG_TRUNC)
+            continue;
+        /* Finding 017: junk from the legitimate source must not consume the
+         * round. Discard any datagram that fails the txid/question content
+         * match and keep reading (no re-send: the socket is drained, not
+         * re-queried) until a matching reply arrives or the deadline hits. */
+        if (!veri_dns_reply_matches(lean_sarray_cptr(data), lean_sarray_size(data),
+                                    lean_sarray_cptr(buf), (size_t)n))
+            continue;
+        lean_to_sarray(buf)->m_size = (size_t)n;
+        break;
     }
-    lean_to_sarray(buf)->m_size = (size_t)n;
+    close(fd);
 
-    /* Destination IP from control messages (0 if unavailable). */
     uint32_t dstIp = 0;
     for (struct cmsghdr *cm = CMSG_FIRSTHDR(&msg); cm != NULL;
          cm = CMSG_NXTHDR(&msg, cm)) {
@@ -299,14 +370,10 @@ LEAN_EXPORT lean_obj_res veri_dns_exchange(b_lean_obj_arg data, b_lean_obj_arg a
 
     uint16_t localPort = ntohs(local.sin_port);
     uint32_t localIp = ntohl(local.sin_addr.s_addr);
-    /* The delivery port of the datagram is this socket's bound port
-     * (UDP demultiplexing). */
-    lean_object *src6 = mk_addr6(ntohl(sender.sin_addr.s_addr),
-                                 ntohs(sender.sin_port));
+    lean_object *src6 = mk_addr6(ntohl(sender.sin_addr.s_addr), nominalPort);
     lean_object *dst6 = mk_addr6(dstIp, localPort);
     lean_object *loc6 = mk_addr6(localIp, localPort);
 
-    /* (payload, (src6, (dst6, loc6))) */
     lean_object *p2 = lean_alloc_ctor(0, 2, 0);
     lean_ctor_set(p2, 0, dst6);
     lean_ctor_set(p2, 1, loc6);
@@ -319,4 +386,195 @@ LEAN_EXPORT lean_obj_res veri_dns_exchange(b_lean_obj_arg data, b_lean_obj_arg a
     lean_object *some = lean_alloc_ctor(1, 1, 0);
     lean_ctor_set(some, 0, p0);
     return lean_io_result_mk_ok(some);
+}
+
+LEAN_EXPORT lean_obj_res veri_dns_tcp_exchange(b_lean_obj_arg data, b_lean_obj_arg addr6, lean_obj_arg world) {
+    (void)world;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return lean_io_result_mk_error(lean_decode_io_error(errno, NULL));
+    }
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    uint8_t *ap = lean_sarray_cptr(addr6);
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    uint32_t ip = ((uint32_t)ap[0] << 24) | ((uint32_t)ap[1] << 16) |
+                  ((uint32_t)ap[2] << 8)  | (uint32_t)ap[3];
+    dest.sin_addr.s_addr = htonl(ip);
+    dest.sin_port = htons(veri_dns_upstream_port(((uint16_t)ap[4] << 8) | (uint16_t)ap[5]));
+
+    if (connect(fd, (struct sockaddr *)&dest, sizeof(dest)) < 0) {
+        close(fd);
+        return lean_io_result_mk_ok(lean_box(0));
+    }
+
+    size_t qlen = lean_sarray_size(data);
+    if (qlen > 0xFFFF) {
+        close(fd);
+        return lean_io_result_mk_ok(lean_box(0));
+    }
+    size_t framed = qlen + 2;
+    uint8_t *sendbuf = (uint8_t *)malloc(framed);
+    if (sendbuf == NULL) {
+        close(fd);
+        return lean_io_result_mk_ok(lean_box(0));
+    }
+    sendbuf[0] = (uint8_t)((qlen >> 8) & 0xFF);
+    sendbuf[1] = (uint8_t)(qlen & 0xFF);
+    memcpy(sendbuf + 2, lean_sarray_cptr(data), qlen);
+    size_t sent = 0;
+    while (sent < framed) {
+        ssize_t s = send(fd, sendbuf + sent, framed - sent, 0);
+        if (s <= 0) {
+            if (s < 0 && errno == EINTR) continue;
+            free(sendbuf);
+            close(fd);
+            return lean_io_result_mk_ok(lean_box(0));
+        }
+        sent += (size_t)s;
+    }
+    free(sendbuf);
+
+    uint8_t lenbuf[2];
+    size_t got = 0;
+    while (got < 2) {
+        ssize_t r = recv(fd, lenbuf + got, 2 - got, 0);
+        if (r <= 0) {
+            if (r < 0 && errno == EINTR) continue;
+            close(fd);
+            return lean_io_result_mk_ok(lean_box(0));
+        }
+        got += (size_t)r;
+    }
+    size_t rlen = ((size_t)lenbuf[0] << 8) | (size_t)lenbuf[1];
+
+    lean_object *buf = lean_alloc_sarray(1, rlen, rlen);
+    uint8_t *bufp = lean_sarray_cptr(buf);
+    got = 0;
+    while (got < rlen) {
+        ssize_t r = recv(fd, bufp + got, rlen - got, 0);
+        if (r <= 0) {
+            if (r < 0 && errno == EINTR) continue;
+            close(fd);
+            lean_dec(buf);
+            return lean_io_result_mk_ok(lean_box(0));
+        }
+        got += (size_t)r;
+    }
+    close(fd);
+
+    lean_object *some = lean_alloc_ctor(1, 1, 0);
+    lean_ctor_set(some, 0, buf);
+    return lean_io_result_mk_ok(some);
+}
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+LEAN_EXPORT lean_obj_res veri_dns_tcp_listen(uint16_t port, lean_obj_arg world) {
+    (void)world;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return lean_io_result_mk_error(lean_decode_io_error(errno, NULL));
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        int e = errno; close(fd);
+        return lean_io_result_mk_error(lean_decode_io_error(e, NULL));
+    }
+    if (listen(fd, 16) < 0) {
+        int e = errno; close(fd);
+        return lean_io_result_mk_error(lean_decode_io_error(e, NULL));
+    }
+    return lean_io_result_mk_ok(lean_box_uint32((uint32_t)fd));
+}
+
+LEAN_EXPORT lean_obj_res veri_dns_tcp_accept(uint32_t fd, lean_obj_arg world) {
+    (void)world;
+    struct sockaddr_in peer;
+    socklen_t peerLen = sizeof(peer);
+    memset(&peer, 0, sizeof(peer));
+    int conn = accept((int)fd, (struct sockaddr *)&peer, &peerLen);
+    if (conn < 0) return lean_io_result_mk_error(lean_decode_io_error(errno, NULL));
+    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+    setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(conn, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#ifdef SO_NOSIGPIPE
+    int on = 1;
+    setsockopt(conn, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#endif
+    lean_object *addrBuf = lean_alloc_sarray(1, 6, 6);
+    uint8_t *aptr = lean_sarray_cptr(addrBuf);
+    uint32_t ip = ntohl(peer.sin_addr.s_addr);
+    uint16_t pport = ntohs(peer.sin_port);
+    aptr[0] = (ip >> 24) & 0xFF; aptr[1] = (ip >> 16) & 0xFF;
+    aptr[2] = (ip >>  8) & 0xFF; aptr[3] = ip & 0xFF;
+    aptr[4] = (pport >> 8) & 0xFF; aptr[5] = pport & 0xFF;
+    lean_object *pair = lean_alloc_ctor(0, 2, 0);
+    lean_ctor_set(pair, 0, lean_box_uint32((uint32_t)conn));
+    lean_ctor_set(pair, 1, addrBuf);
+    return lean_io_result_mk_ok(pair);
+}
+
+LEAN_EXPORT lean_obj_res veri_dns_tcp_recv_msg(uint32_t fd, lean_obj_arg world) {
+    (void)world;
+    int i_fd = (int)fd;
+    uint8_t lenbuf[2];
+    size_t got = 0;
+    while (got < 2) {
+        ssize_t r = recv(i_fd, lenbuf + got, 2 - got, 0);
+        if (r <= 0) {
+            if (r < 0 && errno == EINTR) continue;
+            return lean_io_result_mk_ok(lean_box(0));
+        }
+        got += (size_t)r;
+    }
+    size_t rlen = ((size_t)lenbuf[0] << 8) | (size_t)lenbuf[1];
+    lean_object *buf = lean_alloc_sarray(1, rlen, rlen);
+    uint8_t *bufp = lean_sarray_cptr(buf);
+    got = 0;
+    while (got < rlen) {
+        ssize_t r = recv(i_fd, bufp + got, rlen - got, 0);
+        if (r <= 0) {
+            if (r < 0 && errno == EINTR) continue;
+            lean_dec(buf);
+            return lean_io_result_mk_ok(lean_box(0));
+        }
+        got += (size_t)r;
+    }
+    lean_object *some = lean_alloc_ctor(1, 1, 0);
+    lean_ctor_set(some, 0, buf);
+    return lean_io_result_mk_ok(some);
+}
+
+LEAN_EXPORT lean_obj_res veri_dns_tcp_send(uint32_t fd, b_lean_obj_arg data, lean_obj_arg world) {
+    (void)world;
+    int i_fd = (int)fd;
+    size_t len = lean_sarray_size(data);
+    uint8_t *p = lean_sarray_cptr(data);
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t w = send(i_fd, p + sent, len - sent, MSG_NOSIGNAL);
+        if (w <= 0) {
+            if (w < 0 && errno == EINTR) continue;
+            break;
+        }
+        sent += (size_t)w;
+    }
+    return lean_io_result_mk_ok(lean_box(0));
+}
+
+LEAN_EXPORT lean_obj_res veri_dns_tcp_close(uint32_t fd, lean_obj_arg world) {
+    (void)world;
+    close((int)fd);
+    return lean_io_result_mk_ok(lean_box(0));
 }

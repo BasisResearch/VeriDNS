@@ -2,17 +2,14 @@ import Batteries
 
 namespace Test
 
--- New parser type: state (pos) INSIDE Except, so run is trivial
 abbrev TestParser (α : Type) := ReaderT ByteArray (StateT Nat (Except String)) α
 
 namespace TestParser
 
--- run is just function application!
 def run {α : Type} (p : TestParser α) (buf : ByteArray) (pos : Nat := 0)
     : Except String (α × Nat) :=
   p buf pos
 
--- Plain function primitives
 def readUInt8 : TestParser UInt8 :=
   fun buf pos =>
     if h : pos < buf.data.size then .ok (buf.data[pos], pos + 1)
@@ -43,7 +40,6 @@ def readBytes (n : Nat) : TestParser ByteArray :=
 
 end TestParser
 
--- Equational lemmas: all by rfl!
 @[simp] theorem run_readUInt8 (buf : ByteArray) (pos : Nat) :
     TestParser.run TestParser.readUInt8 buf pos =
     if h : pos < buf.data.size then .ok (buf.data[pos], pos + 1)

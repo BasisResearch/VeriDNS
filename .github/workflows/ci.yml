@@ -1,0 +1,87 @@
+name: CI
+
+# Two jobs, per docs/model-strengthening-plan.md (W5):
+#   build — `lake build` (whole library + the three executables), Lean/lake caches.
+#   gate  — the validation harness (test/ci_gate.sh) against unbound + a dnspython
+#           mock, in CI mode (a missing dependency is a hard failure, not a skip).
+#
+# unbound, dig (dnsutils) and tshark are all apt-packaged on the Ubuntu runner and
+# dnspython is installed into a uv venv, so the whole gate is feasible in CI. The
+# only genuinely environment-sensitive piece is difftest.sh, which performs live
+# recursion to the public root servers; GitHub-hosted runners have outbound DNS, so
+# it runs, but if a runner ever blocks egress that single sub-test is the one to
+# quarantine (set it behind a job condition) — everything else is hermetic.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: lake build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain "$(cat lean-toolchain)"
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache lake build (.lake)
+        uses: actions/cache@v4
+        with:
+          path: .lake
+          key: lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean', 'lake-manifest.json') }}
+          restore-keys: |
+            lake-${{ runner.os }}-
+
+      - name: lake build (library + executables)
+        run: lake build veri-dns exchange-junk-test id-entropy-test
+
+      - name: Upload build artifacts for the gate job
+        uses: actions/upload-artifact@v4
+        with:
+          name: lake-build
+          path: |
+            .lake/build/bin
+            .lake/build/lib
+          retention-days: 1
+          if-no-files-found: error
+
+  gate:
+    name: validation gate
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      CI: "1"   # missing dependency == failure, not skip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies (unbound, dig, tshark, uv)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unbound dnsutils tshark
+          # stop the packaged unbound service so it does not hold :53 or clash
+          sudo systemctl stop unbound 2>/dev/null || true
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore built executables
+        uses: actions/download-artifact@v4
+        with:
+          name: lake-build
+          path: .lake/build
+
+      - name: Make executables runnable
+        run: chmod +x .lake/build/bin/* || true
+
+      - name: Run the validation gate
+        run: bash test/ci_gate.sh --no-build

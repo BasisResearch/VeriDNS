@@ -1,0 +1,10 @@
+# veri-dns documentation configuration (consumed by `lake query :literateHtml`).
+#
+# `extra_css` is veri-dns's customisation hook for the generated docs — in
+# particular how the RFC source/coverage pages are presented. Pseudoprint
+# renders those pages with neutral, theme-aware defaults; veri-dns owns the
+# look here by overriding the documented `.src-*` classes in veridns-doc.css.
+extra_css = ["veridns-doc.css"]
+
+[metadata]
+title = "veri-dns"

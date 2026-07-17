@@ -1,9 +1,7 @@
-import VeriDNS.RFC.Macro
-
-namespace VeriDNS.Spec
-
--- Verify and parse RFC 1035 section 4.1.2.
--- Custom syntax generates: structure Question (qname : ByteArray, qtype/qclass : BitVec 16)
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
+import VeriDNS.RFC.Check
 include_rfc [1035][1530:1570] {
 4.1.2. Question section format
 
@@ -39,11 +37,9 @@ QTYPE           a two octet code which specifies the type of the query.
 QCLASS          a two octet code that specifies the class of the query.
                 For example, the QCLASS field is IN for the Internet.
 }
-
-end VeriDNS.Spec
-
-#print VeriDNS.Spec.Question
-
-
-
-
+@[blueprint "Question"]
+structure VeriDNS.Spec.Question  where
+  qname : ByteArray
+  qtype : BitVec 16
+  qclass : BitVec 16
+  deriving BEq, Inhabited

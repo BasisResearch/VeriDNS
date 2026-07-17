@@ -11,6 +11,8 @@ VeriDNS/
     PropRules.lean       -- Declarative property rule framework (PropSpec expression trees + DSL)
     Macro.lean           -- include_rfc compile-time command macro
     Syntax.lean          -- Code generation: structures, enums, formal Props from RFC text
+    ScopeGates.lean      -- Scope-gate census + escape-hatch-ledger annotations + THE LINT (scope_gate_lint)
+    ScopeLedger.lean     -- Driver: seeds every current scope gate open, generates docs/scope-gates.md, runs the lint
   Spec/           -- Formal specifications derived from RFC text
     Header.lean   -- RFC 1035 section 4.1.1: DNS header format
     Question.lean -- RFC 1035 section 4.1.2: Question section format
@@ -18,18 +20,39 @@ VeriDNS/
     Compression.lean    -- RFC 1035 section 4.1.4: Message compression
     DomainName.lean     -- RFC 1035 section 3.1:   Name space definitions
     Message.lean  -- RFC 1035 section 4.1:   Message format (section diagram)
-    RRType.lean   -- RFC 1035 section 3.2.2-3: TYPE and QTYPE values
+    RRType.lean   -- RFC 1035 section 3.2.2-3: TYPE and QTYPE values + RFC 3597 section 2 unknown-type carrier (RRType.unknown)
     RRClass.lean  -- RFC 1035 section 3.2.4-5: CLASS and QCLASS values
     RData.lean    -- RFC 1035 sections 3.3-3.4: RDATA formats (16 types)
     Transport.lean -- RFC 1035 section 4.2: UDP/TCP transport constraints
     Cache.lean    -- RFC 1034 §5.3.2 + RFC 1035 §7.4, §6.1.3: Cache constraints + timer
-    Resolver.lean -- RFC 1034 §5.3.2-3: Resolver state (glossary) + algorithm (numbered steps) + SlistEntry
+    Resolver.lean -- RFC 1034 §5.3.2-3: Resolver state (glossary) + algorithm (numbered steps) + SlistEntry. The refer (step 4b) guard requires `resp.answer.isEmpty` (2026-06): "dirty referrals" — a non-empty, non-answering answer section alongside an NS authority — are NOT followed as a delegation (they fall through to the answer/error branches), matching the model `refer` rule's `isReferral` premise. Closes the dirty-referral forward-simulation gap. The CNAME-chase (step 4a) prepends ONLY the chased CNAME record to the delivered chain — `cnameChain := prependCnameLink s.cnameChain resp` (= `s.cnameChain.push <the chaseable CNAME RR>` via `extractCnameRR`), NOT the whole `resp.answer` (2026-06): a CNAME response may carry extra unrelated/off-bailiwick answer records, and passing them through to the client is an answer-injection vector — they are now dropped from the delivered answer (subsequent chain links resolve separately). This matches the model `Resolves.answerCname` (which prepends exactly the single `cnameRR`), closing the CNAME-chain forward-simulation gap. The chase is additionally OWNER-CHECKED (2026-07, external review #036): `extractCname`/`extractCnameRR` only consider a type-5 record whose owner `nameEqCI`-matches the reply's echoed question name (RFC 1034 §3.6.2 — the CNAME rewrite applies to the node the query matched; unbound scrubs off-owner CNAMEs), and the model `cnameRR` carries the matching `nameEq r.owner qname` conjunct — pre-fix, an answer carrying `attacker.chosen CNAME target.` steered the resolver's next upstream query to an attacker-chosen target. The NODATA synthesis is GATED (2026-07-15, DIRECTION row): `stepAnalyzeResponse` only emits a NODATA answer for an empty NOERROR response when `hasSoaAuthorityFor qname authority` holds — an SOA in the authority section owned by an ancestor of the query name (RFC 2308 §2.2 negative proof). Without it (AA=1 lame referral → 040; empty NOERROR with no/foreign SOA → 041/045; NODATA TYPE 3 bare-empty → ambiguous), the response is "bizarre contents" and drives a `.goto sendQueries` RETRY (RFC 1034 §4.3.2.d), never a synthesised NODATA. `classifyResponse` is the total classifier (bridged to the model `ClassOutcome` in Spec/Classify.lean, completeness in Proof/Classify.lean). The model's `guard_serverFailure` (Spec/Resolver.lean) was tightened with a fourth "empty-answer non-NXDOMAIN" disjunct so the retry is RFC-justified. Honest-path parity (difftest 13/13) holds — a genuine NODATA always carries the zone-apex SOA. The POSITIVE-answer acceptance is ENTITLED-only (2026-07-15, findings 036 / off-owner-A): step 4a delivers only when `entitledAnswerB resp` holds — some answer record has the query type AND is owned on the CNAME chain rooted at the query name (`reachableNamesB`); a purely-foreign (type-matching but off-owner) answer is NOT an answer (it scrubs to empty at delivery, so accepting it would manufacture a spurious NODATA) and falls through to the `.goto sendQueries` RETRY. The NXDOMAIN answer arm is likewise GUARDED on `resp.answer.isEmpty` (2026-07-16): a `nameError` carrying ANY answer record is contradictory — a genuine NXDOMAIN has no answer — so a non-empty NXDOMAIN (e.g. a spoofed junk-answer NXDOMAIN, which `accepts` (RFC 5452) does not reject) is not delivered either; it too RETRIES. The model's `guardRefined_answerOrNameError` (Spec/Resolver.lean) carries the matching `∧ answer.isEmpty` conjunct on its `nameError` disjunct, and `guard_serverFailure`'s off-owner disjunct is `entitled = false ∧ (rcode ≠ nameError ∨ answer.size > 0)`. This makes the honest/spoof split in the answer terminal COLLAPSE: under a type-matching (`answersQueryB`) `.finished` at `tc = 0`, the entitled arm necessarily fired (a non-entitled type-match — including a spoofed NXDOMAIN-with-answer — would have retried), so `entitled_of_afterResume_finished_ok` (Proof/Refinement.lean) proves `entitledAnswerB` with NO `¬ NXDOMAIN` premise (`stepAnalyzeResponse_retryForeign_ans`), closing the last red site of the off-owner capstone in Proof/IoResumeSound.lean.
     NegativeCache.lean -- RFC 2308: negative caching props + NegativeCacheSpec/NegativeAuthoritySpec
     Credibility.lean   -- RFC 2181 §5.4.1: Trustworthiness enum + TrustworthinessSpec + answerability obligation
     Resilience.lean    -- RFC 5452 §9.1-2: response matching + unpredictability obligations
     Server.lean   -- RFC 1035 §6.2, §7.3: Server query processing + UdpSocket typeclass
+    -- Platonic DNS-tree domain model + inductive network relation (the semantic
+    -- domain the resolver is verified against) and the RFC-coverage sweep:
+    NameTree.lean       -- RFC 1034 §3.1-3.4: Node tree, name=path, subdomain relation, octet limit, case rules, §3.4 example tree
+    Zone.lean           -- RFC 1034 §4: zones (cuts), name servers, authoritative data, NS/glue, ZoneEvolution (robustness), recursive-never-referral
+    NetworkModel.lean   -- RFC 1034 §3-§6: THE semantic model — names=paths in the platonic Node tree, the inductive tree↔network relations (AuthoritativeFor/DelegatesTo — both CLASS-AWARE and NEAREST-ANCESTOR, carrying a QCLASS index and phrased via bestZone/bestDeleg so authority is per-class (§4.2.2: an IN query is never satisfied by a CH zone) and through the closest covering zone (§4.3.2 step 2), never a class-blind any-ancestor match), the §4.3.2 name-server algorithm as a DECLARATIVE inductive relation (ServerAnswers, one constructor per RFC step, emitting a Step trace; NODATA-vs-NXDOMAIN via isEmptyNonTerminal — a single uniform noData branch carries the SOA for BOTH the empty-non-terminal and the "exists, wrong type" (§6.2.4) forms (answer only fires when there IS matching data), matching modern resolvers; the authority section is noDataAuthority z = SOA always, plus the apex NS RRset when the zone opts into RFC 2308 §2.2 TYPE 1 (Zone.negCacheNS, a deterministic per-zone choice, default TYPE 2 = SOA only) — so both §2.2 SOA-bearing shapes are representable (ex_nodata_type1 exhibits TYPE 1: authority = SOA + NS); the NXDOMAIN branch is SYMMETRIC — nameError's authority is nxdomainAuthority z = SOA always plus the apex NS RRset under negCacheNS (RFC 2308 §2.1: an NXDOMAIN authority is SOA + NS, not mandated SOA-only; ex_nxdomain_type1 exhibits SOA+NS, default = the literal §6.2.5 SOA-only reply), closing the asymmetry where only NODATA could carry the apex NS; RA/RD header bits present, with RA modelled as an advertised *capability* not a per-answer fact (Server.recursionAvailable; serverAnswers_ra_eq_capability: every reply carries s.recursionAvailable — the server's willingness to recurse, NOT whether this answer recursed; serverAnswers_plain_clears_ra recovers RA=0 for a plain, non-recursing server — recursion itself is the resolver's job); CNAME exclusivity tied to the algorithm: cnameAlone_forces_cname proves that at a CNAME-alone node a non-CNAME query finds no typed record, so the `answer` branch cannot fire and the alias is provably chased — "CNAME takes precedence" as a theorem (Zone.WF_cnameAlone bridges the existing Zone.WF CNAME-exclusivity clause to it, wf_cname_forces_redirection chains the two); the §4.3.2 referral is SPLIT into a pure referral (literally empty answer — so Response.isReferral classifies it as a referral by construction, removing the old cachedAnswer/classifier inconsistency) and referralCacheAnswer (the step-4 cache-hit fall-through copying matching cached RRs for QNAME into the ANSWER section, hence classified as an answer); disjoint on whether QNAME is cached (referral_classified / referralCacheAnswer_classified land each on the correct side of the classifier). The platonic tree is NOT decorative and is tied to the declarative algorithm IN GENERAL: treeOf materialises a zone's records as the actual Node trie, and treeRecordsAt_treeOf proves — for EVERY zone and name, by induction — that Node.lookupPath navigation equals recordsAt (the read every ServerAnswers constructor performs), so recordsAt_eq_treeNav restates the §4.3.2 record read as tree navigation. Supporting: a List-routed insertRR/childInsert trie, labelEq as a proven equivalence, nameEq reverse-invariance. bestZone is CLASS-AWARE (selects the nearest-ancestor zone whose Zone.cls matches QCLASS — RFC 1034 §4.2.2 parallel namespaces are parallel per-class zones, so an IN query never reads CH data; nearest_unique in NetworkSemantics proves the longest-apex choice is semantically unique on a zonesDistinct server, so the list-order tie-break is never load-bearing). GLUE is bailiwick-de-conflated: inBailiwick (a delegation server at/below the cut needs glue) splits the referral's additional section (referralAdditional) into authoritative in-bailiwick glue first, then out-of-bailiwick address hints — both drawn from zone data ++ fresh cache; on a homogeneous delegation this equals the old additionalFrom (the §6 traces are byte-identical), and wf_glue_present (NetworkSemantics) proves a Zone.WF zone always carries glue for its in-bailiwick servers, so a well-formed referral is always resolvable. NEGATIVE-TTL is consumed, not just carried: negTTLof soa = min(SOA.MINIMUM, soa.ttl) (RFC 2308 §3/§5), negTTL z reads it off soaOf, Response.negTTL reads it back off a reply's authority SOA, and noDataAuthority_negTTL / nameError_negTTL prove a NODATA/NXDOMAIN reply's negative-cache lifetime IS negTTL z; NegCacheEntry gives the negative result the same timed (fresh/expiresAt) treatment a positive CacheEntry gets (neg_caching_scenario in NetworkTraces: the §6.2.5 reply licenses exactly 86400s — fresh at 86399, expired at 86400). multi-depth wildcards with the full §4.3.3 inhibition incl. the query-name-known guard — wildcardSynth inhibits on nameKnown (a name existing with records of ANY other type, not only empty non-terminals), so a query for an absent type at an existing name under a wildcard resolves to NODATA instead of synthesizing a bogus answer or leaving the step-3c branch stuck (ex_wildcard_applies / ex_wildcard_inhibited / ex_ent_under_wildcard / ex_typed_under_wildcard); A-record RDATA is the four-octet IPv4 itself (RData.a : IPv4, with toDotted as the routing identity); referral with step-4 cache-glue fall-through; fromCache with best-cached-delegation in authority, GUARDED non-degenerate (RFC 1034 §4.3.2 step 4 fires only when QNAME is in the cache OR a best cached delegation exists — hne: a cached answer or a cached delegation — so a no-zone server with an empty cache can no longer emit a bogus empty-answer empty-authority NOERROR; every fromCache reply is a genuine cache answer or cache referral). Meta-theorems: noData_branch_total (the no-records branch is total — no gaps) and ServerAnswers_det (full determinism — `ServerAnswers s now` is a function of its inputs: same server/time/query ⇒ same trace AND same response. `now` is an explicit relation parameter precisely so the time-dependence of cache/glue TTL aging is an input, not non-determinism)), intra-zone failover (ServerFailover), timed server cache, and a UNIFIED evolution: CoEvolves bundles a System (platonic tree + network) so tree and network evolve in lock-step (tree_step/net_step projections), with delegate_creates_authority tying the network transition to AuthoritativeFor. Wildcard DEPTH follows RFC 4592 (the closest-encloser clarification of §4.3.3), not literal §1034 prose — wildcardSynth synthesises at ANY depth below the wildcard node when no closer name is known; the citation stays on [1034] as the wildcard's origin, with the deviation documented in wildcardSynth's docstring. AUTHORITATIVE CORRECTNESS at the source: serverAnswers_answer_authoritative proves the §4.3.2 positive `answer`/`cname` branch fires ONLY when the server holds the nearest-ancestor zone with no cut above QNAME (bestZone = some z ∧ bestDeleg z QNAME = none), which is EXACTLY AuthoritativeFor net QCLASS — and since AuthoritativeFor is now itself DEFINED via bestZone/bestDeleg, this is a direct constructor application (the bestZone_spec/bestDeleg_none_all fold lemmas remain as standalone characterizations) — so "the answering server is authoritative for QNAME" is a THEOREM about the branch, not an assumption (a server lacking authority cannot reach these branches; it refers/errors instead). This is the source-level half of closing "grounding ≠ correctness" (the resolver-level half, AuthAnswer/resolves_answer_authoritative, is in NetworkSemantics). Every decl rfc_proves-linked at sub-section granularity.
+    NetworkTraces.lean  -- RFC 1034 §6: the scenario topology encoded as Zone/Server/Network terms; each §6.2 worked query replayed as a ServerAnswers derivation whose response IS the RFC's (non-circular — the response is produced by the relation, not asserted). Also inhabits names-as-paths, the tree↔network relation, cache aging, and failover. These derivations are what prove the model is non-vacuous. Tree-growth robustness is now GENERAL, not a hand-built example: growSection_preserves_lookup proves that for ANY tree, ANY already-resolving non-root name, and ANY grown subtree, a TreeEvolution.growSection step leaves resolution unchanged (via descend_push: an end-append never displaces find?'s first match); path_stable_under_growth is a corollary instance.
+    NetworkSemantics.lean -- operational layer on top of the static model. The ITERATIVE resolver Resolves threads everything: a MONOTONE wall-clock (start time `now` → end time `tEnd`, advanced by an explicit delay on every network hop; resolves_time_monotone proves now ≤ tEnd so a resolution genuinely takes time and a cache entry checked at a later hop is checked against a later clock — ex_resolution_advances_time exhibits a strict advance via a timeout-then-fallback), a timed credibility-aware Cache (in+out, so resolution populates it and later queries hit it — RFC 2181 §5.4.1 trust + RFC 2308 negative entries, with cache_no_stale), next hops reached by IP address via glue (serverAt/glueAddresses), the transport (Transit keyed by address + RFC 5452 accepts), COMPRESSION-AWARE wire-size truncation (RFC 1035 §4.1.4): messageWire threads a "seen suffixes" state through the message in wire order (header + question + each RR's owner and RDATA names), so a name reoccurring as a suffix collapses to a 2-octet pointer exactly as on the wire — no inflated record-by-record sum that would truncate far too eagerly (an owner repeating QNAME costs 2 octets, not ~33). The seen-state tracks (suffix, on-wire OFFSET) pairs and enforces the §4.1.4 14-bit pointer ceiling (ptrMax = 16383): a suffix first written past offset 16383 is NOT a usable target and the repeat is charged in full, so the metric cannot UNDER-count by claiming a pointer the wire format can't encode (nameWireC_ptr_ceiling witnesses the boundary — compressible at offset 16383, full-width at 16384). truncateToUdp fills what fits via packFit (which threads the same compression state from the post-question point) and sets the TC bit (Response.tc) on a real >512 message — what a real compressing server does, not "drop everything". truncateToUdp_fits proves the packed reply ≤ 512 for any question that fits the datagram, and qname_fits_datagram discharges that precondition for every §3.1-legal QNAME (header+question ≤ 271); bigResponse_truncated exhibits a 30-record response that crosses 512 EVEN after maximal compression, resolution seeded from root hints / SBELT so a cold lookup walks root→TLD→authoritative purely by referral (rootHints / ex_resolve_from_root_hints), a declarative delegation-loop guard in DEPTH-PROGRESS form (refer/referForget carry an abstract `frontier : Name` watermark chosen by the derivation: the referral must descend strictly below it — hdescF — and it must be unvisited — hfresh : frontier ∉ seen, with `frontier :: seen` threaded to the recursion. The honest-server descent hdesc : descendsBelow (serverBailiwick …) is kept as a SEPARATE premise pinning the cache-write bailiwick and feeding the grounding theorems, so loop-freedom bookkeeping is DECOUPLED from served-zone provenance — which a real resolver cannot attest for a warm-cache delegation. This matches the impl's delegationCloserB matchCount-increase guard and RFC 1034 §5.3.3 progress, and lets the forward simulation discharge freshness UNIFORMLY across the honest, cache-rebuild — including a deeper prior cached delegation, the old s8 provenance gap — and spoofed referral arms, always with the cut's ancestor at the current SLIST matchCount depth, isAncestor_drop_ancestor), a BAILIWICK check AND a STRICT-DESCENT/progress guard (refer/referForget require BOTH reply.msg.inBailiwick q.qname — every NS RR in the referral's authority is owned by an ancestor of QNAME — AND reply.msg.descendsBelow (serverBailiwick srv q.qname q.qclass): the referral's cut is a PROPER descendant of the answering server's own zone apex. inBailiwick ALONE is satisfied by a referral pointing sideways or UPWARD — a closer ancestor, or even the root, is still an ancestor of QNAME — so descendsBelow is what actually forces progress: every followed referral strictly shortens the label distance to QNAME (descendsBelow_strict unpacks "proper descendant"; the loop guard only bounded re-visits, not progress). referral_in_bailiwick + referral_descends_strictly show an honest §4.3.2 referral passes BOTH guards, so they reject only lame/hostile sideways/upward referrals, never legitimate descent). The refer step ALSO requires GLUE to be present (hglue: glueAddresses reply.msg ≠ []); a glueless referral instead goes through referForget (which admits an empty recursive SLIST). The glueless case is a SPLIT pair of rules matching the implementation's (and BIND/unbound's) temporal structure: RECEIPT of the glueless referral is refer/referForget (the referral is absorbed; its NS hosts survive only as cached NS records), and the ADDRESS RESOLUTION is the separate gluelessNs rule (RFC 1034 §5.3.3 "obtain the missing addresses", performed lazily one loop iteration later) — with NO addressed SLIST candidates left (conclusion slist []), it picks an NS host at an enclosing cut of QNAME justified by a rule-carried FROZEN provenance cache cprov (hns : nsHost ∈ cprov.nsHostsAt now zone — per-key max-rank topServed, anti-poison inherited from the bailiwick-gated cache writes; the soundness driver instantiates cprov as the genuine post-referral, pre-capacity-bound cache). The anchor is deliberately NOT the rule's live cache c: real resolvers (RFC 1034 §5.3.2 SLIST) hold the referral's NS names in memory and never re-derive them at use time, and a live-cache anchor is unsound to thread — an earlier glueless sub-run can write a higher-credibility (zone,NS,IN) RRset that OCCLUDES the referral's in topServed reads, invalidating the remaining address-less targets (the corner-2 cacheCname cf-slot mechanism reused; cprov is untied to c because no local refinement holds in either direction — c both gains sub-run absorbs and loses evictions vs cprov — and hns feeds no security walk, which compose only through ihNs/ihRec). It resolves the host's A address as a FRESH sub-resolution (its own visited sets; the impl bounds the sub-run by depth), and continues the main query on an evicted image (CacheRefines slot c2f, the cacheCname cf-slot mechanism — the impl's capacity bound applies between the sub-run's return and the main loop's re-entry) of the sub-run's output cache at a SLIST containing the learned address (ex_sibling_resolution composes referForget receipt + gluelessNs address-resolution end-to-end). This replaced the old fused referNoGlue rule, which bundled receipt + NS-address sub-resolution + continuation into one step pinned to the delegating server's witnesses — unusable in the forward simulation precisely because the impl performs receipt and address resolution one loop iteration apart. So a glueless-but-resolvable referral is never abandoned. The acceptance test is ADVERSARIAL, not true-by-construction, and bites on the PAYLOAD, with payload integrity now DERIVED rather than asserted: Datagram CARRIES the response message (msg), and answer/refer/referForget/answerCname take a `reply : Datagram` whose body is NOT pinned to the honest answer — instead an OnWire provenance hypothesis admits BOTH the honest server's reply (OnWire.fromServer) AND an off-path attacker's forged-body injection (OnWire.offPath: arbitrary poison body, constrained only to not match both the ID and source port, since a blind attacker can't observe the query). So the RFC 5452 cache-poisoning attack is now EXPRESSIBLE (the old spec's `reply.msg = honest` side-condition made a poison datagram an illegal value, true-by-fiat). onWire_accepted_honest then DERIVES that any reply passing accepts carries exactly the honest body — the off-path branch can't satisfy accepts (accepts_off_path_false), so fromServer is the only survivor. accepts_requires_match pins all RFC 5452 §4 checks on passing — transaction ID + source address + both ports + the WHOLE question section, QNAME AND QTYPE AND QCLASS (Datagram carries a qclass field and accepts compares it: the §4 match is the entire question, not just name+type); resolves_data_needs_acceptance proves any cache change required an accepted OnWire datagram whose body equals the honest payload (reply.msg = honest, via onWire_accepted_honest — payload integrity, not just header existence); offpath_cannot_cache strengthens this to the UNIVERSAL guarantee — any cache change forces a datagram that echoed the query's transaction ID AND the resolver's source port AND carried the honest body, never a forged RRset; ex_poison_cannot_be_cached takes the honest body straight from ServerAnswers (not a literal), exhibits a forged poison datagram that IS a legal OnWire event yet fails accepts, and — the load-bearing clause — proves via onWire_accepted_honest that NO accepted on-wire reply (on any header the attacker forges) carries the poison RRset, and ex_spoof_cannot_poison drives one through a concrete walk to rejectSpoof. The §4.3.2 step-1 fork is modelled by ServerDispatch — a genuine two-way branch, not a bundle: localAnswer (answer from authoritative data, taken when q.rd is clear OR Server.recursionAvailable is false) vs recurse (run Resolves from the server's hints, taken only when q.rd AND recursionAvailable). nonRecursive_dispatch_is_local PROVES a server without RA can only take localAnswer — so RD is genuinely ignored when recursion is off (ex_recursive_dispatch exhibits the recurse walk root→TLD→authoritative; ex_nonrecursive_ignores_rd shows a plain server referring an RD query instead of recursing). RD DOES NOT PROPAGATE PAST THE RESOLVER: Datagram carries an `rd` header bit (RFC 1035 §4.1.1) and the iterative resolver's upstream query builder queryDatagram CLEARS it unconditionally (rd := false), independent of the client's q.rd — so the recurse branch fires BECAUSE the client set RD, yet every query it then puts on the wire to an authoritative server is non-recursive, asking only for that server's best local answer/referral (queryDatagram_clears_rd, RFC 1034 §4.3.1). This is upgraded to a DERIVATION-LEVEL guarantee by resolves_rd_irrelevant: by induction over the WHOLE resolution, overwriting the query's RD with any value yields the same trace/path/end-time/output-cache/response — so RD influences nothing downstream of the dispatch (not a single upstream query, cache write, or answer), genuine independence not just a zeroed field (rests on serverAnswers_rd_irrelevant: the §4.3.2 server algorithm never reads RD). RD is excluded from the RFC 5452 accepts tuple; an honest reply echoes it (replyDatagram keeps it via `with`). Previously the wire datagram had no RD bit, so q.rd was silently dropped at serialization rather than deliberately cleared. The off-path entropy is also proved non-circularly over a COMPLETELY free attacker: accepted_needs_full_secret shows any accepted datagram (any forged body, no provenance restriction) matched both the transaction ID AND the source port — so a forged-body injection requires guessing the full ~32-bit secret — and blind_match_unique shows a fixed blind datagram is accepted for at most ONE (id, port) secret (the 2⁻³² bound, proved). The compression metric's faithfulness is bounded below: messageWire_lb proves messageWire ≥ messageFloor (12 header + nonzero QNAME + 4 question + each RR's 10 fixed + RDATA-fixed + nonzero owner), so it cannot under-count the incompressible octets a real serializer must emit. CROSS-ZONE CNAME chasing (answerCname): when a server returns a bare CNAME whose canonical name lies in another zone, the resolver restarts resolution on the target from a fresh SLIST, prepends the CNAME, and guards a visited-name set nseen against alias loops (ex_cname_chase_across_zones walks ALIAS→REAL.NET across two servers). The SAME chase applies to a CACHED CNAME (cacheCname, RFC 1034 §4.3.2 step 3a on cached data): on a typed cache miss with a fresh cached CNAME for QNAME (Cache.cnameAt) and a non-CNAME query, the resolver follows the alias OFFLINE — no datagram, no time elapsed — restarts on the target, and prepends the cached CNAME, exactly the answerCname shape but without a round trip for the alias (ex_cached_cname_chased; cnameAt_eqData keeps the prepended cached alias grounded). This closes the asymmetry where the live path chased aliases but a cached CNAME was invisible to a non-CNAME query (Cache.hit's qtype filter never matched it), so a cache miss needlessly re-queried the network. Negative caching is wired end-to-end: absorbNeg derives the negative TTL from min(SOA.MINIMUM, SOA TTL) (absorbNeg_ttl_is_soa_minimum) — not a free parameter — and ONLY from a SOA owned at or above the query name (soaNegTtl is parameterized by qname with an isAncestor r.owner qname per-record conjunct, RFC 2308 §3: the denial's SOA must be the apex of the zone containing the qname; an attacker-owned SOA riding an NXDOMAIN — review #012/#013 negative-cache poisoning — triggers no negative write, mirrored in the impl's extractSoaNegative owner check) — and caches BOTH NXDOMAIN (name-keyed, suppressing all types) AND NODATA (type-keyed, so a re-query for the same type hits but other types don't; absorbNeg_nodata_typed, type-aware negHit), populated end-to-end by ex_negcache_populated / ex_nodata_cached. isReferral keys on NS-present AND SOA-absent (RFC 2308 §2.2: the SOA distinguishes a negative reply from a referral, so even a NODATA TYPE 1 reply carrying NS records is correctly classified — for any RFC-legal response, not just ours). Resolves carries no `fuel` index — termination of an inductive relation is automatic. Proven on the §6.3.1 multi-hop MX walk from an empty cache, a cache-hit (no network) + expire pair, a timeout→failover, a spoof-rejection, and a real truncation. ex_631_recursion_safe is the END-TO-END RECURSION CAPSTONE on the canonical §6 scenario data: the §6.3.1 referral→answer descent is shown — by instantiating the general theorems, not re-proving — to be simultaneously loop-free (delegation_bailiwick_fresh: every followed referral's frontier is fresh in the visited set — depth-progress, address-Nodup having been dropped as false under anycast), time-monotone (resolves_time_monotone), and authoritative-or-grounded (resolves_answer_authoritative), so the static NetworkModel drives a real iterative resolution that is acyclic, advancing, and non-fabricating at once (the cold root→TLD→authoritative walk is ex_resolve_from_root_hints / _authoritative). Also: §5.3.3 SLIST RTT ordering — sortedByRtt_sorted proves the SLIST is sorted by ascending RTT for ANY input (List.Pairwise, general — not one hand-picked list) and sortedByRtt_perm proves it drops/duplicates no server, with sortByRtt_fastest_first a corollary; §4.2 class partition as genuine isolation: answer_invariant_foreign_class proves the QCLASS answer is bit-for-bit INVARIANT under adjoining foreign-class data — even at the SAME owner name (the parallel trees are independent, not merely non-leaking), lifted to the §4.3.2 answer step by answer_step_invariant_foreign_class; ex_class_isolation_in/_ch exhibit it concretely as TWO parallel same-apex zones (inClassZone IN / chClassZone CH) on one server, the same name HOST.X resolving to a class-dependent address because bestZone selects the matching-class zone (same name, same QTYPE, class-dependent zone — "parallel namespace trees" made literal), the IPv4 octet model (now the representation in RData.a, not a side artifact), Zone.WF invariants incl. CNAME-exclusivity + in-bailiwick glue-completeness + §3.1 length limits (Zone.WF_cnameAlone lifts the per-record CNAME-exclusivity clause to every QNAME's recordsAt, feeding the NetworkModel forcing theorem so a well-formed CNAME node provably chases the alias); a whole-NETWORK Network.WF bundles per-server zone distinctness (Server.zonesDistinct — no two zones share both class and apex, the precondition for bestZone unambiguity) with per-zone Zone.WF + Zone.classHomogeneous (every record/NS of the zone's own class, so the class-blind node predicates are sound on a matched zone), discharged on the §6 network by scenario_WF. Loop-freeness is declarative, not an algorithm, in both dimensions: CNAME chains carry a `seen` path with cname_acyclic proving the visited names are Nodup, and the referral walk carries a visited-FRONTIER set `seen` with delegation_bailiwick_fresh proving each followed hop's frontier unvisited (name-based depth progress, not address identity — anycast makes address-Nodup false). gluelessNs's NS-address sub-resolution runs with its OWN fresh visited sets (matching the impl, which bounds the sub-run by depth rather than by the main chain's bookkeeping) while the MAIN chain's nseen/seen pass through unchanged to the continuation — so the main walk's depth-progress guarantee is untouched by a glueless chase, and the sub-run, being itself a Resolves derivation, carries every guard of the relation (an inductive relation can't have infinite derivations, so termination is automatic). END-TO-END SOUNDNESS (no fabrication): resolves_answer_grounded proves every RR in a resolution's final answer is GROUNDED in (net, input-cache) — up to TTL (RR.eqData) it is either a record from the input cache or one some REAL server placed in a section of a genuine ServerAnswers reply during the walk; resolves_cout_grounded is the same for the output cache, and the two compose across cache round-trips via grounded_of_cache_grounded (with absorb_pos_provenance bounding what a hop's Cache.absorb can introduce and packFit_subset/truncateToCap_sections_mem showing truncation only ever drops records). CNAME chasing only splices server-produced replies, so the resolver introduces nothing of its own — the functional-correctness companion to the safety results (exact-RRset equality with the origin zone is NOT claimed: truncation/aging/CNAME splicing make grounding-up-to-eqData the right end-to-end statement). Cache.absorb's RFC 2181 §5.4.1 credibility is now CONDITIONED ON THE AA BIT — the answer/authority sections of a NON-authoritative reply (aa=false, e.g. relayed cached data) are absorbed at the bottom rank (glue), so unauthoritative data can't override authoritative data already held (only an aa=true reply gets authoritative/authority credibility). Credibility is now CONSUMED AT LOOKUP, not merely stored: Cache.hit serves only Cache.served — the matching fresh entries of MAXIMAL credibility per (owner,type,class) key (CacheRR.sameKey) — so a less-credible copy of an RRset is dropped from a lookup whenever a more-credible copy of the same key is present (served_excludes_dominated; served_glue_yields_to_authoritative is the operational form of authoritative_beats_glue; hit_drops_poison_glue exhibits a poison glue A beside an authoritative A and shows ONLY the authoritative address is served). This makes the RFC 2181 §5.4.1 ranking load-bearing rather than a property of an otherwise-unused moreCredible. Compression sizing is laid out in TRUE WIRE ORDER per RData (emitRData): SOA's MNAME/RNAME precede its 20 timer octets and MX's preference precedes the exchange name, so the §4.1.4 pointer-offset (ptrMax) test is judged at each name's real position (the old "all names after all fixed octets" shortcut mis-placed SOA names ~20 octets late). The maximal-compression assumption is RELAXED into a bracket: nameWireC_le_nameWire proves compression never costs more than the uncompressed nameWire (and nameWireC_nil gives the no-compression endpoint), so every RFC-conformant server's real serialized size sits in [maximal-compression, none] and a resolver can size against the uncompressed upper bound to stay safe against a less-compressing peer. Cache eviction BY SIZE (not just TTL): Cache.cap bounds the positive and negative stores to a capacity, dropping oldest-first (lists are newest-first since insert prepends); cap_size_le enforces the bound, cap_pos/neg_subset prove eviction only ever drops (never invents) an entry, and cap_no_stale shows it composes with the TTL discipline (still serves nothing stale). EDNS0 (RFC 6891) is THREADED through resolution: Resolves carries an ednsBuf parameter (the resolver's advertised OPT buffer), queryDatagram stamps it into Datagram.udpPayload (queryDatagram_cap: each query negotiates negotiatedUdp ednsBuf), and the answer/answerCname hops truncate the honest reply to truncateToCap (negotiatedUdp ednsBuf) — so the advertised buffer genuinely drives in-walk truncation, not a constant. negotiatedUdp floors it at 512 and the buffer-parametric truncateToCap generalises truncateToUdp (recovered as the negotiatedUdp-512 instance via truncateToUdp_eq_cap); truncateToCap_fits proves any negotiated cap is honoured, bigResponse_edns_whole exhibits a >512 message delivered WHOLE under a 1232-octet buffer, and ex_resolve_from_root_hints_edns runs the full cold root→TLD→authoritative walk with ednsBuf=1232 (vs the ednsBuf=512 ex_resolve_from_root_hints — same walk, different advertised buffer). A resolver advertising 512 is the no-EDNS instance, so the rest of the development is exactly that case. glueAddresses now dials ONLY the addresses of the referral's actual NS hosts (referredServers), not arbitrary A records riding in additional — both realistic and a poisoning defence (glue_ignores_non_ns_address drops an off-topic EVIL.COM A record); on an honest well-formed referral this is exactly the prior glue set (so the §6.3 traces are unchanged), and the candidate set is RTT-ordered (sortByRtt) before consumption. SERVER SELECTION IS A FREE CHOICE, not pinned to the RTT order: the chooseServer constructor (RFC 1034 §5.3.3/§7.2) lets a derivation built for one SLIST ordering be reused for ANY permutation of the same candidate set — output-preserving (identical trace/path/end-time/output-cache/response, only the order servers would be tried differs), so it neither introduces a new server/answer nor changes cout (offpath_cannot_cache is unaffected, the visited-frontier discipline is unchanged). This reflects that RTT sorting is a performance heuristic, not a correctness constraint, and is what reconciles the forward simulation's order gap — the implementation seeds its SLIST from referral glue in NS-name/array order and queries by transmissionCount (never reading the abstract rttOf), whereas the model refer rule pins the recursive SLIST to sortByRtt (glueEntries rttOf …); the two are never equal for an abstract rttOf but are always permutations of the same glue-address set, bridged by chooseServer (chooseServer_hasVerdict is the HasVerdict-threading producer). RTT IS RESOLVER-LOCAL, not server-asserted: Resolves carries an rttOf : String → Nat index (the §5.3.3 "batting average" the resolver itself keeps from past queries) and glueEntries pairs each glue address with rttOf a — NEVER the answering server's own Server.rtt field; closing the abstraction leak where resolution read the network's ground-truth RTT, so a server cannot reorder how its peers are tried by reporting a flattering RTT (faster_glue_tried_first now ranks against the resolver's own table). TC GUARD (RFC 1035 §4.1.1, TCP-retry out of scope): the answer/answerCname hops require reply.msg.tc = false, so a TRUNCATED (partial-RRset) reply can be neither consumed as a final answer nor cached — resolves_answer_untruncated proves every response a resolution yields has TC clear (truncateToCap_untrunc: an untruncated honest reply IS the full server response); previously a TC=1 partial reply could slip through as final. The anti-poison Cache.absorb bailiwick is now QCLASS-AWARE: each hop scopes its write to serverBailiwick srv q.qname q.qclass (the apex of the zone the server used for THIS class), not the default-IN apex — so a non-IN walk is scoped against the right zone (resolves_cache_in_bailiwick generalised to quantify the class). serverBailiwick's NON-authoritative fallback is now QNAME, not the root: a forwarder/cache server (no zone for QNAME) is trusted to cache only data at/below the exact name asked, NOT the whole namespace — the old `[]` fallback made `isAncestor [] _` hold for every name, switching the anti-poison filter OFF for the least-trusted source; serverBailiwick_covers_qname proves the scope still always admits QNAME, so a legitimate answer-for-QNAME is never dropped while everything outside QNAME's subtree from a non-authoritative answerer is. Cache.absorb also DROPS the authority-section SOA before positive caching (the SOA of a NODATA/NXDOMAIN reply bounds the NEGATIVE cache via absorbNeg, RFC 2308 §3/§5 — caching it positively would wrongly answer a later SOA query for the apex from a denial): absorb_no_authority_soa proves any positively-cached SOA came from the answer or additional section (a genuine SOA answer), never authority; nodata_authority_soa_dropped_ns_kept exhibits a TYPE 1 NODATA whose apex NS is cached but apex SOA is not. AUTHORITATIVE CORRECTNESS, end-to-end (closing "grounding ≠ correctness"): AuthAnswer net r says r equals (up to TTL) a record the RIGHTFUL AUTHORITY holds at the name (some srv whose nearest-ancestor zone for q' has no cut above it carries r in recordsAt) — strictly stronger than Grounded; AuthAnswer_authoritative bridges to AuthoritativeFor via the NetworkModel serverAnswers_answer_authoritative. resolves_answer_authoritative proves — by induction over the whole iterative walk — that EVERY record in the final answer is AuthAnswer net r ∨ Grounded net (input-cache) r: for a cold walk (input cache empty) the residual Grounded covers only CNAME/wildcard-synthesis and the server's own cache, while a direct `answer` leaf yields AuthAnswer outright (serverAnswers_leaf_auth extracts it, the CNAME-redirect branch being ruled out by the leaf's hnc guard). So a lame/on-path server CANNOT have a wrong-but-grounded answer accepted — emitting a positive answer for QNAME provably requires authority over QNAME — upgrading the resolver from VERIFIED-SAFE to VERIFIED-CORRECT; ex_resolve_from_root_hints_authoritative instantiates it on the cold root→TLD→authoritative walk (the resolved WWW.EXAMPLE.EDU address is AuthAnswer, and NS.EXAMPLE.EDU is AuthoritativeFor it). NEGATIVE replies are grounded too — NOT vacuously sound: resolves_answer_grounded only quantifies over resp.answer (empty on a NODATA/NXDOMAIN reply), so resolves_response_grounded EXTENDS grounding to the authority AND additional sections — the SOA/NS a denial carries is provably a record a real server placed in a genuine ServerAnswers reply, not minted by the resolver; and resolves_nxdomain_justified grounds the DENIAL ITSELF — a returned RCODE=nameError traces to a real authoritative name-error reply in the network OR to an NXDOMAIN (qtype=none) entry already in the input cache (via resolves_negcache_grounded, the negative analogue of resolves_cout_grounded: every out-cache negative entry is from the input cache or a server denial, with qtype=none entries tied to a nameError reply; absorb_neg/absorbNeg_neg_mem are the threading lemmas). So a spurious "this name does not exist" is not derivable. SERVFAIL is NOT REACHED FOR RESOLVABLE NAMES: the servFail producers are exactly the three CONSTRAINED terminals — exhausted (empty SLIST), gaveUp (RFC 1035 §7.2 bounded work: fuel/deadline/glueless-depth budget aborts; since the W2 model-strengthening it carries a mandatory GaveUpWitness premise — serversExhausted or outOfBudget mode, both requiring the RFC 1034 §5.3.1-step-1 cache-miss facts c.hit now q = [] ∧ c.negHit now q = false, so a give-up verdict can never shadow a cached answer and is no longer derivable for arbitrary states) and loopDetected (RFC 1034 §3.6.2 CNAME chase-cap/revisit aborts; still premise-free — conditioning it and exhausted the same way is recorded follow-up work) — all three pinned to rcode=servFail + EMPTY answer + output cache = input cache (cout = c), so none can justify an answer delivery or a cache mutation (an adversary gains nothing from a give-up verdict: the delivered-shape half stays pinned by the verdict theorems); every other rule's response flows from a server reply or the cache, serverAnswers_rcode_ne_servFail proves the §4.3.2 server algorithm itself never yields servFail (NOERROR/NXDOMAIN only), and no_servfail_direct is the liveness theorem — a query whose SLIST head is a REACHABLE server returning a non-referral, untruncated §4.3.2 answer has a resolution returning that server's RCODE, hence ≠ servFail (TCP retry being out of scope, a would-be-truncated reply is the one UDP-only case a resolver legitimately can't complete, hence the untruncated premise). With the glueless-referral dead-end closed (hglue above), the only route to exhausted is genuine unreachability. ex_direct_no_servfail instantiates it one-hop; ex_631_no_servfail and ex_root_hints_no_servfail show the real multi-hop §6.3 / cold root-hints resolvable names resolve to NOERROR, never SERVFAIL. QNAME MINIMISATION (RFC 9156/8020, model half — plan stage Q2): every datagram-sending rule (refer/referForget/trustedReferral/rejectSpoof/badResponse/unfollowableReferral) now carries the SENT question `pq` with `hprobe : ProbeQuery pq q` — either the true query (left disjunct: qname/qtype/qclass agree; `rd` deliberately unpinned so resolves_rd_irrelevant survives) or a STRICT probe (StrictProbe: a proper ancestor of q.qname strictly below an existentially-closed delegation cut, at the obscured QTYPE=A — RFC 9156 §2.1/§2.2) — the wire literals (hans/hacc/hwire) are keyed at pq so a minimising round reveals only the probe, while the guards, cache-write bailiwicks, and recursion stay stated against the true target; every pre-minimisation producer instantiates the left disjunct (ProbeQuery.refl) and the answer/CNAME rules keep it FORCED by construction — only referrals and denials are consumable from probe rounds. badResponse's hbad gains the probe-discard right disjunct (rcode = servFail ∨ StrictProbe pq q — the RFC 9156 §3 (6c) reading: an accepted-but-unconsumed probe reply — NOERROR with or without an answer, a CNAME at the probe name — is dropped uncached/unchased/undelivered and resolution continues; the impl's reveal+1 image for Q3a). The NEW ancestorDenied rule is the strict-mode terminal (RFC 9156 §3 (6d) / RFC 8020 §2 base SHOULD, consistent with the no-DNSSEC scope): an accepts-passing NXDOMAIN reply to a strict probe concludes NXDOMAIN for the FULL query and STOPS — no fuller name is ever sent — negative-caching keyed at the PROBE query (absorbNeg now pq; RFC 8020 §3.2's revision of RFC 2308 §5: the cached ancestor denial answers descendant queries), in trustedReply's trusted shape (arbitrary origin, RFC 5452 threat model) with the replacing/evicting cf0/cf write slots over an absorbNeg-only image (cf0 = c is the uncacheable-denial no-write case). Security posture: forging it needs the same id+port+full-question race as any spoof — probe names have fewer letters, so per-round 0x20 entropy is lower, id/port entropy unchanged — and the blast radius (subtree denial for the negative TTL) is exactly the RFC 8020 semantic, surfaced as a TrustedReplyNxdomain escape disjunct newly threaded through resolves_negcache_grounded/resolves_negHitNx_justified (resolves_nxdomain_justified already carried it; the TrustedReferralCache escape is now packed at the sent pq, and trustedReferral's hcut anti-poison bound is judged against pq.qname — the wire-facing gate). ex_strict_ancestor_denied is the right-disjunct walk: probing `MIL. A` for `WWW.FOO.MIL` gets an accepted NXDOMAIN and the client gets NXDOMAIN with no datagram carrying FOO or WWW ever sent. The impl flip (revealed loop parameter, buildSubQuery probe input, strict-NXDOMAIN terminal arm) is plan stages Q3a/Q3b — the pure resolver never sends, so Impl/ is untouched by Q2. Every decl rfc_proves-linked.
+    Entitlement.lean    -- W1 non-interference: role-indexed Entitled (answer chain / negative SOA / delegation bailiwick / additional-section bailiwick — the 047 role), insertion frames for every Resolves filter, handle_frame bundle, fault-family corollaries (004/036/012-013/answer-injection/047 offcut_additional_unentitled), reachableNames_complete saturation, and the two loud model-gap counterexamples (see "Entitlement Non-Interference" below)
+    Clarifications.lean -- RFC 2181 §4-§11: reply addressing, RRSet + TTL uniformity, zone cuts/authority, SOA, TTL range, TC bit, CNAME/PTR/MX/NS
+    AcceptanceRules.lean -- RFC 5452 §3-§7: accept-iff-matches (proven accept⟹id/question/source match), in-domain-only, birthday/combined-difficulty
+    ResourceModel1034.lean   -- RFC 1034 §3.6-3.7: RR fields, ttl=0-not-cacheable, CNAME alias discipline, query/response trichotomy
+    ResolverInternals1034.lean -- RFC 1034 §4.3.2-3.5, §5.1-5.3: query modes, wildcards, SOA timers, alias chasing, bounded work
+    Examples1034.lean        -- RFC 1034 §6: worked-example *shape* facts (older style: asserts a hand-written response then proves its shape). Superseded for trace fidelity by NetworkTraces.lean, which derives the response from the ServerAnswers relation.
+    Rdata1035.lean / Misc1035.lean / Misc1035b.lean -- RFC 1035 §3.3/§3.4 RDATA formats, §5 master files, §6/§7 resolver processing
+    Misc1034.lean / Misc1034b.lean -- RFC 1034 §2/§3/§4/§5 remaining prose coverage
+    NegativeCacheClarify.lean / CachingTraces.lean / Misc2308.lean -- RFC 2308 NXDOMAIN/NODATA, caching, worked example
+    Classify.lean       -- RFC 1034 §4.3.2 / RFC 2308 §2 response classification frame (the DIRECTION row of the model-strengthening ledger): the total `ClassOutcome` (answer/nameError/referral/cname/nodata/retry), with each outcome pinned to its RFC clause. `nodata` requires a valid negative proof (SOA in authority, §2.2); an empty response without one is `retry` ("bizarre contents", §4.3.2.d) — the door findings 040 (AA=1 lame referral) and 041/045 (empty NOERROR) fit through. Pins: `lameReferral_bizarre`, `emptyWithoutProof_bizarre`, `nodata_requires_proof_or_no_ns`.
+    AnyMinimal.lean     -- RFC 8482 §4.2 (minimal responses to QTYPE=ANY): the `MinimalAnyResponse` shape (NOERROR + a single synthesized HINFO RRset, CPU="RFC8482", OS=null, no authority/additional), with `synthAnyResponse_minimal` proving `Server.synthAnyResponse` realizes it. Closes the plan-2 Query-shape ANY door at the serve boundary (rfc_proves [8482][271:278]).
+    Misc_final.lean     -- final prose-residual coverage sweep across RFC 1034/1035/2308
   Test/
     Loop.lean     -- Mock-socket compile-time (#guard) verification of serveOne/resolveWithIO
+    AdequacyPins.lean -- Executable mirrors of the liveness/adequacy theorems (docs/liveness-plan.md L4/L5): Prog.run against mkHonestOracleAddr/twoServerRespond (the proof layer's own cooperative-network objects) pins the depth-1 two-server descent (byte-exact answer, restored question, exactly two rounds via idCtr), the NXDOMAIN and flat-authoritative variants, and the MockM serve-path scenario
+    ExchangeJunk.lean / ExchangeJunkMain.lean -- Runtime FFI test (lean_exe exchange-junk-test): a loopback mock injects junk datagrams before/instead of the real reply; asserts veri_dns_exchange skips them and still returns the genuine reply (review #017). Uses well-formed DNS messages. Case 1/2 = junk from a THIRD (non-queried) source (source-address floor); case 3 = single-shot (exactly one query on the wire, no transport retry loop); cases 4/5 = CONTENT junk from the LEGITIMATE source:port (same txid, wrong question) — the #017 read-until-match fix: content junk from the right source must not consume the round. Main split out of the lib to avoid clashing with VeriDNS.Main's `main`.
   Impl/
     Parsec.lean         -- DnsParser/DnsSerializer monads + byte-level primitives
     BitPacking.lean     -- Sub-byte field pack/unpack (Header flags)
@@ -41,10 +64,11 @@ VeriDNS/
     ResourceRecord.lean -- ResourceRecord decode/encode
     Message.lean        -- Full DNS message decode/encode
     Cache.lean          -- Concrete DnsCache type + CacheSpec instance
-    SList.lean          -- Concrete DnsSList type + SlistSpec instance
+    SList.lean          -- Concrete DnsSList type + SlistSpec instance. setUpAddresses = fromNsWithGlueAll: ALL-ADDRESSES per NS host (RFC 1034 §5.3.3 — a real resolver tries every known address of a nameserver), not first-per-host; glueless hosts kept as address-less entries. Glue owner↔NS name matched CASE-INSENSITIVELY via nameEqCI (RFC 1035 §2.3.3). (fromNsWithGlue, the first-per-host form, retained for legacy proofs.)
     Resolver.lean       -- Fuel-bounded resolver with NS walking, delegation (4b), CNAME chasing with chain accumulation (4c)
+    Edns.lean           -- EDNS0 (RFC 6891): OPT pseudo-RR carrier (optRRBytes), advertisedUdpSize 1232, clientCap (reply budget), stripOpt (receive-side OPT scrub). See "EDNS0" below.
     UdpSocket.lean      -- @[extern] FFI (socket/bind/sendto/recvfrom) + UdpSocket IO instance
-    Server.lean         -- Iterative resolution IO shim, SBELT-based server loop
+    Server.lean         -- Iterative resolution IO shim, SBELT-based server loop. Serve-boundary query-shape handling (plan-2 Query-shape row, FULLY CLOSED): `queryProblem` is the TOTAL ingress classifier over eight gates, ordered for unbound-1.24.2 parity (verified differentially): multi-/zero-question → FORMERR; TC-set → FORMERR (032, `tcClear`); stuffed answer/authority or non-single-OPT additional → FORMERR (042, `sectionsQueryShaped`/`additionalQueryShaped`, RFC 1035 §4.1 + RFC 6891 §6.1.1); opcode ≠ QUERY → NOTIMP; rd ≠ 1 → REFUSED; non-IN class → REFUSED (CHAOS etc.); AXFR/IXFR → REFUSED (044b, `zoneTransferQtype`, RFC 5936); meta-QTYPE OPT/TKEY/TSIG/MAILB/MAILA/128–248 → FORMERR (044b, `metaQtype`, RFC 6891: OPT is not a query type). The classifier is pinned sound AND complete by `queryProblem_spec`/`queryProblem_none_iff` (Proof/Server.lean). Gate/error replies echo at most the FIRST question (`trimQuestion`, 033 — no over-echo of client stuffing) and `finalizeForClient` forces tc := 0, so the reply TC bit is exactly `truncateUdp`'s truncation flag, never an echo of the client's TC (032, `truncateUdp_tc_exact`/`serveReply_tc_is_truncation`). QTYPE=ANY is answered at ingress with the RFC 8482 §4.2 synthesized minimal HINFO RRset (`synthAnyResponse` / `hinfoRFC8482RR`, CPU="RFC8482", OS=null) via a dedicated `serveDatagram`/`serveTcpDatagram` arm — no full multi-type resolution, no cache write. All are serve-boundary decisions so the resolver core never sees a malformed, non-IN, meta-QTYPE, or ANY query. Inbound UDP recv uses `serveRecvSize` (= `Edns.advertisedUdpSize`, 1232) rather than 512 so valid EDNS queries >512B are not clipped (066).
   Proof/
     Enum.lean           -- Enum roundtrips (by cases; complete)
     BitPacking.lean     -- pack/unpack roundtrip (bv_decide; complete)
@@ -57,10 +81,15 @@ VeriDNS/
     ResourceRecord.lean -- ResourceRecord roundtrip theorem (complete)
     Message.lean        -- Full message roundtrip theorem (complete; Appends framework + frame lemmas + decodeMany induction)
     MessageValid.lean   -- Decode-side validity: decode's output satisfies every decode_encode hypothesis; end-to-end decode_encode_of_decode (complete)
+    CanonicalRaw.lean   -- W0 single-trust-root layer: CanonicalRaw/CanonicalRecord, internal decoder total+inverse on the ingress image, CacheRawsCanonical store invariant + per-writer preservation, pipeline closure (normRaws, TTL cap, answer scrub, SOA extraction) (complete)
     Resolver.lean       -- RFC conformance proofs: SBELT fallback, ID match, dispatch, loop trace soundness (StepSpecStar), pause inversion, needsIO, step relation soundness, response coverage (all complete)
-    Server.lean         -- buildResponse/truncateUdp properties, RFC 5452 datagram gate (complete)
-    NameTreeComplete.lean -- Completeness: resolveWithIO_complete — untruncated answers deliver treeResolve's verdict whole (RRset indivisibility end-to-end; complete)
-  Main.lean       -- Executable entry point (UDP server on port 5300)
+    Server.lean         -- buildResponse/truncateUdp properties (cap-parametric since EDNS0: truncateUdp_no_trunc baseline + truncateUdp_no_trunc_cap), RFC 5452 datagram gate (complete)
+    NameTreeComplete.lean -- Completeness: resolveWithIO_complete — untruncated answers deliver treeResolve's verdict whole (RRset indivisibility end-to-end; complete). `ResponseConsistent.nodataDeserved` (the classification premise) is honoured by the impl's SOA-gated NODATA (see Classify.lean).
+    Classify.lean       -- The completeness dual (DIRECTION row): `classifyResponse_nodata_treeLookup` — on an honest response consistent with the tree, a `nodata` classification forces `treeLookup = .nodata` (the SOA negative proof discharges nodataDeserved's referral-exclusion premise for free). `tree_hasData_not_nodata` is its contrapositive: a data-bearing name is never answered NODATA (the theorem 041/045 needed). `classify_lameReferral_retry` pins 040: an AA=1 NS-authority no-SOA response classifies as `retry`, never a synthesised answer/NODATA. All axiom-clean [propext, Quot.sound].
+    Refinement.lean     -- Forward-simulation abstraction layer: αResp/αRR/αType/αSection/αQuery (αType/αRData TOTAL over type codes since RFC 3597 T5), the codec/bridge lemmas, HasVerdict, the Net.Resolves producers, resolveWithIO_simulates (cache branches unconditional since D2 closure 2026-07-11 — the cache-hit disjunct carries impl-level invariants, not a served-set oracle; the network disjunct is discharged at the FreeIO layer by ioResumeLoop_sound)
+    Entitlement.lean    -- W1 transport: αSection_insert(edIn) wire-splice ⇒ model InsertedIn; scrubAnswerB_excludes_unentitled + αSection_scrubAnswerB_insert_frame (impl inherits the deliver frame); 047: scrubAdditionalB_eq_bailiwickRaws + αSection_scrubAdditionalB_eq + scrubAdditional_excludes_unentitled + offcut_additional_not_delivered (foreign additional never delivered)
+    AnswerTerminal.lean -- Extracted from Refinement (2026-06): αSection faithfulness (αSection_ne_nil/_nil_imp/_mem), query-type/αType bridges, and positive_answer_covered — the answer-terminal covered-record glue the forward-sim driver consumes
+  Main.lean       -- Executable entry point: shared-cache UDP + TCP servers on port 5300 (see "Driver Concurrency")
 ```
 
 ## include_rfc Pipeline
@@ -71,6 +100,151 @@ VeriDNS/
 4. Strips trailing whitespace per line
 5. Compares normalized text against user-provided block
 6. Compile error on mismatch with line-by-line diff
+
+## RFC Coverage Links (RFC/Check.lean)
+
+Four commands map RFC prose to the formalization and drive the coverage view +
+blueprint colouring:
+
+- `include_rfc [num][from:to] { text }` — compile-time assertion that `text`
+  matches the RFC lines verbatim (the pipeline above).
+- `check_rfc_doc <decl> [num][from:to]` — links a *documented* declaration whose
+  docstring must be an excerpt of the RFC range (compile-checked). Use for the
+  statement/model side (a predicate, structure, or spec `def`).
+- `rfc_proves <decl> [num][from:to]` — links any declaration to a range (no
+  docstring/type obligation); the remap tool for pointing a range at a real
+  theorem.
+- `rfc_out_of_scope [num][from:to]` — declares a range outside the formal model
+  (administrative/operational/advisory prose); excluded from the coverage
+  denominator.
+
+**Honest status colouring.** A span/node's colour comes from
+`Pseudoprint.declStatusName`, which classifies by *what the declaration is*, not
+merely by `sorry`-reachability:
+- a **proof** (its type is a `Prop`, i.e. a theorem) → green if sorry-free, else blue;
+- a bare **axiom** → blue;
+- a **statement/predicate** (type *produces* `Prop` but asserts nothing, e.g.
+  `def p : A → Prop`) → blue (*stated but unproven*) unless discharged;
+- a **data/type definition** → green.
+
+This is what stops specification predicates (e.g. `node_label_size`) from
+masquerading as proven.
+
+**Statement + proof via `via`.** Both `check_rfc_doc` and `rfc_proves` accept an
+optional `via <proofThm>` clause:
+
+```
+check_rfc_doc VeriDNS.Spec.node_label_size [1034][362:365] via VeriDNS.Spec.exampleNameSpace_root_label_size
+```
+
+This registers `proofThm` as *discharging* the statement (via
+`Pseudoprint.registerDischarge`), so the statement node renders green, its
+coverage span takes the proof's status, and a "proven by `proofThm`" citation is
+attached to the statement for navigation. A discharged statement without a
+sorry-free proof stays blue.
+
+## Scope-gate census and lint (RFC/ScopeGates.lean, RFC/ScopeLedger.lean)
+
+`docs/model-strengthening-plan-2.md` reframes every behavioural bug as an *open
+scope hypothesis* on the top correctness capstones: a hypothesis that narrows the
+theorem to a sub-domain (a query shape, a topology, a cache state, an adversary
+model) is "a door left open, and each open door is a class of bug". The plan's
+acceptance criterion is *mechanical* — checkable by reading a signature — so it is
+enforced by a compile-time lint, reusing the same name-resolution +
+`Environment`-inspection pattern as `Check.lean`'s `rfc_proves`.
+
+`RFC/ScopeGates.lean` provides the enforcement spine:
+
+- **The census** (`scope_census`, and `censusOne`) resolves each capstone in the
+  environment, walks its type's `∀`-binders with `Meta.forallTelescopeReducing`,
+  pretty-prints each binder type with `ppExpr`, and classifies it into a ledger
+  **row** (`ScopeRow`) by substring pattern (the plan states pretty-printed
+  matching is "acceptable and simplest"):
+  - `query-shape` — `qtype.toNat ≠ 255` (ANY), `RRClass.in` (qclass = IN),
+    `rd = false`, or the `InScope` bundle;
+  - `topology` — `SlistShape` / `SlistShape'` (single-NS shape, now the singleton
+    instance of the set-valued `SlistShape'`; the multi-homed failover coverage is
+    proven in `Proof/Failover.lean`, so this gate documents only the un-migrated
+    spine binder, not an open 035 gap);
+  - `cache-state` — `DnsCache.empty` (an assumed empty rather than the maintained
+    cache);
+  - `adversary` — `WorldModels` / `WorldModelsTcp` / `CooperativeNetworkAddr`
+    (soundness/adequacy against an assumed adversary/honest-network model);
+  - `rcode-scope` — a specific `Rcode.`;
+  - `direction` — soundness-only (no completeness dual); recorded at the capstone
+    level, not a binder pattern.
+  A binder that matches no pattern is a genuine fact about the running system
+  (`Prog.run … = some …`, `CacheWf`, the abstraction-consistency premises) and is
+  deliberately not flagged.
+- **The annotations.** `justified_scope <thm> "<row>" "<reason>"` marks a gate as
+  genuinely intrinsic (a below-boundary premise); `open_scope <thm> "<row>"
+  "<note>"` marks a known-open door tracked in the ledger, pointing at its plan-2
+  row. Both register into a `SimplePersistentEnvExtension` keyed by
+  `(capstone, row)`.
+- **The lint** (`scope_gate_lint`) walks the capstone list and **throws** — failing
+  elaboration and the build — if any *present* capstone carries a scope-gate
+  hypothesis whose row is neither `justified_scope`- nor `open_scope`-registered.
+  In-flight capstones named in the plan but not yet landed (e.g.
+  `serveSeq_total_primed`) are skipped until they exist, then linted automatically.
+- **The generated ledger** (`generate_scope_ledger`) writes `docs/scope-gates.md`
+  from the live signatures — the escape-hatch ledger of plan-2, mechanically
+  derived rather than hand-maintained, mirroring `Check.lean`'s file IO.
+
+`RFC/ScopeLedger.lean` is the driver imported into `VeriDNS.lean` after the
+capstones and `ProofLinks`. It seeds every *current* scope gate with an
+`open_scope` annotation pointing at its plan-2 ledger row (so the build is GREEN
+today), regenerates `docs/scope-gates.md`, and runs `scope_gate_lint` last.
+
+**How the lint gates the build.** The build stays green while every scope gate is
+annotated. The moment a *new* scope-narrowing hypothesis is added to any capstone
+(or a new capstone lands with one), the census finds an unannotated gate and
+`scope_gate_lint` throws — so no scope gate can open silently. Closing a plan-2 row
+(removing its restricting hypothesis) makes the census stop finding that gate; its
+`open_scope` seed becomes a harmless no-op documenting the now-closed door. This is
+the enforcement spine of the plan: the ledger is the backlog, and the build breaks
+on any undeclared door.
+
+## Adversary-model completeness (Proof/AdversaryComplete.lean)
+
+The plan-2 **Adversary-model row** is the deepest door: every soundness capstone is
+stated against `WorldModels` / `WorldModelsTcp` (the adversary model in
+`Proof/NetworkSim.lean`), and soundness-vs-a-model only rules out attacks the model's
+disjunction enumerates. `Proof/AdversaryComplete.lean` closes it by proving the model
+*complete* over the space of datagrams the resolver actually accepts as replies:
+
+- **`Accepts`** bundles the five acceptance-pipeline steps (oracle deliver →
+  `acceptExchanged` source match → `decode` → `sanitizeTtlsCap` → `acceptResponse`
+  id/0x20-question match) into one predicate — precisely the antecedent of the
+  `WorldModels` disjunction.
+- **`accepts_requires_source_and_query_match`** lifts the 017 shim pin
+  (`Proof.Server.shim_accept_requires_source_and_query_match`) to `Accepts`: any
+  accepted datagram came from the queried source and echoes the id + 0x20-cased
+  question. Contrapositive: a wrong-source / id-mismatch / junk datagram is *not*
+  accepted — it is dropped below the shim (the C `veri_dns_exchange` recv loop is the
+  named floor), so it never reaches the disjunction and needs no clause.
+- **`WorldModels_complete`** (UDP): every accepted datagram realises the honest
+  disjunct or `SpoofReply`. The accepted/unaccepted split is total, so no wire
+  datagram escapes both — the model excludes nothing an attacker can put on the wire
+  that the resolver would act on.
+- **`WorldModelsTcp_complete`** + **`AcceptsTcp_realises_SpoofReply`** (TCP): the TCP
+  pack is honest-only by tcp-plan decision 5 (no MITM on the fallback); the honest arm
+  still subsumes the UDP-shaped `SpoofReply` via `tcpSpoofReply_of_honest`, so the TCP
+  path is never less covered than UDP. The absence of a TCP spoof clause is a
+  deliberate modelling choice, not an uncovered gap.
+- **`serveDatagram_verdict_sound_any_wire`** is the payoff corollary: it re-exposes
+  `serveDatagram_verdict_sound` bundled with the completeness certificate, so the
+  capstone's soundness now reads as soundness against every accepted wire datagram.
+
+The residue is named honestly in the module header: `SpoofReply`'s decode-canonical
+conjuncts are free from the `decode` step (`decode_answer_parseRaw` and companions),
+and the one genuinely-narrowing conjunct — referral well-formedness (in-bailiwick,
+delegation-cut agreement, NS-name canonicity) — is what the response classifier rejects
+for malformed referrals, so such datagrams never drive a spoofed referral hop. With this
+in hand, the `adversary`-row seeds in `RFC/ScopeLedger.lean` for the
+`WorldModels`/`WorldModelsTcp` gates are `justified_scope` (a complete, non-vacuous
+model), not `open_scope` doors. (The `CooperativeNetworkAddr` adequacy gates remain
+open: adequacy needs the network to actually answer, which model completeness does not
+supply.)
 
 ## Diagram Types
 
@@ -602,6 +776,15 @@ Roundtrip theorems state that for each type T:
   longer assumptions at the system boundary:
   - `decodeNameAux_validLabels` / `run_decodeName_validLabels`: every label
     the name decoder produces has length 1–63 (positivity + the ≤63 guard);
+  - **RFC 1035 §2.3.4 ≤255-octet name cap**: `decodeName` post-checks
+    `encodedNameLen labels ≤ 255` (after decompression) and fails otherwise —
+    bounding compression-pointer amplification (a crafted name can expand
+    ~64× before the cap: re-encoded size ≤ `buf.size · 64`) so a decompression
+    bomb cannot bloat the cache or overflow the 16-bit rdlength field.
+    `run_decodeName_le255` (axiom-clean) is the payoff: every decoded name is
+    ≤255 octets, threaded through `CanonicalRR`/`ValidQuestions`/`WfRR` so the
+    re-encode round-trip (`decode_encode_of_decode`) stays total — its axiom
+    footprint is UNCHANGED by the cap (no new TCB);
   - `run_decodeMany_size` / `run_decodeMany_mem`: `decodeMany` returns
     exactly the requested count, and every returned element is an output of
     the item parser — so the header counts match the section sizes and
@@ -615,6 +798,61 @@ Roundtrip theorems state that for each type T:
     `bv_decide` byte-reassembly identities, and per-branch rdata frames;
   - `decode_encode_of_decode`: anything `decode` accepts survives the
     encode/decode roundtrip END-TO-END, with no side conditions.
+
+- **CanonicalRaw (Proof/CanonicalRaw.lean)** — W0: the ingress parser as the
+  single trust root. There are two record decoders: `decodeRRCanonical`
+  (ingress, validating) and `ResourceRecord.decode` (internal, lenient — it
+  reads rdlength bytes and re-validates nothing). This module replaces the
+  informal "the internal decoder only ever sees ingress outputs" with
+  theorems:
+  - `CanonicalRaw b` (:= `Proof.Message.CanonicalRR b`) pins the byte shape
+    the internal decoder is safe on: an `rrWire` image — expanded
+    pointer-free owner name of valid labels ≤255, rdlength = rdata.size,
+    type-canonical rdata (`CanonicalRdata`). Equivalently the
+    `decodeRRCanonical` image (`decodeRRCanonical_canonicalRaw`).
+  - `CanonicalRecord rr` is the record-level image; `encode` maps it into
+    `CanonicalRaw` (`canonicalRaw_encode`), and on `CanonicalRaw` the
+    internal decoder is TOTAL, consumes the whole blob, and is inverse to
+    `encode` (`decode_ok_of_canonicalRaw`, `parseRaw_of_canonicalRaw`,
+    `decode_inverse_of_canonicalRaw`) — closing finding 037's rdlength gap
+    for all internal reads on canonical blobs.
+  - Wrapper corollary `decoders_agree_of_canonicalRaw`: on canonical blobs
+    the ingress decoder is the identity and equals internal-decode-then-
+    re-encode; either decoder is a wrapper of the other on the actual
+    domain (decoder deletion is a recorded follow-up, not performed).
+  - `CacheRawsCanonical` (records + negative-entry SOAs are
+    `CanonicalRecord`) is the store-side invariant, established at ingest
+    (`cacheRawsCanonical_cacheRRs`/`_cacheUnlessTruncated` fed by the
+    `message_*_canonicalRaw` section theorems) and preserved by EVERY cache
+    writer (store/storeChecked/storeNegative/setNegativeSoa/sweep/
+    boundExpiryClasses/touchKeys/boundLruKeys/boundLru/absorb, incl. the
+    LRU/eviction paths). Cache reads return `CanonicalRecord`
+    (`lookup*_canonicalRecord`), so `rrBytes` re-encodes land back in
+    `CanonicalRaw`.
+  - Pipeline closure for every other blob (re-)producer between ingress and
+    an internal decode: `normRaws` (TTL-normalising re-encoder), the TTL cap
+    (`capTtlRR`/`capTtls`/`sanitizeTtlsCap`), the negative SOA extraction
+    (`extractSoaNegative_canonicalRecord`, `storeProbeNegative`), the
+    owner-splicing answer scrub (`CanonicalName`, `setOwnerB_canonicalRaw`,
+    `scrubAnswerB_canonicalRaw` — reachable names are canonical: qname seed
+    via the `QuestionFromLabels` bridge, closure steps are CNAME rdata of
+    canonical records), CNAME chains (`prependCnameLink_canonicalRaw`), and
+    the filter-shaped scrubs (`ownerRaws`/`cnameRaws`/`bailiwickRaws`/
+    `scrubAuthorityB`).  Finding 019: the resolver-core chase arm caches ONLY
+    the chased-CNAME slice `cnameRaws` (owner at the query name AND
+    type=CNAME — `extractCname`'s predicate), NOT `ownerRaws`; a junk
+    same-owner record of another type riding a CNAME response never enters
+    the cache through the chase arm, mirroring `prependCnameLink` on the
+    delivery side.  Model lockstep twin: `Response.cnameOwned` replaces
+    `answerOwned` in the `answerCname`/`trustedCname` rules; write
+    refinement re-threaded via `chasedCname_write_WriteRefines(_ref)`,
+    `section_cnameOwner_extra_perm`, `αSection_cnameRaws_eq` and
+    `cname_link_write_WriteRefines_echo`; pinned by
+    `junkRideAlongCnameNotCached` (Test/Loop.lean).
+  - Follow-ups: thread `CacheRawsCanonical` through the resolver-loop
+    invariant packs (like `WfRR`/`CacheNegWf` in `IoResumeSound`) so the
+    capstones carry it; then express `ResourceRecord.decode` as a corollary
+    wrapper and delete one decoder.
 
 ### Resolver RFC Conformance (Proof/Resolver.lean)
 
@@ -632,6 +870,23 @@ algorithm properties from RFC 1034 §5.3.3:
   false of real states and its "proof" had been weakened to a vacuous
   `∨ True`; the generator now abstracts unresolvable antecedents instead of
   dropping them — see Algorithm Property Generation.)
+- **Root-cut SBELT fallback, finding 015** (`stepFindServers_rootCut_sbelt_fallback`
+  + `stepFindServers_rootCut_sbelt_progress`): pins the *behavioural* fix for finding
+  015 — an address-less root NS RRset (empty glue, `mc == 0`) used to shadow SBELT,
+  leaving `stepFindServers` re-deriving the same unqueryable SLIST on every
+  `.findServers` visit (a permanent SERVFAIL loop / remote DoS). `impl_algorithm_sbelt_fallback`
+  above only covers the `walkNs = none` arm; these two theorems cover the untheorem'd
+  `walkNs = some (nsNames, 0)` + empty-glue arm the fix actually added. `_fallback`
+  proves that at the root cut the branch installs `s.resources.sbelt` as the new SLIST
+  *verbatim* (a regression dropping the `mc == 0` guard, or installing the address-less
+  `setUpAddresses` SLIST, would fail to compile). `_progress` is the forward-progress
+  corollary: whenever SBELT is non-empty (`searchFails sbelt = false`), the installed
+  SLIST does not search-fail, so `.sendQueries` transmits to a real belt server instead
+  of looping. Both are standalone (not corollaries of the driver-level
+  `resolveWithIO_spine_no_starvation`, whose `SlistShape`/cold-cache setup does not
+  exercise the root-cut-shadow pathology) and axiom-clean. They replace the pin
+  previously carried only by the `addresslessRootNsSbeltFallback` `#guard` in
+  `Test/Loop.lean` (kept as a belt-and-braces integration check).
 - **ID preservation** (`stepAnalyzeResponse_preserves_id`): when `stepAnalyzeResponse`
   returns an answer, its header ID equals the input response's header ID. Handles
   all response branches (4a answer, 4a name error, 4b delegation, 4c CNAME, 4d
@@ -816,15 +1071,89 @@ the result via `DnsSList.addAddress`, and retries. Nesting is bounded by a
 `depth` parameter (default 3); termination is by lexicographic `(depth, fuel)`.
 Failed lookups drop the NS name from the SLIST and try the next target.
 
+The sub-resolution dispatch is PER-ARM: the pure `.done`/`.error` outcomes
+continue on the (unchanged) main cache with only the SLIST updated, while the
+`.paused` outcome — a NETWORK sub-run — continues on the sub-run's mutated
+output cache and FIRST re-consults that cache for the MAIN query
+(`gluelessRecheck`, RFC 1034 §5.3.3 "see if the answer is in local
+information" applied at each iteration): the sub-run can legitimately have
+cached the main answer (e.g. sibling-NS glue) or a negative for it, and a
+real resolver serves from cache instead of sending a redundant query. The
+re-check is exactly `Resolver.localAnswer`'s first two checks (negative-cache
+lookup + typed answerable hit, delivered in the `stepCheckLocal` response
+shapes) applied to the sub-cache — NO CNAME peeling, since only typed hits
+and negatives block the model's network rules (a cached CNAME must not
+preempt the network path). Soundness/completeness of the delivery are
+`gluelessRecheck_sound` (Proof/NameTree.lean) and `gluelessRecheck_complete`
+(Proof/NameTreeComplete.lean, = the fuel-1 cut of `localAnswer_complete`);
+the FreeIO reduction for the arm is `run_ioResumeLoop_glueless_paused`.
+
+Three glueless design decisions close the `.paused` arm of the soundness
+driver (`ioResumeLoop_sound`, the last forward-simulation obligation):
+
+- **A FAILED network sub-run contributes nothing** (impl-harden): when the
+  inner `ioResumeLoop` returns `.error`, or returns `.ok` but the answer has
+  no usable A record (`extractAAddress = none`), the main loop continues on
+  the PRE-sub-run cache with the target dropped — the sub-run's partial
+  cache writes are discarded (BIND-style conservatism). The model rule
+  `Resolves.gluelessNs` threads a sub-run's output cache into the main
+  derivation only together with a learned address (`hnsaddr`/`hmem`), so a
+  no-address continuation-on-sub-cache would be model-unjustifiable; and an
+  errored run exports no driver invariants at all. The recheck/`subCache`
+  path therefore fires exactly when an address was learned.
+- **`extractAAddress` accepts only a model-visible, OWNER-ENTITLED A
+  record** (impl-harden, W1 fix): type A AND class IN AND 4-octet rdata AND
+  a wire-valid owner name AND an owner on the CNAME chain rooted at the NS
+  host being resolved (`nameMemB`/`reachableNamesB`, case-insensitive). Real
+  resolvers ignore class-mismatched records when harvesting nameserver
+  addresses (a CH/HS-class A is not Internet glue) and harvest target
+  addresses only at the target name — an off-owner A record planted in the
+  sub-resolution answer must not redirect the NS-probe target. The guard
+  makes a learned address provably survive `αSection` abstraction AND
+  provably entitled (`extractAAddress_model_a`,
+  `extractAAddress_entitled_model`), feeding `gluelessNs`'s owner-filtered
+  `addressOf nsHost` premise; the driver lifts the sub-verdict from the
+  cache-chase end back to the NS host via `localAnswer_chase_peel`'s
+  (cache-preserving) continuation before instantiating the rule.
+- **`gluelessNs`'s continuation resumes at the rule's own clock `now`, not
+  the sub-run's end time `nsEnd`** (model fix): the resolver snapshots its
+  clock once per resolution (RFC 1034 §5.3.3 works one SNAME/STYPE request
+  against a single TTL horizon; the impl's `state.now` is fixed for the
+  whole run), so every cache read after the glueless sub-run is at the
+  snapshot time — pinning `hrec` to `nsEnd` demanded freshness at a time no
+  impl read ever uses, making the rule undrivable by any time-snapshotting
+  resolver.
+
+The driver additionally carries a parameter-level `GluelessProv sbelt`
+hypothesis (root-hint belt provenance: the sub-resolution's
+`stepFindServers` can install `sbelt` itself as the live SLIST; vacuous
+when every root hint carries a glue address).
+
 ### needsIO Yield Pattern
 
 The resolver (Impl/Resolver.lean) is a pure state machine. When step 3 (sendQueries)
 has no cached response, it yields `.needsIO` instead of erroring:
 
 - `StepResult.needsIO`: new constructor for IO-requiring states
-- `ResolveYield.done`/`.paused`: resolve loop returns either a complete response or
-  a paused state waiting for IO
+- `StepResult.answer` carries BOTH the delivered response AND the state current at
+  delivery (post any `cnameChain` update — the same state passed to `finalizeAnswer`),
+  so the terminal outcome can retain the final cache
+- `ResolveYield.done (resp) (state)`/`.paused (state)`: resolve loop returns either a
+  complete response TOGETHER WITH the finished state (mirroring `.paused`) or a paused
+  state waiting for IO. Carrying the finished state closes the terminal-cache wart:
+  previously the delivered answer's absorbed records were dropped with the final state,
+  so the returned (warm) cache never saw them — an RFC 1034 caching gap, and the
+  verification's terminal cache tie was unprovable
 - `resume`: continues a paused resolver with an externally-supplied response
+
+Correspondingly, `Server.IoStep.finished (result) (cache)` carries the cache the
+terminal delivery returns: a successful `.done` yields the FINISHED state's
+`boundStateCache` cache (post-absorb, expiry-bounded), while error deliveries keep
+returning the pre-resume `state.resources.cache` (no semantic change there).
+`ioResumeLoop`'s `.finished result cache => pure (result, cache)` then persists the
+delivered answer's records to the returned cache. The glueless pure-`.done` arm and
+`resolveWithIO`'s initial pure-`.done` arm deliberately IGNORE the carried state
+(cache-only resolution never absorbs — its final cache equals the input cache).
 
 The IO shim (Impl/Server.lean) drives the resolver via `resolveWithIO`:
 1. Run pure `resolve` with SBELT → if `.done`, return response
@@ -843,10 +1172,17 @@ and tries the next best.
 
 ### Glue Record Propagation
 
-Delegation (4b) extracts glue A records from the additional section via
-`extractGlueRecords` and populates the SLIST with addresses via
-`SlistFromNameSpec.setUpAddresses`. `stepFindServers` also looks up cached A records
-for NS names to populate addresses when building the SLIST from cached NS records.
+Delegation (4b) extracts the delegation's NS hosts from the authority
+section — but only from records owned AT the referral cut
+(`extractNsNames (ownerRaws (referralCutRaw resp.authority) resp.authority)`,
+case-insensitive; W1 fix, mirroring the model's `cutServers` and unbound's
+scrubber, which deletes off-cut NS records) — extracts glue A records from
+the additional section via `extractGlueRecords`, and populates the SLIST
+with addresses via `SlistFromNameSpec.setUpAddresses`. `stepFindServers` also looks up cached A records
+for NS names to populate addresses when building the SLIST from cached NS records;
+if that re-derived glue is empty AND the walk's cut is the root (match count 0)
+it commits to the SBELT instead of an address-less SLIST (external review #015 —
+see "Root-hint priming" for why this is root-cut-only).
 Both `lastResponse` clearing (4b/4c) and `currentStep` updating (in `resolve.loop`)
 are critical for correct state machine transitions.
 
@@ -858,6 +1194,208 @@ client: QR=1, RA=1 (this server recurses), AA=0 (not an authority), Z=0
 upstream AD bit this resolver did not validate, RFC 4035 §3.2.3 —
 `finalizeForClient_z`). QR/RA/AA are forced by the instantiated
 complement-semantics props (`server_ra_semantics`, `server_aa_semantics`).
+
+### EDNS0 (RFC 6891)
+
+`Impl/Edns.lean` implements EDNS0 (DNS flag-day-2020 posture, `docs/tcp-plan.md`
+stage E) so that answers larger than the RFC 1035 §4.2.1 512-byte UDP baseline
+resolve over UDP; answers still larger than 1232 fall back to upstream TCP (stage U,
+below).
+
+- **Advertise upstream.** `buildSubQuery` (Impl/Resolver.lean) appends one OPT
+  pseudo-RR (`Edns.optRRBytes Edns.advertisedUdpSize`, root owner, TYPE 41,
+  CLASS = 1232 payload size, TTL 0) to every outbound query's additional section
+  (arcount 1). The formal model needs no new rules: `Resolves`/`WorldModels` have
+  been buffer-parametric via the `ednsBuf` parameter since the EDNS0 model work,
+  and the OPT sits below `αQuery` (which abstracts only the question + RD bit).
+  The OPT carries the type-41 code through the codec as an opaque RR (RFC 3597).
+- **Strip on receive.** `sanitizeTtlsCap` (Impl/Server.lean) runs `Edns.stripOpt`
+  before response analysis, filtering OPT out of the reply's additional section and
+  recomputing arcount (unbound-parity scrub). This keeps the cache, the glue path,
+  and the model reflection (`αSection`) OPT-free, so `WorldModels`' additional-section
+  exactness clause stays realizable against OPT-free honest-server model responses.
+- **Honor downstream.** `serveDatagram` truncates the client reply at
+  `Edns.clientCap query` — the client's advertised size clamped to `[512, 1232]`,
+  512 for a plain non-EDNS client — instead of a hardcoded 512. `truncateUdp` gained
+  a `cap : Nat := 512` parameter (the default preserves every pre-EDNS0 RFC-conformance
+  theorem verbatim); `ServeJustification`'s wire round-trip conjunct generalizes its
+  guard and cap to `Edns.clientCap query`, and `serveDatagram_total` stays axiom-clean.
+- **FFI receive buffer.** `ffi/recvfrom.c` `veri_dns_exchange` reads upstream
+  responses into a `VERI_DNS_UPSTREAM_BUFSIZE` (= 1232) iovec — it MUST match the
+  advertised size, or an EDNS-sized referral/answer would be silently `MSG_TRUNC`-clipped
+  and fail to decode.
+- **Read-until-match transport floor (review #017).** `veri_dns_exchange` sends the
+  sub-query ONCE (single-shot, anti-amplification — pinned by `exchange-junk-test` case 3)
+  and then reads datagrams in a loop bounded by the 2 s round deadline. A datagram is the
+  reply only if it matches on ALL of: source IP:port (already), and — the #017 fix —
+  content: QR bit set, transaction id echoed, QDCOUNT echoed, and the question section
+  echoed verbatim (`veri_dns_reply_matches` / `veri_dns_question_span`, mirroring
+  `Server.acceptResponse`'s id + `questionMatches` check). Any datagram failing the content
+  match is DISCARDED and the socket read again (no re-send) — so a junk datagram from the
+  LEGITIMATE source:port no longer consumes the round and drops the real reply arriving
+  behind it. The prior "fix" filtered on source only, so same-source junk still landed and
+  the resolver treated the round as failed. This is the trusted floor below the shim; at the
+  Lean edge `Proof/Server.shim_accept_requires_source_and_query_match` (axiom-clean
+  `[propext, Quot.sound]`, `rfc_proves [5452][348:388]` — RFC 5452 §4.2–4.4 match the
+  question, the ID, and the source address) pins that a datagram the shim accepts as the
+  reply necessarily matches source + id + question. Rig: `test/inject_difftest.sh` (mock
+  run with `--inject-junk`: two same-source junk datagrams before every real UDP reply)
+  asserts veri-dns still delivers the real answer, and `exchange-junk-test` cases 4/5 pin the
+  same at the C+shim layer with well-formed DNS messages.
+
+**Two-sided sizing spec (findings 049/050/063).** `clientCap` now carries an exact
+characterization, not just the old one-sided `clientCap_le`: `clientCap_ge` (512 floor),
+`clientCap_noOpt` (legacy client = exactly 512), `clientCap_opt` (EDNS client = exactly
+`max 512 (min adv 1232)`), and `clientCap_eq_512_iff`. `Proof/Edns.lean` adds the
+cap-generic truncation ladder theorems that apply at the real `Edns.clientCap` call sites
+(the older `Proof/Server.lean` set hard-codes 512): `truncateUdp_size_cap` (delivered wire
+≤ cap for any cap ≥ 512, via the `encode_size_of_emptyRR` header+question skeleton bound
+— a served query has one question with qname ≤ 255, so the stage-3 skeleton is ≤ 271
+bytes), `truncateUdp_tc_iff` (TC set **iff** both the full and the additional-dropped
+encodings exceed the cap — truncation only when needed), and cap-generic `_truncated_cap`
+/ `_additional_only_cap` / `_flag_oversized_cap`. `serveDatagram_verdict_sound` /
+`serveDatagram_total` / `ServeJustification` gained the two-sided conjuncts: the actually
+sent message (`Edns.withReplyOpt query (deliveredResponse …)`) truncates to ≤
+`clientCap query` with the exact TC iff.
+
+**Delivery pin (finding 054).** With `sendTo`/`tcpSend` visible as `DnsCmd` steps
+(`World.sent`/`World.tcpSent` delivery logs), the serve capstones pin the delivery log
+*exactly*: `serveDatagram_verdict_sound`/`serveDatagram_total` conclude `w'.sent = w.sent
+++ [((truncateUdp (encode (withReplyOpt query R)) (withReplyOpt query R) (clientCap
+query)).1, clientAddr)]`, and `serveTcpDatagram_verdict_sound`/`serveTcpDatagram_total`
+conclude `w'.tcpSent = w.tcpSent ++ [frameTcp (encode (withReplyOpt query R))]`, where
+`R = deliveredResponse query resp` in the ok arm and `finalizeForClient (buildErrorResponse
+query serverFailure)` in the error arm — one entry, byte-exact, to the requesting client.
+The resolver and reply-assembly phases are proven send-free (`AllSent` covers,
+`SentMinimised.resolveWithIO_sends_frame`/`replyForResolution_sends_frame`), which is what
+lets the capstone attribute the single appended entry to the final client send.
+`ServeJustification` stays world-output-free; the sequence driver drops the conjunct when
+repacking.
+
+**EDNS ingress gate (findings 056/065).** `Edns.ednsProblem` runs right after
+`queryProblem` in `serveDatagram`/`serveTcpDatagram`: ≥2 OPT RRs → FORMERR (RFC 6891
+§6.1.1, `countOpt`), OPT version > 0 → BADVERS (§6.1.3, `findOptVersion` reads the TTL
+version byte; the reply is header rcode NOERROR + one OPT with extended-rcode high byte 1
+= extended rcode 16, version 0 — `Server.ednsProblemResponse`, pins
+`ednsProblemResponse_multiOpt`/`_badVersion`/`optRRBadVers_ext_rcode` and the
+program-rewrite lemma `serveDatagram_ednsProblem` in `Proof/Edns.lean`). The serve
+capstones carry the corresponding `ednsProblem query = none` gate hypothesis (not a
+scope-ledger door: it is a served-shape fact like `queryProblem = none`).
+
+**OPT echo (finding 016).** `Edns.withReplyOpt` appends one OPT advertising 1232 to every
+reply to an EDNS query (and none to a legacy reply), applied BEFORE `truncateUdp` so the
+cap accounting counts its 11 bytes, on both the resolution and the RFC 8482 ANY arms, UDP
+and TCP. Conformance vectors in `Test/Loop.lean` (`ednsReplyCarriesOpt`,
+`legacyReplyNoOpt`, `multiOptFormerr`, `badVersionBadvers`, plus the sizing quartet
+`legacyBigAnswerTruncatedAt512` / `edns600SmallBufferHonored` /
+`edns600MidSizeAnswerDelivered` / `edns4096LargeAnswerUntruncated`).
+
+**Inbound receive size (finding 066).** All three client-receive sites (`serveOne`,
+`serveOneLimited`, `Main.udpServeLoop`) read `Server.serveRecvSize` =
+`Edns.advertisedUdpSize` (1232), not 512, so a legitimate >512-byte EDNS query is not
+clipped. The inbound `veri_dns_recvfrom` extern now uses `recvmsg` and maps an
+`MSG_TRUNC`-flagged (>1232) datagram to an empty payload, which the serve path drops as
+undecodable rather than parsing a clipped prefix (finding 031); the upstream
+`veri_dns_exchange` read-until-match loop likewise discards `MSG_TRUNC`-flagged replies as
+junk (same discipline as the #017 content match).
+
+Deviations (documented): EDNS options and the DO bit ignored (no DNSSEC); no per-server
+fallback to plain DNS on FORMERR from a pre-EDNS0 upstream (finding 055, open — assessed:
+a loop-branch fallback mirrors the stage-U TC→TCP pattern and costs an `ioResumeLoop_sound`
+branch; a per-state `noEdns` flag breaks the max-iterations fuel rank via `lastResponse`
+clearing); a TC=1 truncated reply's OPT is dropped with the rest of the additional section
+(stage-2 of the ladder). Answers still larger than 1232 (e.g. `cloudflare.com`/`apple.com
+TXT`) truncate over UDP and are delivered over TCP — the resolver speaks TCP on both
+sides: upstream fallback (stage U) and client serving (stage S), both below.
+
+### TCP Upstream Fallback (RFC 7766 / RFC 1035 §4.2.2, stage U)
+
+When an accepted upstream reply carries TC=1, `ioResumeLoop` (Impl/Server.lean) re-sends
+the SAME encoded sub-query over a one-shot TCP connection to the same server via
+`tcpForward` → `UdpSocket.tcpExchange` → the `veri_dns_tcp_exchange` extern
+(`ffi/recvfrom.c`: connect + RFC 7766 §8 two-octet-length-framed send/recv + close, one
+call). A reply that is accepted and itself un-truncated is analyzed with its TC bit pinned
+false, so the model rules' `htc` premise holds structurally; a `none`/still-truncated reply
+drops the server and retries as if the datagram were lost (decision 4 → eventually the
+`gaveUp` SERVFAIL) — the truncated UDP payload is never consumed (review #008). The model
+side is spoof-free (decision 5): the TCP connection is the return path, so `tcpForward` does
+NO RFC 5452 source check and `WorldModelsTcp` has only an honest-or-lost clause. Flagship
+`ioResumeLoop_sound` stays axiom-clean. `Impl/TcpFraming.lean` proves the frame round-trip;
+`Proof/NetworkSim.lean` carries `WorldModelsTcp` (a TCB-adjacent assumption, like
+`WorldModels`). Client-side TCP SERVING (delivering a >1232 answer to a UDP client that
+retries over TCP) is stage S, below.
+
+**Differential test (stage U6), test-only env overrides.** `test/tcp_difftest.sh` +
+`test/mock_auth.py` (dnspython) point both veri-dns and a reference unbound at one hermetic
+loopback mock that truncates over UDP and answers over TCP. veri-dns is redirected by three
+overrides that are **off by default** (production resolution is byte-identical): `VERI_DNS_ROOT_HINT`
+(root-hint IP, `Main.lean`), `VERI_DNS_UPSTREAM_PORT` (upstream dest port, `ffi/recvfrom.c` —
+the redirect lives in the C IO-shell so Lean/proofs are untouched; the nominal port 53 is still
+presented to the RFC 5452 gate), and `VERI_DNS_ALLOW_LOOPBACK_EGRESS` (lifts the `blockedEgress`
+SSRF loopback guard, the analogue of unbound's `do-not-query-localhost: no`). The last is an
+`@[init]`-backed `Bool` (`egressBypassEnabled`) whose LOGICAL value stays `false`, so
+`blockedEgress` is definitionally unchanged and every proof/flagship is unaffected; only the
+compiled startup value is read from the env. Turning it on merely selects the already-proven
+`blockedEgress = false` (query-normally) branch — it disables a security guard, not any
+soundness property. The exe imports only the runtime `Impl` modules (not the `VeriDNS` umbrella),
+keeping `VeriDNS.Test.*` module initializers out of the shipped binary.
+
+### TCP Serving (RFC 7766 §5 / RFC 1035 §4.2.2, stage S)
+
+The resolver accepts client queries over TCP as well as UDP. `serveTcpDatagram`
+(Impl/Server.lean) is the transport-agnostic core of `serveDatagram` *verbatim* — the RFC 5358
+ACL gate, decode, the `queryProblem` FORMERR gate, `resolveWithIO`, `replyForResolution`, and the
+identical `serveTouches`/`boundLru` read-set accounting — with only the reply tail swapped: the
+RFC 7766 §8 two-octet length framing (`TcpFraming.frameTcp`, **no truncation** — TCP carries a
+whole ≤65535-octet message) written to the accepted connection with `tcpSend`, replacing the UDP
+`truncateUdp` + `sendTo`. Because the reply `Format` is byte-for-byte the one `serveDatagram`
+computes, the whole client-boundary verdict/authenticity chain transfers unchanged; the serving
+capstone `serveTcpDatagram_total` (Proof/ServeTcp.lean, axiom-clean) is `serveDatagram_total` with
+the ≤512 truncation conjunct replaced by the frame-fit round-trip `TcpFraming.unframeTcp_frameTcp`
+under the real 16-bit ≤65535 length bound. `tcpSend` is effect-free at the `Prog` boundary
+(`.pure ()`, exactly like `sendTo`), so the proof needs no new model rule.
+
+Serving is **concurrent accept, persistent connections** (findings 057/067/058, 2026-07-16;
+supersedes the original sequential accept–serve–close of decision 7): the `tcpServeLoop` driver
+(`Main.lean`) accepts a connection and hands it to a per-connection dedicated task
+(`tcpConnLoop`), so a stalled client — accepted but silent — no longer blocks the accept loop
+for its whole 3 s read timeout (057/067). Concurrent connections are capped at
+`tcpMaxConns = 32` (unbound's `incoming-num-tcp` analogue; over-cap connections are closed
+immediately, shedding load while the accept loop keeps running). Each connection is served
+PERSISTENTLY per RFC 7766 §6.2.1 (058): after answering, `tcpConnLoop` reads the next
+length-prefixed query on the same connection until EOF or the 3 s socket idle timeout (both
+surface as `tcpRecvMsg = none`). Every message is still served by the verified
+`serveTcpDatagram`; the shared resolver cache and the TCP rate bucket are accessed through
+`Std.Mutex`es (cache snapshot before the serve, `absorb` after — the same discipline as the UDP
+loop). Five pure-I/O serving externs join the FFI TCB
+(`tcp_listen`/`tcp_accept`/`tcp_recv_msg`/`tcp_send`/`tcp_close`, gap-4 audit trail). Remaining
+documented deviations from unbound: no out-of-order answering / RFC 7828 keepalive.
+**Differential test (stage S):** `test/tcp_serve_difftest.sh` queries both veri-dns and unbound
+with `dig +tcp` against the same hermetic mock; the oversized `big.veridns TXT` (~2 KB) that
+stage U can only truncate to a UDP client is delivered IN FULL and byte-for-byte matches
+unbound over TCP. Sub-tests 5–7 pin the availability fixes: a query answered promptly while two
+stalled connections are held open (057/067), two pipelined queries answered on one connection
+(058), and a 300-record ~24 KB TXT RRset (`huge.veridns`) assembled fast and served over TCP
+(060c — see "Reply-Assembly Complexity" below).
+
+### Reply-Assembly Complexity (finding 060c, 2026-07-16)
+
+The delivery scrub `scrubAnswerB` (Impl/AnswerScrub.lean) recomputed the CNAME-closure
+`reachableNamesB qname answer` INSIDE its per-record closure, and `reachableNamesB`'s reference
+iteration `reachIterB` re-parses every answer record on each of its `answer.size` rounds —
+about quartic in the record count, seconds of CPU on a 300-record (~24 KB) RRset, a
+client-triggerable CPU spin. Two changes, neither observable in the output bytes:
+(1) the closure computation is hoisted out of the per-record lambda via a `let`
+(zeta-definitionally the same term, no proof surface); (2) `reachableNamesB`'s body now runs a
+parse-once, fixpoint-early-exit evaluation — `cnameLinksB` extracts the (owner, target) CNAME
+links in one pass, `reachIterL` iterates over the links only and stops at the first round that
+adds nothing — proven ARRAY-EQUAL to the reference `reachIterB` form by
+`reachableNamesB_eq_iter` (via `reachStepB_eq_links` + `reachIterB_fixed`), so the `find?`
+owner-spelling choice and every downstream proof statement are unchanged; `reachIterB` stays as
+the proof-facing reference (the model-lockstep proofs in Proof/AnswerScrubAlpha.lean rewrite
+through the bridge and then proceed on `reachIterB` exactly as before). A uniform RRset now
+assembles in O(n) reach-work; a maliciously long CNAME chain still exhibits the spec-mirrored
+duplicate growth of `reachStep` (bounded by `answer.size` rounds), minus the parse factor.
 
 ### Persistent TTL Cache
 
@@ -926,6 +1464,28 @@ helpers):
   `usingthecache_discard_unrequested` (§7.4 "other than that requested ...
   without caching it").
 
+**RRset-member dedup identity is case-insensitive in rdata names (finding
+053; RFC 4343 §3 / RFC 3597 §7).** `DnsCache.store`'s replace-don't-combine
+filter and `DnsCache.absorb`'s merge filter compare rdata via `rdataEqCI`
+(Impl/Cache.lean): equality after `rdataCaseFold`, which case-folds exactly
+the embedded domain-name fields of the well-known name-bearing types the
+impl handles (NS/CNAME/PTR = the whole rdata is one name; MX = after the
+2-byte preference; SOA = mname+rname, i.e. all but the trailing 20 fixed
+bytes) and leaves every other type — in particular RFC 3597 unknown types —
+as opaque bytes that are never rewritten. Rationale: 0x20 per-retry case
+randomization makes upstream rdata names arrive case-varied (compression
+pointers into the mangled qname), and a byte-exact dedup let a client grow
+an RRset without bound (client-triggerable resource exhaustion). Stored
+bytes are NOT rewritten — only the member *identity* is case-folded, so
+lookups/delivery are unchanged. The proof layer moves in lockstep: the
+`sameData` rdata clause is `rdataEqCI` (Proof/NameTree.lean), the `Removes`
+store characterization and the `LookupComplete`/`Sat` completeness machinery
+carry it (Proof/NameTreeComplete.lean, with `rdataEqCI_symm/_trans/_cname`),
+and `RRsetComplete`'s survivor lemmas conclude rdata-equality *modulo case*.
+Pin: `store_ci_variant_dedups` (Proof/Cache.lean — inserting the same RR
+twice under different rdata-name casing leaves exactly ONE member for that
+key) plus the `ciDedup*` `#guard` vectors (Test/Loop.lean).
+
 The cache persists across queries: `serveOne` threads
 it (final answers stored with TTL at the wall clock from `UdpSocket.now`),
 and `State.now` carries the resolution start time for expiry checks.
@@ -962,6 +1522,23 @@ REMAINING TTLs (expiry − now; `lookup_fresh` restated). `DnsCache.store`
 replaces same-key entries at RRset granularity (same-batch members share
 an expiry, RFC 2181 §5.2, and survive; stale sets are evicted whole —
 `store_replaces` restated), so multi-record sets are served intact.
+
+**RRset TTL normalization (RFC 2181 §5.2, bug #4 fix, 2026-07-06).** A response
+can carry an RRset whose members have *differing* TTLs; storing them one-at-a-time
+through `store` evicted differing-expiry same-key members, collapsing the set. The
+lossy `store` (load-bearing for `OneExpiryPerKey`, consumed by the max-cred gate)
+is untouched. Instead the section is normalized to its per-key MIN TTL *before* the
+write, in **both** the model and impl, in lockstep: model `Cache.absorb` folds
+`Net.normalizeTTL (section.filter keep)`; impl `RRParse.normalizeSection`
+(= `Cache.normRaws`: parse → per-key min ttl → re-serialize) runs inside
+`cacheUnlessTruncated`, so the runtime call sites are unchanged. The refinement
+stays tight via the keystone `αSection (normRaws R) = normalizeTTL (αSection R)`
+(`Proof/Refinement.αSection_normRaws`, under an α-mappable+canonical hypothesis),
+threaded through `section_extra_perm`/`refer_extra_perm`, the whole
+`*_write_WriteRefines` family, and the `_cacheUnlessTruncated` invariant lemmas
+(statements unchanged, invariants transferred across `normRaws` by
+`normRaws_forall_transfer`). Min (not the incoming TTL) is `Subperm`-safe and never
+revives an expired member. `ioResumeLoop_sound` stays axiom-clean.
 
 ### Bogus-Delegation Gate (RFC 1034 §5.3.3)
 
@@ -1057,8 +1634,23 @@ section-title and prose-header recognition was extended for RFC 2308's
 Implementation: `DnsCache.storeNegative`/`lookupNegative` (keyed
 `NegativeEntry` array with absolute expiry), `computeNegativeTtl` +
 `extractSoaNegative` (SOA scan of the authority section, returning both the
-negative TTL and the SOA RR itself), and `negativelyCacheable` (untruncated
-NXDOMAIN or NODATA). `serveOne` stores negatives after answering — TTL
+negative TTL and the SOA RR itself — **owner-checked**: only a SOA owned at
+or above the response's echoed question name qualifies (RFC 2308 §3 / review
+#012/#013), mirroring the model `soaNegTtl qname`'s `isAncestor r.owner
+qname` conjunct; an off-owner SOA — the negative-cache poisoning vector — is
+skipped, a response with no on-owner SOA is an un-cacheable bare denial, and
+the fact is pinned by `extractSoaNegative_owner` plus the store invariant
+`CacheNegSoaOwner`/`replyPath_cacheOut_negSoaOwner`), and
+`negativelyCacheable` (untruncated
+NXDOMAIN or NODATA, both with an **empty answer section** — finding 039, RFC
+6604 §3: an NXDOMAIN terminating a CNAME chase reaches the store with the
+chain prepended to the answer and denies only the CHAIN-FINAL target, so it
+must not plant a name-wide negative at the echoed qname, which exists (it
+owns a CNAME); the tightening is in lockstep with the model
+`Cache.absorbNeg` — `negativelyCacheable_iff_absorbNeg_trigger` — and pinned
+by `negativelyCacheable_chained_nxdomain` /
+`storeNegativeIfCacheable_chained_nxdomain` plus the model dual
+`absorbNeg_chained_nxdomain`). `serveOne` stores negatives after answering — TTL
 capped by `capNegativeTtl` (10800 s) and the SOA RR stored alongside,
 carrying the capped TTL; `stepCheckLocal` answers a fresh negative hit
 immediately via `negativeResponse`, whose authority section now carries the
@@ -1139,29 +1731,58 @@ the det-adj-verb sequence retags as a noun ("a negative ANSWER"), and
 `stripPlural` only strips "-es" after sibilant stems ("names" → "name",
 "addresses" → "address").
 
-### Cache Bounds (expiry-class eviction at IO-round boundaries)
+### Cache Bounds (read-LRU eviction at IO-round boundaries — item 5)
 
-Both cache sections are bounded by `DnsCache.capacity` (4096), but the two
-sections evict differently — a change forced by the COMPLETENESS proof
-(see "Completeness" below):
+Both cache sections are bounded by `DnsCache.capacity` (4096) under a full
+**read-LRU** policy (unbound's `lruhash` parity — no RFC mandates an
+eviction policy): every entry carries a `lastUsed : UInt32` recency stamp
+(`now` at store time), every LOOKUP counts as a use, and the eviction
+victim is the least-recently-used unit (ties to the oldest write; the
+model stays unbounded and `αCache` is blind to recency).
 
-- **Negative section**: `storeNegative` runs `boundFifo` per store
-  (oldest-inserted entries dropped to make room; each negative entry is
-  its own unit, so per-entry eviction is safe).
-  `storeNegative_bounded` (Proof/Cache.lean) proves the bound.
-- **Positive section**: `store` no longer evicts AT ALL — a per-record
-  eviction in the middle of caching an RRset batch could strand the
-  members already stored, splitting the set and breaking RRset wholeness
-  (`LookupComplete`). Instead `DnsCache.boundExpiryClasses` evicts WHOLE
-  expiry classes (oldest-inserted entry's class first) until the section
-  fits, and is called at IO-round boundaries only: `ioResumeLoop` bounds
-  the cache after every resume round, `serveOne` after its final store.
-  Batch members share one expiry (one store time + RFC 2181 §5.2 uniform
-  TTLs), so class-granular eviction never splits a set —
-  `evictClasses_filter_form` states every eviction pass is a filter on
-  the entry's expiry alone. `boundExpiryClasses_bounded` (Proof/Cache.lean)
-  proves the bound; within a round the section may transiently exceed it
-  by at most one response's record count.
+- **Batched touches**: recency is NOT bumped in-band on every pure-machine
+  read (that would churn every state literal in the run-inversion proofs
+  for zero observable difference). Since eviction only ever happens at
+  the IO-round boundaries, applying a round's accumulated read-set
+  touches (`DnsCache.touchKeys`) immediately before each eviction
+  decision is bit-identical to per-read touching. The read set is
+  mirrored deterministically: `roundTouches` (Impl/Server.lean) re-uses
+  the REAL step functions (`stepAnalyzeResponse`/`stepCheckLocal`/
+  `walkNs`) for every traversal decision and only mirrors the demand-key
+  extraction (`localAnswerTouches`/`walkNsTouches`/`findServersTouches`);
+  `serveTouches` mirrors the first resolve pass for the server-side
+  bound. Per-site `touches_cover_*` pins (Proof/Server.lean) break at
+  compile time if a read is re-keyed.
+- **Positive section**: `store` never evicts (a mid-batch eviction could
+  split an RRset, breaking `LookupComplete`). `DnsCache.boundLru`
+  (touch-then-`boundLruKeys`) evicts WHOLE `(owner-CI, type, class)`
+  key-groups — strictly finer than the old expiry-class drop (only the
+  stale RRset dies, never a cross-key cohort) and still never splits a
+  set (`lruRRsetAtomic` mock). `evictLruKeys_filter_form` states every
+  eviction pass is a filter on the entry's RRset key alone;
+  `boundLruKeys_bounded`/`boundLru_bounded` (Proof/Cache.lean) prove the
+  bound. Applied at `afterResume`'s two arms (with `roundTouches`) and at
+  `serveDatagram`'s final store (with `serveTouches`). Under abstraction
+  the eviction is a model `pos`-filter whose verdict is constant on
+  whole `sameKey` classes BY CONSTRUCTION (`αCache_boundLru_eq`,
+  Proof/Refinement.lean — unlike the old expiry filter, no
+  `OneExpiryPerKey` needed; only `WfRR` canonicity for the reverse key
+  bridge), feeding the same `CacheRefines` c2f slot
+  (`cacheRefines_boundLru_absorb`). Below capacity the bound is an
+  `αCache`-equality (`αCache_boundLru_noop`), not a byte identity —
+  touches still bump `lastUsed`.
+- **Negative section**: `storeNegative` runs `boundLruNegatives` per
+  store (drop the min-`lastUsed` entry's key while at capacity; entries
+  are their own unit). `storeNegative_bounded` (Proof/Cache.lean) proves
+  the bound; `NegWriteRefines`' implication-shaped clauses pre-pay any
+  shrink, so the policy change is proof-invisible on the model side.
+
+Read-LRU pins (Test/Loop.lean): `lruReadIsAUse` (a READ makes the other
+key the victim — write-recency mutants red), `lruHotSurvivesEviction`
+(end-to-end serve-path touch wiring), `lruRRsetAtomic` (whole-key
+atomicity — per-entry mutants red), `lruNegativeRecency`/
+`lruNegativeEvictsCold` (negative twins). Within a round the section may
+transiently exceed the bound by at most one response's record count.
 
 ### Total Query Deadline
 
@@ -1171,6 +1792,142 @@ iteration (RFC 1035 §7.2's per-request bound on total work). This caps
 wall-clock time independently of the 2 s per-exchange timeout and the
 fuel/depth bounds — e.g. a long SLIST of unresponsive servers times out at
 the deadline rather than at (servers × 2 s).
+
+### QNAME Minimisation (RFC 9156, item 6 — Q3a+Q3b landed; RELAXED mode since 2026-07-17)
+
+The iterative loop reveals to each upstream server only as much of the
+client's QNAME as it needs (RFC 9156). Since 2026-07-17 (findings
+051/052/064) it runs in **non-strict** mode — RFC 9156 §3 step 6d's
+fallback branch, unbound's `qname-minimisation-strict: no` default — rather
+than strict RFC 8020 subtree denial. Design points:
+
+- **Reveal floor as a loop parameter.** `ioResumeLoop` carries
+  `revealed : Nat` (labels of `sname` currently revealed) exactly like
+  `deadline`/`depth`/`fuel` — universally quantified in every reduction
+  lemma and both capstone inductions, so no `Resources` surgery and no
+  state-literal churn. Seeded at `Server.seedRevealed` (SLIST
+  `matchCount + 1`) by `resolveWithIO` and by each glueless sub-run (its
+  own ladder); bumped by `Resolver.bumpRevealed` (+1 per consumed probe
+  outcome, reveal-all once `maxMinimiseSteps = 10` is reached — the §2.3
+  MUST-level query bound); pulled to `max revealed (matchCount + 1)` on
+  referral continues and re-seeded on CNAME restarts
+  (`Server.revealedAfterContinue`).
+- **Per-round question.** `Resolver.subQuestion` (named semi-reducible
+  def): on a probe round (`probeRoundB` = `0 < revealed < labelCount
+  sname`) the qname is `DomainName.minimisedName sname revealed` (a
+  wire-suffix re-encoding, canonicity inherited) at obscured QTYPE=A
+  (§2.1, unbound's choice); on a full round it is byte-identically
+  today's question. The `0 < revealed` conjunct makes the model's
+  non-root-ancestor requirement a computational consequence of the
+  boolean rather than a threaded invariant.
+- **Probe guard.** Between the unfollowable-delegation check and
+  `afterResume`: a probe reply that is neither referral-shaped
+  (`referralShapedB`, the analyzer's referral branch as one boolean) nor
+  retry-shaped (`retryShapedB` — SERVFAIL/unclassifiable *with no CNAME
+  to chase*; the CNAME conjunct matters because the analyzer checks the
+  chase branch before the bizarre branch) is consumed opaquely:
+  reveal+1, continue. Probe answers are never delivered, cached, or
+  chased (documented deviation from §3 (6c)'s "cache this answer" — the
+  strictly-safer anti-poison posture). A probe-round TIMEOUT (or an
+  unusable reply: accept/decode/sanitize failure) falls back to the FULL
+  qname (`Server.fallbackRevealed`, finding 052 / RFC 9156 §2.3) instead
+  of re-sending the probe until the budget expires; a full-round timeout
+  retransmits the same (full) name. Every (re)transmission draws fresh
+  rid/cid (item 4; no RFC 5452 entropy regression).
+- **Model image.** Datagram-sending `Resolves` rules carry `pq : Query`
+  with `ProbeQuery pq q` (full-round left disjunct / `StrictProbe` right
+  disjunct). Probe-round referrals are justified via `trustedReferral`
+  at `pq` (its `hcut` is judged against the sent name — Q2's retarget);
+  `refer`'s `hdesc` is pinned at `q.qname` and is not derivable from a
+  probe-round `ServerAnswers`, so honest probe referrals ride the
+  trusted shape (their cache writes fall under the
+  `TrustedReferralCache` escape in the grounding theorems). Ignored
+  probe outcomes map to `badResponse`'s `StrictProbe` disjunct; in
+  `ioResumeLoop_sound` the consumed-probe arm needs no model step at all
+  (markQueried-only, Subperm-framed like the retry family).
+- **Completeness dichotomy.** `StateOK.respMatch` (the question-pin on
+  the pending response) is conditional on the response NOT being
+  probe-passable (`probePassableB`): vacuous on probe rounds (the guard
+  ensures only passable shapes reach the analyzer), recovered on full
+  rounds by per-arm shape refutations from the analyzer's own branch
+  conditions.
+- **EDNS FORMERR fallback (finding 055; RFC 6891 §6.2.2, 2026-07-17).**
+  `Resolver.State` carries a per-resolution `noEdns : Bool` (default false):
+  a new loop arm between the unfollowable and probe guards catches an
+  upstream FORMERR to an OPT-bearing sub-query (`rcode = formatError ∧
+  ¬noEdns`), logs, and recurses with the flag set — `buildSubQuery` then
+  omits the OPT record (`additional`/`arcount` conditional on `s.noEdns`)
+  for every remaining round, so the retry (and the rest of the resolution)
+  is EDNS-free instead of FORMERR-looping to SERVFAIL. The arm fires at
+  most once (guarded by `¬noEdns`); a FORMERR to an already-EDNS-free
+  query takes the ordinary retry path. `SentShape` holds verbatim — the
+  stripped query IS a `buildSubQuery` image of the flagged state — so the
+  egress/minimisation/freshness flagships needed only the new split arm.
+  The post-TC-guard FreeIO run lemmas gained an `hfe : rcode ≠ FORMERR`
+  hypothesis (derived internally where the rcode is pinned), threaded
+  through `DescentChain` and the adequacy wrappers to the client-level
+  `hrcq : rcode = noError` facts. Mock: `formerrRetriesWithoutEdns`.
+  Deviation vs unbound: the flag is per-resolution, not a per-server EDNS
+  status cache, and is not remembered across resolutions.
+- **Probe-NXDOMAIN fallback (findings 051/064; RFC 9156 §3 (6d)
+  non-strict branch — replaced the Q3b strict terminal 2026-07-17).** An
+  accepts-passing NXDOMAIN answering a probe (`strictDenialB`: no
+  chaseable CNAME, NXDOMAIN, TC=0) is NOT delivered: many real zones
+  (broken middleboxes, ENT-mishandling servers) answer NXDOMAIN for an
+  empty non-terminal even though the full name exists, so a
+  minimised-probe denial is not authoritative for the client. The arm
+  consumes the reply and recurses with `revealed := labelCount sname` —
+  the next round sends the FULL qname to the same (markQueried) server
+  set, and since `probeRoundB sname (labelCount sname) = false` at most
+  one fallback fires per `sname`. Only a full-name NXDOMAIN reaches the
+  client (the `afterResume` nameError arm; `run_ioResumeLoop_nxdomain`
+  requires `probeRoundB … = false` — the theorem-level pin that a
+  delivered NXDOMAIN verdict is a full-name denial; the fallback arm's
+  run lemma is `run_ioResumeLoop_probeNxdomainFallsBack`). The probe
+  denial is NOT negative-cached (`storeProbeNegative` is no longer
+  invoked by the loop — believing it would deny the very full-name
+  re-probe the fallback performs); the client-level negative is cached
+  for the full qname at the serve boundary (`storeNegativeIfCacheable`)
+  as before. In every soundness/completeness induction the arm is an
+  IH recursion like probe-consume (markQueried-only, Subperm-framed, no
+  model step). The MODEL keeps the strict `ancestorDenied` rule and its
+  bricks (`storeProbeNegative_negWriteRefines`,
+  `soaNegTtl_extractSoaNegative`, the `αSoa` branch of `αRData`) — the
+  rule is sound for cooperative servers and `ex_strict_ancestor_denied`
+  still exhibits it; the impl simply no longer exercises it.
+- **The flagship egress pin (Q4, `Proof/SentMinimised.lean`).**
+  `ioResumeLoop_sent_minimised`: in EVERY world — any oracle behaviour,
+  any clock, any id stream — every datagram `ioResumeLoop` can ever hand
+  to the network is the secrets-stamped encoding of a `buildSubQuery` at
+  some loop state and reveal floor, whose single question qname is a
+  CI-ancestor of that session's `sname`; a probe round reveals *exactly*
+  `revealed < labels sname` labels at QTYPE=A, a full round sends the
+  session name (CI) itself. Stated over the free-monad program TREE via
+  a new `AllSent` inductive (every reachable `.exchange` under every
+  environment response satisfies the predicate), so it needs no oracle
+  hypotheses and covers timeout/spoof/glueless/blocked-egress branches
+  uniformly — strictly stronger than any per-run statement, and it
+  proves there is NO egress path that escapes the minimised-question
+  builder. Session-anchored per-round content in
+  `sent_question_minimised` (built on the Q1 `minimisedName` lemmas);
+  `resolveWithIO_sent_minimised` lifts it to the entry point (the pure
+  front-end exchanges nothing). Axiom-clean (standard three). The reveal
+  SCHEDULE (seed, +1-with-cap, referral max-bump) is deliberately not
+  part of the per-datagram predicate — it is pinned by the `Test/Loop`
+  ladder mocks (`probeSequenceMinimised`, `probeNodataRevealsMore`,
+  `probeAnswerNotDelivered`, `probeCnameNotChased`,
+  `fullNameNxdomainFinal`, `probeNxdomainEntRecovered`,
+  `probeTimeoutFallsBackToFull`, `retransmitFreshSecrets`).
+- **Coverage (`Spec/QnameMinimisation.lean`).** `check_rfc_doc`/
+  `rfc_proves` links over the load-bearing RFC 9156 + 8020 ranges, with
+  the documented deviations recorded in the module docstring
+  ((6c) no-cache anti-poison reading; +1-with-cap vs proportional
+  jumps; full-round qtype restore one round early; §3.2 read-side
+  descendant lookup not implemented; and — since 2026-07-17 — RFC 8020
+  strict subtree denial NOT exercised for probe rounds at all: the impl
+  takes the (6d) non-strict fallback, retained in the model only) and the
+  RFC 6604 `strictDenialB` CNAME-exclusion reading pinned by
+  `strict_denial_excludes_cname`.
 
 ### Retransmission and Server Selection (RFC 1035 §7.2)
 
@@ -1211,12 +1968,414 @@ adjective and verb retagging after "unable to"/"does not"):
 
 `serveOne` screens requests before resolution: undecodable datagrams get a
 minimal raw FORMERR (ID echoed; dropped if under 12 bytes), `queryProblem`
-classifies decoded queries (≠1 question → FORMERR; opcode ≠ QUERY →
-NOTIMP; RD=0 → REFUSED, since iterative service is the one operation this
-recursive-only server refuses to perform). `hygiene_formatError` /
-`hygiene_notImplemented` / `hygiene_refused` (Proof/Server) instantiate the
+classifies decoded queries (≠1 question → FORMERR; TC-set → FORMERR;
+stuffed sections → FORMERR; opcode ≠ QUERY → NOTIMP; RD=0 → REFUSED,
+since iterative service is the one operation this recursive-only server
+refuses to perform; non-IN → REFUSED; AXFR/IXFR → REFUSED; meta-QTYPE →
+FORMERR). `hygiene_formatError` (+ `_tc`/`_sections`/`_metaQtype`) /
+`hygiene_notImplemented` / `hygiene_refused` (+ `_class`/`_zoneTransfer`)
+(Proof/Server) instantiate the
 generated semantics (each over the subtype that passed the earlier
 checks — an uninterpretable query has no judgeable kind).
+
+### Client access control (RFC 5358 / BCP 140)
+
+Recursion is confined to the intended clients. `serveOne` splits into the
+mandatory `recvFrom` followed by `serveDatagram`, whose *first* action is the
+access-control gate: `permitted acl clientAddr` tests the source IPv4 against a
+list of CIDR blocks (`AclEntry`/`clientIp`/`AclEntry.matches`), and a source
+outside every block returns `pure cache` — no decode, no `resolveWithIO`, no
+`sendTo`. `serveDatagram_denied` (Proof/Server) proves this holds in *any*
+`UdpSocket` monad: a denied — possibly spoofed — client can neither be reflected
+off of nor drive the resolver's recursion, closing the open-resolver
+reflection/amplification and cache-exposure surface. The gate is fail-closed
+(`permitted_nil`: the empty ACL serves nobody); the shipped default `defaultAcl`
+allows loopback + the RFC 1918 private ranges only
+(`defaultAcl_permits_loopback` confirms localhost still resolves). The
+executable `aclDeniedNoService` (`Test/Loop`) exhibits a public-source query
+producing no reply and no upstream traffic.
+
+### Response rate limiting (RRL)
+
+Below the ACL, a per-source fixed-window counter caps how much traffic one
+client (or an in-ACL spoofed-source flood) may drive through the serial
+`serverLoop`. `serveOneLimited` receives a datagram, then `afterRecv` charges
+its source IPv4 via `RateBucket.bump`: a source at `rateWindowLimit`
+datagrams for the window gets `none` and is dropped — `afterRecv_ratelimited`
+(Proof/Server) proves the drop reduces to `pure (cache, rb)` in *any* monad
+(no `serveDatagram`, hence no `sendTo` and no `resolveWithIO`), the same
+fail-safe shape as the ACL gate. `RateBucket.bump_over` pins the over-limit
+condition. The bucket is memory-bounded (`rateBucketCapacity`; a fresh source
+past capacity is admitted untracked, never falsely denied) and reset each
+sweep window by `serverLoop`. `serveOne`/`serveDatagram` (and their proofs)
+are unchanged — RRL wraps them. Executable `rateLimitDrops` / `rateLimitAdmits`
+(`Test/Loop`) exhibit both arms.
+
+### Root-hint priming (RFC 1034 §5.3.3 / RFC 8109)
+
+`Main.primeRootHints` sends ONE direct NS query for the root (`rootPrimeQuery`,
+id/question-matched via `acceptResponse`, TTL-capped/OPT-stripped by
+`forwardQuery`'s `sanitizeTtlsCap`) to each hardcoded hint address in turn, and
+absorbs BOTH the answer (the live root NS RRset) and the Additional-section
+glue A records (RFC 8109 §3.3) into the cache under the root bailiwick. The
+cache writes are the pure `Server.primeWrites` (`bailiwickRaws` →
+`primeKeepRR` filter → `cacheUnlessTruncated` with `credAnswer`/
+`credAdditional`, closed by `boundLru` like every other serve-path write).
+`primeKeepRR` keeps only class-IN NS records and class-IN A records with a
+4-byte rdata — the only shapes a priming reply may legitimately seed — so a
+hostile first hop can no longer plant arbitrary record types under the root
+bailiwick at cold start (W4 audit finding #1's impl half). The proof half is
+`ServePack_primeWrites` (`Proof/ServeSequence.lean`): the full ten-member
+serve invariant pack survives the priming writes, assuming ONLY the
+run-equations `Message.decode bytes = .ok resp0` and
+`sanitizeTtlsCap resp0 = some resp` (what `forwardQuery` actually returned)
+plus the standing clock bound — no network-honesty hypothesis, because decode
+canonicity (`decode_ok_wire_facts`), the TTL cap, and the ingest filter
+discharge every per-record obligation (the filter is exactly what makes
+`αRR`-totality provable instead of oracle-assumed). `serveSeq_total_primed`
+then bases the serve-sequence capstone at
+`primeWrites DnsCache.empty resp w.clock` with the `mkSbelt` SBELT — the
+exact initial state `main` serves from — closing the deployed invariant
+chain's base case. Caching the glue keeps the resolver off the SBELT
+round-trip; historically it was also load-bearing: `stepFindServers` used to
+fall back to the SBELT only when `walkNs` found NO NS set, so a cached root NS
+RRset WITHOUT cached addresses shadowed the SBELT and every resolution starved
+in circular glueless sub-resolutions (a root server's address can only be
+resolved via the root servers) — a total, restart-only outage. That root cause
+is now fixed inside the verified core (external review #015): the
+`stepFindServers` rebuild arm falls back to the SBELT when the walk's cut is
+the ROOT and the re-derived glue is empty (`glue.isEmpty && mc == 0`). The
+fallback is deliberately root-cut-only — an address-less SLIST at a deeper cut
+is what triggers glueless sub-resolution, and substituting the SBELT there
+would loop (the re-referral re-caches the same NS set); at the root cut the
+SBELT is by definition the configured address set for exactly the starving
+zone, and deeper glueless sub-runs now bottom out at this fallback. Because
+the fallback fires only at match-count 0, its guard coincides with the
+existing safety-belt disjunct of the paused-SLIST shape
+(`stepFindServers_cases`), so the refinement/soundness statements were
+unchanged (`Test/Loop.addresslessRootNsSbeltFallback` is the regression
+test). The prime still must not go through `resolveWithIO`: its answer arm
+caches only the answer section and drops the glue (the original priming
+implementation did exactly that and broke the server from startup). A failed
+prime on all hints leaves the cache unchanged — with no root NS cached,
+`walkNs` finds nothing and the SBELT path serves normally.
+
+### Client-boundary answer authenticity
+
+`replyForResolution` hands the stub `deliveredResponse query resp` — the
+resolved message with its answer section scrubbed to the CNAME-closure of the
+queried name **and then filtered to qtype-relevant records** (**finding 068**,
+RFC 1034 §3.6.2: `typeScrubB (clientQtype query) ∘ scrubAnswerB (clientQname
+query)` — a delivered answer record either carries the client's query type,
+or is a chase-chain CNAME (type 5), or the query was QTYPE=* (255; unreachable
+at the serve boundary, where ANY is answered by the RFC 8482 arm). The owner
+scrub alone let an entitled answer smuggle same-owner records of a *different*
+type — e.g. a junk TXT riding along with the queried A — into the delivered
+answer. Model twin: `Spec.Net.typeScrub`/`typeRelevant`, α-bridge
+`αSection_typeScrubB_eq` (no canonicality premises — a record that fails to
+parse or abstract is invisible to both sides), pointwise coherence
+`typeRelevantB_model_eq` via `αType_injective`. Pins:
+`deliveredResponse_answer_qtype_relevant` (impl), `typeScrub_relevant`/
+`typeScrub_excludes` (model); the delivery capstones' answer conjunct is now
+`typeScrub qm.qtype (scrubAnswer qm.qname v.answer)`. Mocks:
+`Test/Loop.wrongTypeRideAlongScrubbed` (junk TXT dropped),
+`Test/Loop.cnameChainSurvivesTypeScrub` (chain CNAME + terminal A kept).)
+(`scrubAnswerB`, which since review #003 also **case-normalizes
+each kept owner to the first entitled reach name it CI-matches**: the reach set
+is seeded with the client's question bytes verbatim, so a record owned at the
+queried name is delivered with the client's exact case — the resolver's
+0x20-randomized upstream case never leaks to the client (`eXaMpLE.COm.` in dig
+output, post item-4 C2) — and chain-hop owners take the case of the previous
+link's rdata, the compression-pointer behaviour of real servers; RFC 1035
+§2.3.3. On canonical blobs the rewrite is an `rrWire`-to-`rrWire` splice,
+`setOwnerB`. Model pin: `scrubAnswer_owner_at_qname`; mock:
+`Test/Loop.deliveredOwnerClientCase`), its authority section scrubbed to decodable
+records owned at or above the queried name (`scrubAuthorityB`, review
+#012/#013 residual: an off-owner SOA riding a first NXDOMAIN is dropped before
+delivery, matching unbound's AUTHORITY:0; `deliveredResponse_authority_owned`
+is the delivery-side companion of the `CacheNegSoaOwner` cache pin), its
+additional section scrubbed to records whose owner lies in the bailiwick of
+the queried name (`scrubAdditionalB`, **finding 047**: an out-of-bailiwick
+additional record — e.g. `attacker.example` glue riding a leaf answer — is
+dropped before it reaches the client, matching unbound's glue filtering and
+the model's `Entitled .additional` role; `deliveredResponse_additional_inBailiwick`
+is the delivery-side pin, transported into the delivery capstone
+`serveDatagram_verdict_sound`'s positive arm as a per-record in-bailiwick
+conjunct, and `Proof/Entitlement.offcut_additional_not_delivered` re-derives
+047 as a corollary of the model's `offcut_additional_unentitled`), the
+client transaction id and RD bit restored (RFC 1035 §4.1.1 — upstream
+sub-queries are iterative `rd=0`, so without the restore the delivered RD
+leaked whether the answer came from cache; `deliveredResponse_rd`, review
+#007/#010a), and the client-facing header finalization applied.
+`deliveredResponse_answer` pins the
+delivered answer to that scrub, and `deliveredResponse_authentic` (Proof/Server)
+lifts the impl scrub authenticity (`scrubAnswerB_authentic`) to it: every answer
+RR the client receives is the owner-case-normalized rewrite of a resolved answer
+record whose owner is genuinely CNAME-reachable (RFC 1035 §2.3.3,
+case-insensitively) from the queried name — and the delivered owner IS that
+entitled name.
+`replyForResolution_ok_fst` proves (via `SatisfiesM`, any `UdpSocket` monad) that
+the Format the server reply function actually returns *is* `deliveredResponse`,
+and `replyForResolution_ok_authentic` composes the two — so the
+answer-injection / poison-conduit vector is closed at the real client boundary,
+threading the answer-scrub guarantee up from the scrub through the server reply
+path (not merely a pure builder).
+
+The *soundness* companion lives in `Proof/ServeSound.lean`: `resolveThenReply_sound`
+composes the tree-level `resolveWithIO_sound` (every resolved answer agrees with
+the authoritative name-tree `T`) with `replyForResolution_answer_sound`, so the
+Format the resolver hands the client carries only answer records present in `T` —
+no fabricated record ever reaches the stub (up to the review-#003 owner-case
+normalization, which the case-insensitive tree walk absorbs).
+`deliveredResponse_sectionAgrees` carries the tree agreement across the
+owner-rewriting scrub: `rrInTree_owner_congrCI` transfers `RRInTree` along the
+CI-equal rewritten owner (`nodeAtName_congrCI` + `sameData`'s CI compare), and
+showing the rewritten blob *parses* takes the resolved answer canonical
+(`CanonicalSection`) plus the client question name canonical (`CanonicalName`) —
+facts held on the real serve path by the codec, so `resolveThenReply_sound` now
+takes them as one combined `SatisfiesM` run hypothesis alongside `ShimSound`
+(two `SatisfiesM` facts about the same computation cannot be conjoined
+generically). Together
+the two results — authenticity (no injected record) and soundness (no fabricated
+record) — are the client-facing half of end-to-end `serveDatagram` soundness. The
+remaining verdict/network half is the `ioResumeLoop_sound` entry-hypothesis
+discharge (`Proof/IoResumeSound.lean`), tracked separately.
+
+Verdict-half step 1 is `Proof/ResolveWithIOSound.lean`:
+`resolveWithIO_paused_sound` is the structural reduction — when the pure resolver
+`Resolver.resolve` pauses into `state`, a successful `Prog.run` of `resolveWithIO`
+reduces to an `ioResumeLoop` run on that state (deadline `now + budget`), so the
+network-track capstone `ioResumeLoop_sound` applies verbatim and yields the model
+verdict with the full α-bridge, SLIST `Subperm`, cache-refinement, and
+well-formedness-preservation package. This isolates the remaining work: discharging
+`ioResumeLoop_sound`'s ~24 entry hypotheses for the resolve-paused `state`. The
+ingredients already exist piecewise. `resolve_paused_inv` (same file) is the first
+assembled brick: the general-query analogue of `resolve_mkAddressQuery_paused_inv`,
+it inverts a paused `Resolver.resolve query` run to the structural facts the discharge
+needs — the `localAnswer` cache miss, the untouched cache, and preserved
+`now`/`step = sendQueries`/`lastQuery`/`sbelt` — using the query-name canonicity to
+close `stepCheckLocal`'s identity-miss branch. Step 2 is assembled in the same file:
+the model-tied entry hypotheses are *derived* from the input query + cache
+well-formedness + `WorldModels` (`paused_StateModels_noPeel` via
+`StateModels_initFromQuery` + the query-renaming `StateModels_cacheCname_preserve`;
+`paused_cacheMiss` via `localAnswer_miss_reads` + the read-side bridges;
+`paused_GluelessProv` via `walkNs_names_canonical`; `paused_CnameChainModels_noPeel`),
+giving `resolveWithIO_noPeel_paused_sound` for the no-peel path. The capstone
+`resolveWithIO_paused_full_sound` then closes the CNAME-peel case: a CNAME-type
+query cannot peel (identity-miss inversion), and otherwise `localAnswer_chase_peel`'s
+`.miss` arm supplies the peeled name's canonicity, model reads, `CnameChainModels`,
+and the verdict transformer — the run is resolved at the peeled query and the
+transformer folds the peeled links back, so the delivered response IS a model verdict
+**at the original client query** (`nseen = []`, verdict input cache `CacheRefines`
+the session cache). The `.done` cache-hit outcomes get the same treatment:
+`resolveWithIO_negative_full_sound`/`resolveWithIO_answerHit_full_sound` cover a
+negative/answerable hit reached AFTER peeling (the read happens at the final chase
+target; the chase-peel `.negative`/`.answerHit` arms wrap it back), subsuming the
+direct-hit `resolveWithIO_negHit_sound`/`resolveWithIO_answerHit_sound` via the
+`localAnswer_qt5_inv` dispatcher. So the CNAME-peel gap is closed across ALL
+`localAnswer` outcomes. The top-level assembly `resolveWithIO_verdict_sound` then
+hides the internal resolver state entirely: it cases on the `localAnswer` outcome
+(hit → the `_full_sound` theorems, output cache = input cache; miss →
+`resolve_pauses_of_miss` + the paused capstone, with the paused state's
+clock/lastQuery converting the conclusion to input-cache terms; abort → the pure
+resolver errors, contradicting a successful run) — ANY successful `resolveWithIO`
+run on an abstractable canonical fresh query delivers a model verdict at that
+query under natural preconditions only, `WorldModels` being the one irreducible
+network premise.
+
+**World-model satisfiability witness (`Proof/WorldWitness.lean`).** `WorldModels`
+/ `WorldModelsTcp` are assumed by every soundness capstone and discharged
+nowhere else — the only trivially-satisfying world is the dead one
+(`oracle = fun _ _ => none`), so nothing pinned the capstone stack against
+vacuity (2026-07 W4 audit, finding #1, severity 5). `Proof/WorldWitness.lean`
+closes that gap with a concrete honest single-server world: a zone at apex `1.`
+(digit-only label, hence a fixpoint of 0x20 case randomization —
+`randomizeCase_witness_inv` recovers the pre-randomization qname from the
+`questionMatches` acceptance check) holding `1. 60 IN A 1.2.3.4` plus the apex
+SOA/NS required by `Zone.WF`, served at model address `5.6.7.8`. The oracle
+decodes the query bytes, gates on exactly the `1. IN A` question (plus
+rcode/tc/authority hygiene), and replies with the canonical authoritative
+answer; the per-RR parse/canonicity conjuncts of the packs come from the codec
+round-trip (`decode_encode`), the model side from a literal
+`ServerAnswers.answer` derivation. `witnessOracle_WorldModels` and
+`witnessTcpOracle_WorldModelsTcp` discharge both packs for ANY world running
+the witness oracles (always through the honest disjunct — the spoof arm is
+never used), `witnessOracle_live` shows the oracle answers the resolver's own
+probe for every TXID/0x20-seed choice (the guard is reachable, not dead), and
+`resolveWithIO_verdict_sound_witness` instantiates the verdict-soundness
+capstone at the witness world with every world premise (including
+`witnessNet_WF`) discharged — the non-vacuity certificate for the soundness
+spine. All axiom-clean.
+
+The `serveDatagram` lift is `serveDatagram_verdict_sound` (same file): a
+permitted, decoded, well-formed client datagram that `serveDatagram` successfully
+serves either failed resolution (SERVFAIL delivery) or hands the client
+`deliveredResponse query resp` whose rcode IS the model verdict's and whose
+answer is EXACTLY the model scrub of the verdict answer
+(`deliveredResponse_answer_exact` — since review #003 the scrub on BOTH sides
+also case-normalizes each kept owner to the first entitled reach name, so the
+old byte-literal Sublist-of-verdict conjunct no longer holds and was dropped in
+favour of the equality; with `deliveredResponse_authentic`, every delivered
+record is an owner-case-normalized verdict record, CNAME-reachable from the
+query name, and a record owned at the query name carries the client's qname
+bytes verbatim). The exactness rides the scrub commutation
+`αSection_scrubAnswerB_eq` (`Proof/AnswerScrubAlpha.lean`): `NamesCorr`, the
+review-#003 strengthening of the old two-sided existential `ReachCorr` to a
+POINTWISE correspondence (same length, `αName reachB[i] = some reachM[i]`, each
+wire member canonical within the 255-octet cap), carried through
+`reachIterB`/`reachIter` in lockstep (no fixpoint/completeness argument — under
+canonical/all-abstracting sections the iteration counts coincide, and each
+round appends the targets of the same kept CNAME records in the same order).
+The pointwise form is what makes the two `find?` scans pick CORRESPONDING reach
+names (`NamesCorr.find?_corr`); the impl rewrite is then an `rrWire`-to-`rrWire`
+splice (`setOwnerB_rrWire`) whose abstraction is exactly the model's
+owner-rewritten record (`αRR_setName`). The per-pair predicate bridge
+(`nameCorr_pred_eq`) takes owner canonicity from the decode itself
+(`parseRaw_name_canonical`) and reach-name canonicity from `NamesCorr`; CNAME
+target canonicity now comes from `CanonicalSection`'s `CanonicalRdata` (the
+`AnswerWriteWf` `RdataCanon` feed became redundant and was dropped), and the
+query name's canonicity hypothesis gained the 255-octet cap (from the client
+datagram's decode). The exposed
+`resolveWithIO` sub-run pins `resp` as this run's resolution. Plumbing:
+`serveDatagram_served` reduces the gated do-block (needs the new
+`LawfulMonad Prog` instance; the default-simp `Prog.bind_def`/`Prog.pure_def`
+must be EXCLUDED so the LawfulMonad `pure_bind` can fire), then
+`run_now_bind_inv` + the generic `run_bind_inv` split off the resolution sub-run
+at the world's clock.
+
+The post-reply cache-write wf package is CLOSED end-to-end: the serve-loop
+invariant conjunct of `serveDatagram_verdict_sound` is UNCONDITIONAL — all eight
+cache invariants hold at the ACTUAL served cache (`replyPath_cacheOut_wf` pushes
+them through `replyForResolution`'s client-boundary absorb, the RFC 2308 negative
+store, and the expiry-class bound), so a successful serve re-establishes the
+theorem's own cache preconditions for the next datagram. The byte-validity
+interface this needs (`RespWriteWf`, stated on PARSED in-bailiwick answer records:
+abstracts + TTL-no-overflow + NS/CNAME `RdataCanon`) is DISCHARGED from the
+verdict chain itself: `AnswerWriteWf` (the whole-section, per-raw form, defined in
+`IoResumeSound.lean`) is threaded through `ioResumeLoop_sound` as an entry
+hypothesis on the paused chain (supplied by `paused_chain_answerWriteWf`) and a
+conclusion conjunct on the delivered answer — wire terminals via
+`answerWriteWf_of_wire` (WorldModels validity + `sanitizeTtlsCap` + codec
+canonicity), cache blobs via `lookupAnswerable_respWriteWf_facts`, and chase-peel
+chain growth via `localAnswer_chain_links`/`localAnswer_chain_answerWriteWf` (the
+input-chain-agnostic link dichotomy). The `.done` cache-hit deliveries satisfy it
+outright (`resolveWithIO_done_answerWriteWf`). Both former verdict-half
+residuals — scrub exactness and truncation-to-bytes conditioning — are now
+CLOSED (see above and below).
+
+The pure wire-level layer of the truncation residual is
+`Proof/DeliveredWire.lean`: `CanonicalSection` (membership-form per-raw
+`CanonicalRR`, the compositional unit that survives `++`/`map`/`filter`, unlike
+the index-based `ValidRRBytes` it converts to via `rrWire_frame`);
+`decode_ok_wire_facts` (everything a successful `Message.decode` says — the four
+count-correctness facts, per-question `QuestionFromLabels`, and canonical RR
+sections — so wire responses are canonical at the `forwardQuery` source);
+transformer lemmas for the TTL cap (`canonicalSection_map_capTtlRR`) and the
+client scrub (a filter); and the assembled round-trips
+`deliveredResponse_decode_encode` / `errorResponse_decode_encode` — under
+natural section-validity hypotheses on the resolution output (resp. the client
+query), the encoded delivered reply decodes back to exactly the delivered
+`Format`.
+
+The delivered-payload pass supplying those hypotheses from the run is CLOSED
+(`ResolveWithIOSound.lean`, `DeliveredSections` section): `SectionsPin` — the
+sections analogue of the question-pin — threads `StateSections` (both cache
+wire-canonicity invariants `CacheRecCanon`/`CacheNegSoaCanon`, a canonical
+CNAME chain, and pending-response section validity) through the four pure
+steps, the pure loop, `resume`/`afterResume`/`gluelessRecheck`, and the
+`ioResumeLoop` run-inversion (`ioResumeLoop_ok_sections`, mirroring the
+question-pin skeleton; the wire arms expose the decode via the
+`run_round_bind_eq` family, the glueless arm applies the induction hypothesis
+to the sub-run for the recheck cache's invariants). The lift is
+`resolveWithIO_ok_sections`. The capstone `serveDatagram_verdict_sound` now
+exports the **bytes round-trip conjunct**: when the encoded delivered reply
+fits a UDP datagram (≤ 512 bytes), `truncateUdp` sends it verbatim and it
+decodes back to exactly `deliveredResponse query resp` — the 16-bit `ancount`
+requirement is derived FROM the fits condition via `encode_size_answer_le`
+(canonical raws are nonempty), so no size invariant is threaded. The serve-loop
+invariant now also re-establishes `CacheRecCanon`/`CacheNegSoaCanon` at the
+served cache (`replyPath_cacheOut_canon`: the client-boundary absorb writes
+canonical delivered-answer raws; the negative store's SOA is a TTL-adjusted
+parse of the canonical delivered authority), so all TEN cache invariants are
+self-sustaining across serves.
+
+The total-simulation closure sits on top (plan: `docs/total-simulation-plan.md`).
+`serveDatagram_total` (T2, end of `ResolveWithIOSound.lean`) is
+`serveDatagram_verdict_sound` with every client-boundary hypothesis DISCHARGED
+from the decode itself (`decode_ok_wire_facts`'s `QuestionFromLabels`;
+`labelsToWireFormatGo_size_ge` turns the ≤255-octet wire name into ≤127 labels;
+the model query is constructed as `⟨decoded labels, .rr t, .in, false⟩`, so its
+qtype/class/rd conjuncts hold by construction) — remaining premises are exactly
+the ingress gates, the two deliberate scope keeps (no ANY, class IN), the
+environment set, and the self-sustaining entry invariants. Since T5 (RFC 3597,
+2026-07-11) the qtype-abstractability premise is GONE: `Spec.RRType` carries
+`unknown (code : BitVec 16)` (a code outside the 16 named RFC 1035 §3.2.2
+assignments — verified against `rfc/rfc-3597.txt` §2–§3 by `include_rfc`) and
+the model `RData` carries `generic (t : RRType) (data : ByteArray)` (§3
+transparency: opaque bytes, stored and transmitted without change; §4: never a
+compression target in the model wire-size layer). `αType` is TOTAL on 16-bit
+codes (`αType_total`) and `αRData` total over type codes via the generic arm
+(the five interpreted formats — A/NS/CNAME/SOA/PTR — still parse structurally),
+so `serveDatagram_total` produces `t` existentially and its only qtype premise
+is the explicit ANY exclusion `qu.qtype.toNat ≠ 255` (RFC 8482 direction; ANY
+maps to the model `.star`, which the driver's scope excludes). Records of
+previously-unmodelled types (MX, TXT, unknown codes) now survive `αSection`
+as `.generic`-rdata records, so unknown-type traffic is inside the verified
+claim end-to-end. A consequence worth remembering: `rtype = .ns` no longer
+pins the `.ns` constructor at the model level (`.generic .ns …` is a value) —
+the NS/A extraction proofs invert through `αRData`'s image instead
+(`αRData_ns_inv`/`αRData_a_inv` via `αRR_rdata`); and `RRType`'s derived `==`
+is now Eq-reflecting on the WHOLE type (`rrtype_eq_of_beq` unconditional — the
+`unknown` cell rides `BitVec`'s lawful `BEq`). The `.error`
+disjunct is verdict-carrying since T1 (`Proof/IoResumeErrorSound.lean`): every
+SERVFAIL delivery comes with `HasVerdictAt` at the entry model cache, the
+verdict pinned to `servFail`/empty answer, plus the full ten-invariant
+re-export at both the resolution cache and the served cache. Since the W2
+model-strengthening the verdict is `Resolves.gaveUp` backed by a mandatory
+`GaveUpWitness` (the earlier per-message classification into the premise-free
+`loopDetected`/`exhausted`/`gaveUp` trio is gone): `resolveWithIO_error_cacheMiss`
+proves every SERVFAIL exit of the runtime core — deadline, IO-round fuel,
+glueless depth, address-less SLIST, or the initial CNAME abort
+(`resolve_error_inv`: the pure pre-network segment can ONLY error via
+`localAnswer = .abort`, and `localAnswer_abort_reads` extracts the entry-point
+cache misses from an abort) — establishes the witness's cache-miss facts, and
+`servfail_means_gaveUpWitness` is the visibility corollary. The capstone error
+arms (`serveDatagram_verdict_sound`, `serveTcpDatagram_verdict_sound`, the
+`_total` twins, and `ServeJustification`) now export the witness as an explicit
+conjunct: a served SERVFAIL proves the serve-time cache held neither a positive
+nor a negative answer for the client's question.
+One `gaveUp` inhabitant is proven dead code (give-up follow-up 2): the pure
+machine's fuel can never exhaust — `fuelRank` in `Proof/Resolver.lean` bounds
+every run at ≤ 7 gotos (each goto out of `analyzeResponse` clears
+`lastResponse`, so the re-entered pipeline pauses), and
+`resolve_ne_maxIterations`/`resume_ne_maxIterations` show the driver's fuel-64
+calls never yield `.error "resolver: max iterations"`.
+The serve-sequence corollary (T3) is `Proof/ServeSequence.lean`: `serveSeq`
+folds `Server.afterRecv` (rate limiter + `serveDatagram`) over an explicit
+finite datagram list (under `Prog`, `recvFrom` is effect-free, so the list IS
+the receive sequence; `serverLoop` is `partial` and adds only the periodic
+sweep — the corollary quantifies over the sequence, not the loop).
+`serveSeq_sound` threads the ten-invariant pack (`ServePack`, with the per-class
+negative invariant pinned to the concrete IN code via `αClass_inj` — every
+in-scope query's class is byte-identical), `WorldModels`, and the clock
+(`run_world_frame`: serving mutates only `trace`/`idCtr`) through the three step
+shapes — rate-dropped (`bump = none`), gate-failing (`serveDatagram_unserved`:
+under the free monad any failed ingress gate reduces `serveDatagram` to
+`pure cache`), and served (`serveDatagram_total`) — concluding a
+`JustifiedTrace`: every admitted, gate-passing step carries the full
+per-datagram model justification (`ServeJustification`) at its arrival cache.
+`serveSeq_total` instantiates at the cold start (`DnsCache.empty`,
+`RateBucket.empty` — `ServePack_empty` holds vacuously);
+`serveSeq_total_mkSbelt` discharges the SBELT premise for the production
+`DnsSList.mkSbelt`, and `serveSeq_total_primed` moves the base to the REAL
+initial state — the root-hint primed cache
+(`Server.primeWrites DnsCache.empty resp w.clock`, pack established by
+`ServePack_primeWrites`) — so the ONLY entry
+premises are the environment set and the per-datagram scope condition
+(`InScope`, required only of datagrams that pass the gates — out-of-scope
+resolutions carry no invariant guarantee; since T5 the qtype conjunct is just
+the ANY exclusion `qu.qtype.toNat ≠ 255` — the class-IN keep and the ANY keep
+are the plan's two deliberate scopes, everything else is in the claim).
 
 ### TTL Sanity (RFC 1035 §7.3)
 
@@ -1292,24 +2451,67 @@ real predicates over data; none is delegated to the transport:
 
 - **Datagram-level** (`datagramMatches` + `acceptExchanged`,
   Impl/Server.lean): the transport (`UdpSocket.exchange`) runs each query
-  on a fresh UNCONNECTED socket and only REPORTS the first datagram with
-  its kernel-observed addressing (`Exchanged`: payload, source, delivery
-  destination, the socket's local binding at send time). The Lean gate
+  on a fresh UNCONNECTED socket and REPORTS the first datagram whose
+  source is the queried server, with its kernel-observed addressing
+  (`Exchanged`: payload, source, delivery destination, the socket's local
+  binding at send time). Datagrams from any OTHER source are skipped in C
+  (never returned, never accepted — a strict subset of the Lean gate's
+  drop) and the wait continues on the same socket until a 2 s deadline,
+  so an off-path junk datagram cannot consume the socket and starve the
+  real reply (review #017; runtime regression `exchange-junk-test`,
+  Test/ExchangeJunk.lean). The Lean gate
   then decides: source = the queried server (address AND port, bytes 0–3 /
   4–5), destination address = the address the query left from, destination
   port = the query's source port. A mismatch is dropped before
   `Message.decode` runs (`forwardQuery`), and is proven dropped
   (`exchanged_mismatch_dropped`); accepted datagrams provably satisfy all
   three matchers (`exchanged_matches`).
-- **Message-level** (`acceptResponse`): query ID + question echo
-  (name/class/type, case-insensitive), applied before `resume` so spoofed
-  responses never reach the resolver or cache (`acceptResponse_matches`).
+- **Message-level** (`acceptResponse`): query ID + question echo — the qname
+  compare is **byte-exact** (`questionMatches`, item 4 / RFC 5452 §9.2 DNS
+  0x20; qtype/qclass exact), applied before `resume` so spoofed responses
+  never reach the resolver or cache (`acceptResponse_matches`). The model
+  gate mirrors this: `accepts` compares qnames with `Net.nameEqCS` and
+  `OnWire.offPath`'s blindness disjunction includes the case pattern
+  (id ∨ port ∨ qname-case).
 
 `accept_match_obligation` instantiates the generated obligation over
 (datagram, response) pairs with the conjunction of the two gates. The fresh
 ephemeral local port per query is §9.2's port randomization; unpredictable
-query IDs are implemented by `UdpSocket.randomId` (arc4random FFI) +
-`withRandomId`; `serveOne` restores the client's ID on the final response.
+query IDs are implemented by `UdpSocket.randomId` (kernel-CSPRNG FFI, TCB
+contract on the extern) + `withRandomId`; `serveOne` restores the client's
+ID on the final response.
+
+**DNS 0x20 outbound entropy (item 4, stage C2)**: each upstream query draws
+`randomId` TWICE — the txid `rid` and an independent case seed `cid` — and
+sends `withSecrets subQuery₀ rid cid` (= `withCaseSeed (withRandomId …)`),
+which toggles the case of every alphabetic qname byte per `cid`
+(`DomainName.randomizeCase`, wire-format-safe: length octets ≤ 63 and the 0
+terminator are below 'A'). Honest servers echo the question verbatim, so the
+byte-exact gate passes (rig-verified live); an off-path spoofer must now
+guess id + port + one case bit per letter. The seed is deliberately NOT
+derived from the txid (zero added entropy); both draws share the `randomU16`
+TCB contract. **Per-retry TXID (item 4, stage D)**: the transport `exchange`
+is single-shot (the old `retryOption` same-datagram retransmit combinator and
+its `retryOption_pure` deterministic-collapse contract were deleted) —
+retransmit-before-failover happens at the `ioResumeLoop` round level, where
+`bestWithAddress` re-selects least-tried-first (§7.2 above) and each round
+draws BOTH secrets fresh, so the same (id, case) pair is never on the wire
+twice (RFC 5452 §4.4: a repeated pair would extend the spoof race window
+across retransmits). Freshness is theorem-pinned: the FreeIO retry lemmas
+(`run_ioResumeLoop_retryThenAnswer`) show the second round sends
+`withSecrets subQuery₀ (ids (idCtr+2)) (ids (idCtr+3))`; runtime pins are
+`exchange-junk-test` case 3 (single-shot) and
+`Test/Loop.retransmitFreshSecrets` (fresh id + case on the retry round,
+answer still delivered). Proof-side, the second
+draw is one extra monadic step threaded through the FreeIO round lemmas
+(`run_round_bind_eq` family, fuel +1, continuation takes `rid cid`),
+`WorldModels` (quantifies `cid`, oracle keyed by `withSecrets`), and the two
+run-inversion capstones — both capstone *statements* unchanged; the reply's
+CI match to the canonical SNAME re-derives via `randomizeCase_nameEqCI` +
+`nameEqCI_trans`. Regression: `Test/Loop.sentQnameCaseVaries` (sent qname =
+seeded image, ≠ canonical, varies with the id stream);
+`Test/Loop.caseVaryingEchoRejected` pins the gate half.
+
 `UdpSocket` also has `now` (clock) and a defaulted `log` diagnostic hook
 (IO instance: stderr).
 
@@ -1329,6 +2531,72 @@ pairs. Main.lean configures 5 root servers (a-e.root-servers.net).
 - `resolve_loop_result`: fuel-bounded loop always terminates (extended for needsIO branch)
 - `step_implies_spec`: step function only produces StepSpec-allowed transitions
 - `step_analyzeResponse_coverage`: `responseHandled` implies no fallback error
+
+## Entitlement Non-Interference (model-strengthening W1, July 2026)
+
+`Spec/Entitlement.lean` + `Proof/Entitlement.lean` subsume the owner-check
+fault family (004 subdomain rider, 036 off-owner CNAME, 012/013 off-owner
+SOA, the answer-injection finding) under ONE relation and one frame bundle.
+
+`Entitled q resp bw : Role → RR → Prop` (role-indexed def, per RFC 2181
+§5.4.1 / RFC 2308): `.answer` = owner on the CNAME chain rooted at
+`q.qname` in `resp.answer` (`CnameReachable`); `.negSoa` = SOA whose owner
+is an ancestor of `q.qname`; `.delegation` = owner inside the processing
+bailiwick `bw`. `Unentitled` = entitled in no role. Insertion of a record
+is `InsertedIn` (list splice) / `RespInsert` (per-`Sec` response splice,
+all other fields pinned).
+
+The model's handler is the relational `Resolves`, so non-interference is
+proven per filter and bundled as `handle_frame`: inserting an `Unentitled`
+record into any section leaves unchanged (1) the delivered scrub
+(`scrubAnswer_insert_frame`), (2) the positive cache write
+(`absorb_insert_frame`, all three sections through the bailiwick filter),
+(3) the trusted-arm write (`answerOwned_insert_frame`), (4) `soaNegTtl`
+at every strict-probe ancestor, (5) `absorbNeg` (equal, or fail-closed
+`= c` when an answer insertion breaks a NODATA classification —
+`absorbNeg_insert_ans`), (6) the chased CNAME (`cnameRR_insert_frame`),
+and (7) `glueAddresses` (given the delegation negation at the response's
+own `referralCut`; the former non-NS proviso for authority inserts is
+GONE now that the glue walk only serves `cutServers`), plus (8) the
+glueless address pick `addressOf` at the query name. Classification
+guards (`isReferral`, `inBailiwick`, nodata) are insertion-sensitive BY
+DESIGN in the fail-closed direction only (`isReferral_insert_ans`).
+
+The deliver frame needs a genuine completeness theorem: `scrubAnswer`'s
+`reachableNames` runs with fuel `answer.length`, and insertion changes the
+fuel. `reachableNames_complete` proves the fuel saturates: chains are
+materialised as explicit `CnamePath`s, a duplicate record in a path is cut
+(both uses step to the same target), and a `Nodup` path over `answer`
+has length ≤ `answer.length` (`List.subperm_of_subset`). Hence one extra
+step only appends names already present, and the `find?` scans agree.
+
+Refinement transport: `αSection_insert`/`αSection_insertedIn` turn a wire
+splice into a model `InsertedIn`; composed with `αSection_scrubAnswerB_eq`
+this gives `scrubAnswerB_excludes_unentitled` (the `Entitled`
+generalisation of `scrubAnswerB_excludes_foreign`) and
+`αSection_scrubAnswerB_insert_frame` (the impl's delivered set of a
+spliced wire answer equals, at α, the scrub of the un-spliced one).
+`scrubAnswer_no_foreign` (Spec/AnswerAuthenticity) is kept verbatim and
+re-derived as the answer-role corollary `scrubAnswer_no_foreign_of_role`.
+
+Both W1 model gaps are CLOSED and flipped into scrub pins. (1)
+`glueAddresses` formerly collected glue for the hosts of EVERY
+authority-section NS record (`referredServers`), including NS records
+owned ABOVE the delegation cut — an off-cut NS smuggled next to the
+genuine delegation could grow the glue set with a host the delegation
+never referred to. The glue walk now serves only `cutServers` (NS records
+owned, case-insensitively, at `referralCut` — matching unbound's scrubber
+and the impl's `ownerRaws`-filtered `extractNsNames` in the referral arm);
+pins `glueAddresses_insert_auth` (bundled as `handle_frame` clause 7, its
+former non-NS proviso now GONE) and the concrete twin
+`glueAddresses_offcut_ns_scrubbed`. The refinement connector
+`extractNsNames_ownerRaws_cutServers_αResp` abstracts the cut-filtered
+impl extraction to `cutServers`. (2) `addressOf` (the `gluelessNs` address
+pick) formerly took the ipKey-minimum over ALL answer A records with no
+owner check; it is now owner-parameterised and filters to A records on the
+NS host's CNAME chain, mirrored exactly by the impl's `extractAAddress`
+reach-guard; pins `addressOf_insert_frame` (bundled as `handle_frame`
+clause 8) and the concrete twin `addressOf_offowner_scrubbed`.
 
 ## #naturallanguage: NLP Pipeline Inspector
 
@@ -1352,6 +2620,199 @@ real specs.
 
 ## Key Design Decisions
 
+- **Case-insensitive glue matching everywhere (2026-07-02)**: `DnsSList.fromNsWithGlueAll` matches a glue
+  owner to its NS-name case-insensitively (`foldNameCase gn == foldNameCase n`), completing the
+  glue-case-sensitivity fix on the *response-transient* SLIST path (a zero-TTL delegation followed from the
+  wire without caching it, RFC 2181). The earlier fix covered only the cache-rebuild path (where the
+  case-insensitive match happens during the `lookupTopCred` read). The refinement proofs use `Subperm`
+  throughout the referral keystone (`refer_continue_keystone` concludes `referralSlist.Subperm modelSlistOf`,
+  not equality): case-folding only ADDS glue vs the old byte-exact `==`, so the model SLIST is a sub-multiset
+  of the impl's — the fix strictly widens what the resolver tries while keeping the anti-poisoning bailiwick
+  filter intact.
+
+- **Referral continuation caches via `WriteRefines` (2026-07-02)**: the model
+  `Resolves.referForget` rule no longer pins the recursive resolution to the
+  model's accumulate-`absorb` cache. An RFC-faithful store REPLACES a same-key
+  RRset (RFC 2181 §5.2) and refuses less-trustworthy data (§5.4.1), so on warm
+  revisits the accumulate-cache — and any SLIST re-derived from it — genuinely
+  over-approximates the implementation. The rule now carries the resolver's own
+  continuation caches `cf0` (post-write) and `cf` (post-eviction), each
+  constrained by `WriteRefines t` (Spec/NetworkSemantics): a `topServed`
+  sub-multiset at read times ≥ the continuation time (clocks are monotone, so
+  earlier reads never occur) plus an ALL-TIME existential provenance clause
+  (anything the written cache ever serves, the absorb-cache serves at some
+  time). The provenance clause is what the unconditional cache-poisoning
+  theorems (`resolves_cache_in_bailiwick`, `resolves_cout_grounded`, …) walk,
+  so their statements are unchanged. The recursive SLIST lower bound (`hsl`,
+  now `Subperm`) reads `cf0.referralSlist` — the cache the resolver actually
+  consulted. The isolated remaining obligation is `refer_write_WriteRefines`
+  (Proof/NetworkSim): the impl's two referral `cacheUnlessTruncated` writes
+  write-refine the model absorb, under `CacheWf` + `OneExpiryPerKey`.
+  The CNAME-chase analogue is `cname_write_WriteRefines(_ref)` (Proof/NetworkSim):
+  the impl's single answer-section write at `credAnswer aa` write-refines the
+  model's answer-only absorb. Unlike the referral (whose tier is rank-minimal,
+  so `ble_additional_rank` closes every rank obligation), the answer tier can
+  be rank-MAXIMAL (`authoritativeSection` when `aa=1`), so it instantiates the
+  `cred`-generic core `single_cred_write_WriteRefines`, whose rank argument is
+  `warm_foldl_key_covered` (every cacheable raw's key survives in the written
+  cache at tier-code ≤ the write tier: its push, a later same-key push, or the
+  RFC 2181 §5.4.1 skip's strictly-better blocker under INV-B) composed with
+  `written_rep_rank_le` (any same-key written entry's model rank is bounded by
+  a served record's, through the impl `topServed` gate with freshness carried
+  by `OneExpiryPerKey`) and `αCred_order_used` (impl `toCode` ↔ model
+  `Cred.rank` order reversal on the four used tiers).
+- **CNAME-chase rules restart the descent and carry `WriteRefines` caches;
+  `trustedCname` is the spoofed-chase escape (2026-07-03)**: `answerCname`'s
+  recursion now runs at `seen := []` (RFC 1034 §3.6.2 "go back to the first
+  step" — the canonical name's delegation path is unrelated to the old one's,
+  so the referral-descent watermarks reset while the chase's own `nseen`
+  grows, which is what terminates it) and over `cf0`/`cf` `WriteRefines`
+  continuation caches (the pinned accumulate-absorb was unrealizable on a warm
+  cache — the target's RRset may already be cached even though the chase
+  visits only fresh names). `trustedCname` mirrors `trustedReferral` for an
+  `accepts`-passing forged CNAME the resolver chases; the anti-poison
+  theorems carry a `TrustedCnameCache` escape bounded by the QUERIED NAME's
+  own subtree (the write bailiwick is `q.qname` itself — tighter than the
+  referral escape's delegation cut). Impl-side, the chase is chain-capped:
+  `localAnswer` at fuel 0 returns `.abort` and `stepCheckLocal` fails the
+  query (`"cname chain too long"`, BIND's max-cname-chain behavior) instead
+  of re-querying the network for a name whose cached data was never
+  consulted. The `ioResumeLoop_sound` driver threads `CnameChainModels`
+  (every model-visited chase name has a canonical wire representative in the
+  impl's `cnameChaseVisited` set — what lets the case-insensitive revisit
+  guard refute a model revisit) and is scoped to `q.qtype ≠ .star`: on a
+  QTYPE=ANY query the impl's `answersQueryB` (`hasRRTypeIn` against a single
+  type code) never fires, so it would chase a CNAME that RFC 1034 §3.6.2
+  says IS the answer — a divergence deliberately excluded (ANY is deprecated,
+  RFC 8482) rather than fixed, since a star-aware `answersQueryB` reaches
+  into the NameTreeComplete completeness layer.
+- **Truncated responses are never chased (2026-07-04)**: `stepAnalyzeResponse`
+  TC-checks BEFORE `cnameToChase` — a tc=1 payload is possibly incomplete
+  (RFC 1035 §4.1.1; real resolvers discard it and retry over TCP), so a
+  truncated chaseable-CNAME response is now delivered as-is (the impl's
+  uniform tc=1 handling), never chased and never cached (`cacheUnlessTruncated`
+  was already the tc=1 identity). Model-side this closed the last cname-arm
+  corner of `ioResumeLoop_sound`: a spoofed tc=1 chase had no model rule
+  (`trustedCname` forces a cache absorb the unwritten impl cache falsifies) —
+  post-harden the tc=1 chase is unreachable (`afterResume_cname_truncated`
+  contradiction in the `.continue` arm) and the tc=1 delivery is concluded by
+  `trustedReply` (spoofed-only; honest servers never truncate in the world
+  model, `serverAnswers_tc_false`).
+- **`cacheCname` carries a `CacheRefines` eviction slot (2026-07-04)**: the
+  impl's capacity bound (now `boundLru`, item 5) can evict between the cached
+  CNAME-link reads and the chase's driver re-entry, so the cached-chase rule's
+  recursion runs at any `cf` with `hcf : CacheRefines cf c` — a pure ALL-TIME
+  shrink (whole-key expiry-class drops under `OneExpiryPerKey`; stronger than
+  the network rules' time-gated `WriteRefines` write slot). The security walks
+  compose through `hcf` unconditionally (`CacheRefines.trans_perm`,
+  `groundedServed_of_refines`); `resolves_data_needs_acceptance`'s
+  cache-unchanged disjunct is sharpened from `cout = c` to
+  `CacheRefines cout c` (an eviction changes the cache without an acceptance
+  witness but never fabricates served data — the RFC 5452 content is the
+  no-fabrication direction), and `offpath_cannot_cache`'s hypothesis follows.
+  Driver-side, `localAnswer_chase_peel`'s `.miss` continuation quantifies the
+  evicted continuation cache (`cfK`) and exports the output cache (`cOut`), so
+  the continue-chase arm is eviction-uniform (no capacity case split).
+- **`CacheCnameCanon` carries the ≤127-label bound (2026-07-04)**: canonical
+  wire names cap at 255 octets (RFC 1035 §2.3.4), and each nonempty label
+  costs ≥2 wire octets plus the root octet
+  (`labelsToWireFormatGo_length_bound`), so cached CNAME rdata names have
+  ≤127 labels. Threaded from `CanonicalRdata.nameType`'s `hle` through
+  `canonicalRR_cnameRdata_canonical` and the cache invariant, it discharges
+  the chase recursion's query-name label bound (`hqlen`) invariantly.
+- **`ioResumeLoop_sound` co-exports the terminal cache/world ties (2026-07-04,
+  the "stage C" conclusion-decomposition style)**: the driver's conclusion is
+  `∃ slist v coutM, HasVerdictAt … v coutM ∧ …` — `HasVerdictAt` is
+  `HasVerdict` with the model derivation's OUTPUT CACHE named instead of
+  existentially closed (`HasVerdictAt.toHasVerdict` repacks) — plus ten new
+  conjuncts: `CacheRefines (αCache cout) coutM` (the impl's returned cache
+  serves within the model derivation's output cache — exactly the
+  `gluelessNs` rule's `hc2f` slot, so a caller can re-enter the loop on a
+  sub-run's `cout`), `WorldModels` at the FINAL world (`WorldModels` depends
+  only on the oracle field, which no `World` round mutates —
+  `WorldModels_oracle`), and the eight impl-cache invariants re-exported at
+  `cout` (mirroring the hypothesis section; `cout_exports_bound` bundles
+  them through the bound-preservation lemmas, now the `_boundLru` family). Pass-through
+  arms inherit the conjuncts from the IH (rewriting the `CacheNegWf`
+  conjunct's `lastQuery` conditioning and `CacheWf`'s clock across the
+  arm's state-framing equations); terminal arms pin `cout` via
+  `afterResume_finished_payload_pos`/`_neg` inversions (the
+  `.done`-carries-state equations, now kept instead of discarded). TWO
+  producer re-attributions fell out of the cout tie: (1) the plain
+  answer/negative terminals route the honest transport through
+  `Resolves.trustedReply` (`serverAnswer_hasVerdictAt`) instead of
+  `Resolves.answer`, whose pinned cout absorbs the WHOLE reply — a write the
+  impl never performs; (2) the finished-chase terminals attribute BOTH
+  honest and spoofed origins via `trustedCname` (whose `cf0`/`cf`
+  `WriteRefines` slots carry the impl's answer-section write) — a spoofed
+  no-write `trustedReply` re-attribution cannot be tied to the impl's
+  written `cout`. The observable verdict statement is unchanged; only the
+  ∃-witness derivation's rule attribution moved to the cout-faithful rules.
+- **Delivered answers are CACHED (RFC 1034 §5.3.3 step 4a / §7.4 impl-harden),
+  and `trustedReply` carries write slots**: `stepAnalyzeResponse`'s positive
+  plain-answer delivery (`answersQueryB = true`, a NEW arm ahead of the
+  no-write answer/nameError leaf) writes the answer section before
+  delivering — `cacheUnlessTruncated` at the answer-section owner filter
+  (`ownerRaws (echoedQname resp) resp.answer` since review #004; see the
+  exact-owner bullet below) with `credAnswer (aa == 1)`, exactly the
+  CNAME-chase branch's call shape
+  (tc=1 stays a no-op: partial data is never cached) — so the returned warm
+  cache serves what was delivered (previously the delivered records never
+  reached the returned cache; only chase/referral hops wrote). Model-side,
+  `Resolves.trustedReply` gained the `trustedCname`-shaped `cf0`/`cf`
+  `WriteRefines` continuation-cache slots against the answer-only,
+  `q.qname`-bailiwick absorb, with conclusion cout pinned to `cf` (it is a
+  terminal rule). The no-write deliveries (tc=1 truncation, negatives,
+  junk answers) are kept expressible by the `∨ cf0 = c` DISJUNCT of `hcf0` —
+  deliberately a disjunct, NOT a `WriteRefines.refl` instance, because an
+  unwritten cache does not `WriteRefines` the absorb image (a
+  higher-credibility absorbed record can occlude what the old cache served,
+  breaking both the read-soundness and the provenance clause); the
+  disjunction is also RFC-faithful (a truncated delivery caches nothing,
+  RFC 1035 §4.1.1). Since the rule now writes, it joins
+  `trustedReferral`/`trustedCname` as a bounded in-bailiwick poisoning
+  admission: the anti-poison walks gained the `TrustedReplyCache` escape
+  disjunct (accepts-passing non-referral reply, poison confined to
+  `q.qname`'s own subtree — RFC 5452's classic answer-forgery vector made
+  explicit and bounded). Driver-side, the positive terminals split on tc:
+  tc=0 attributes BOTH origins via the write-carrying `trustedReply` over a
+  synthetic accepted reply (answer `αSection respA.answer`), with
+  `cname_write_WriteRefines_ref` discharging `hcf0` and the written-cache
+  invariant bundle mirroring the finished-chase arms; tc=1 and the negative
+  terminals keep the no-write instantiation (`cf0 := c`, `Or.inr rfl`).
+  The resolver still does NOT store delivered negatives in its negative
+  cache mid-loop (`storeNegative` runs only in the server wrapper
+  `replyForResolution` via `storeNegativeIfCacheable`) — a possible future
+  RFC 2308 harden.
+- **The answer-section cache keep is EXACT-OWNER, not whole-bailiwick
+  (external review #004, 2026-07)**: the answer writes above filter with
+  `ownerRaws` — keep a record iff its owner `nameEqCI`-matches the reply's
+  ECHOED question name (`Resolver.echoedQname`; the client-boundary write in
+  `replyForResolution` uses `clientQname query`) — replacing the
+  `bailiwickRaws`/`isAncestorB` keep, which admitted any in-bailiwick
+  SUBDOMAIN record riding the answer (`sub.example.test A 6.6.6.6` on an
+  `example.test` answer, then served from cache with zero upstream queries —
+  cache injection; unbound scrubs the answer to `owner == qname`,
+  `iter_scrub.c`). Referral authority/additional writes keep the bailiwick
+  keep (glue legitimately lives below the cut). Model-side the
+  `trustedReply`/`answerCname`/`trustedCname` `hcf0` image is
+  `Response.answerOwned q.qname` (answer filtered to `nameEq r.owner
+  q.qname`, empty authority/additional); `Cache.absorb` itself is untouched —
+  its `isAncestor` keep is vacuous on the pre-filtered image
+  (`isAncestor_of_nameEq`). The `TrustedReplyCache`/`TrustedCnameCache`
+  escape predicates are correspondingly SHARPENED from `isAncestor q.qname
+  r.owner` to `nameEq r.owner q.qname`: a trusted-forgery write is provably
+  confined to the queried name ITSELF, not its subtree
+  (`absorb_answerOwned_topServed_owner`). The impl↔model bridge
+  (`αSection_ownerRaws_eq`) needs the filter name's canonical wire triple —
+  `nameEqCI` compares whole case-folded bytes, unlike the parsed-labels
+  `isAncestorB` — which is why the filter is keyed to the echoed question
+  name (canonical by the decode pipeline, `questionFromLabels_canonical`)
+  and bridged to the model `q.qname` through the `questionMatches` CI gate
+  (`absorb_answerOwned_congr`, the write-path `cnameRR_congr`). Exact-owner
+  drops inline CNAME chain TAILS from the cache (owner = intermediate target
+  ≠ qname); the chase re-queries each hop's target anyway, so the cost is
+  one extra round-trip on inline chains, never a wrong answer.
 - **Grammar over string anchors**: rules read RFC text through the
   tokenizer/POS-tagger/chunker, never by matching literal phrases.
   Notation (tuples, numerals, durations) is tokenized; frames are
@@ -1682,9 +3143,10 @@ the wire-format `bv_decide` certificates).
 
 ### Implementation changes the proof forced
 
-1. **`store` no longer evicts; eviction is whole-expiry-class at IO-round
-   boundaries** (`boundExpiryClasses` — see Cache Bounds): per-record
-   FIFO could strand half an RRset.
+1. **`store` no longer evicts; eviction is whole-key read-LRU at IO-round
+   boundaries** (`boundLru`, item 5 — see Cache Bounds; originally
+   whole-expiry-class `boundExpiryClasses`): per-record FIFO could strand
+   half an RRset.
 2. **Zero-TTL records are not cached** (`storeChecked`, RFC 1035 §3.2.1
    "should not be cached") — this also keeps stored entries strictly
    fresh at store time, which the blocking dichotomy needs.
@@ -1784,3 +3246,215 @@ exercised live with `dig`.
     final header+question form (bounded by the client's own ≤512 query).
 
 All theorems are sorry-free.
+
+## Driver Concurrency (Main.lean, liveness plan L6)
+
+`main` serves UDP and TCP on the same port over ONE shared resolver cache
+(`Std.Mutex DnsCache`, `cacheMx`). The UDP loop runs on the main thread; the TCP
+loop (`tcpServeLoop`) runs on a dedicated background task (`IO.asTask`). Both are
+`partial` server loops — intentionally non-terminating — so their per-query
+liveness is not a Lean theorem (see `docs/liveness-plan.md`, decision 5); the
+properties below are DOCUMENTED invariants backed by `test/concurrency_stress.sh`.
+
+**Invariant 1 — no cache lock is held across network I/O (snapshot-in / merge-out).**
+Each serving round:
+1. reads a cache *snapshot* under the lock, then releases it
+   (`let snapshot ← cacheMx.atomically get`);
+2. runs `serveDatagram` / `serveTcpDatagram` on the snapshot with NO lock held —
+   the entire upstream resolution (`resolveWithIO`: round-trips + the query
+   deadline) and the client reply happen lock-free;
+3. merges the round's resulting cache back into the CURRENT cache under the lock
+   (`cacheMx.atomically do set ((← get).absorb served)`) — never a blind `set`
+   that would clobber a concurrent writer's insertions.
+
+Consequence: a serve on one transport cannot head-of-line-block a client on the
+other. The previous design held `cacheMx` across the whole serve, so one slow
+delegation chain (up to the query deadline) stalled every client on both
+transports — an availability/DoS surface. `test/concurrency_stress.sh` checks A1/A2
+witness this: a fast client returns in ~ms while a 2 s upstream resolution is in
+flight on the other transport.
+
+**Invariant 2 — the merge is credibility-safe (`DnsCache.absorb`).** `absorb base
+new` replays each of `new`'s entries onto `base` using the SAME same-key dedup
+filter as `store`/`storeNegative`, so no RRset record is duplicated or corrupted;
+`base`'s keys that `new` did not touch (the other transport's concurrent inserts)
+survive, and each key `new` wrote takes `new`'s entry (last-writer-wins per key).
+Safety rests on reads being per-key MAX-credibility gated (`maxCredForKey` /
+`maxRankForKey`) and freshness gated: absorbing a lower-credibility or stale entry
+can never *downgrade* a served RRset because the read path filters it out.
+Last-writer-merge is thus acceptable on this advisory cache — a merge that loses a
+race merely re-fetches. `boundExpiryClasses` re-bounds capacity after the union.
+
+**Invariant 2 is now a THEOREM** (`Proof/Absorb.lean`, axiom-clean):
+`absorb_serve_invariants` proves `DnsCache.absorb` preserves the FULL cache
+invariant pack `serveDatagram_verdict_sound` consumes on its entry cache and
+re-establishes on its exit cache (`CacheWf`, `CacheNsCanon`, `CacheCnameCanon`,
+per-record `WfRR`, `CacheNegWf`, `CacheNsDistinct`, `OneExpiryPerKey`, the
+capacity bound, `CacheRecCanon`, `CacheNegSoaCanon`) — so the shared cache's
+well-formedness is INDUCTIVE across serve rounds on both transports. Two
+structural facts drive it: a membership inversion (`mem_absorb_records` /
+`mem_absorb_negatives` — the merge invents no entry, transferring every
+per-entry invariant), and the replay filter's dedup (same filter as `store`),
+which deletes any same-key-different-expiry / same-NS-key-same-rdata incumbent
+before each push — so the RELATIONAL invariants (`OneExpiryPerKey`,
+`CacheNsDistinct`) and the capacity bound hold from `base`'s invariants ALONE,
+against arbitrary merge input. The non-starvation half (Invariant 1) remains the
+stress test's job (a `partial` IO loop's liveness is not kernel-provable).
+
+**Rate limiting.** BOTH loops enforce the RFC 5358 per-source-IP `RateBucket`
+(previously only UDP did — TCP was an unthrottled ingress). Each threads its own
+bucket, reset every `sweepInterval` datagrams/connections; the UDP loop also drives
+the periodic expiry `sweep` on the shared cache.
+
+**Data-race safety.** One global `cacheMx`, acquired alone, never nested, no
+re-entrancy — the verified core always runs on a private snapshot, so no serving
+path observes a partially-updated cache.
+
+## Adequacy / Liveness Proofs (liveness plan L0–L5)
+
+The converse of the soundness capstones: against a *cooperative* network the
+resolver actually DELIVERS the model's answer (soundness alone is vacuously
+satisfiable by a resolver that SERVFAILs everything). Four modules, all
+axiom-clean; full staging and per-brick status in `docs/liveness-plan.md`.
+
+**The clock is LIVE (finding 061, July 2026).** `FreeIO.World` carries a
+latency schedule `tick : Nat → UInt32` (default `fun _ => 0`) and an exchange
+counter `exchCtr`; `DnsCmd.run` advances `clock` by `tick exchCtr` on every
+`.exchange`/`.tcpExchange` (including timeouts — waiting on a dead server
+costs wall-clock time; `World.afterExchange` is the one-step world update).
+`ioResumeLoop`'s `t ≥ deadline` check therefore reads a clock that genuinely
+moves, and the deadline test is BIVALENT:
+
+- *Adequacy premise*: the frozen-clock `hdl : ¬ (w.clock ≥ deadline)` premises
+  on the multi-round capstones were replaced by the honest budget account
+  `TimelyWorld w.clock w.tick w.exchCtr deadline fuel`
+  (`clock.toNat + tickSum tick exchCtr fuel < deadline.toNat` — start clock
+  plus the worst-case total latency of the whole descent stays under the
+  deadline; no overflow side conditions because UInt32 wraparound can only
+  shrink the ℕ bound). The pinned chain builders (`spineDelegation_chain`,
+  `flatProbeLadder_chain`) thread a per-node clock `cl`/counter `ectr` (the
+  clock advances by `TK ectr` per round exactly as `idCtr` advances by 2), and
+  the two-round instances (`depth1Delegation_chain`,
+  `run_ioResumeLoop_failoverAnswer`, `run_ioResumeLoop_retryThenAnswer`,
+  `serveDatagram_depth1_adequate`) carry the explicit second-round premise
+  `hdl₂ : ¬ (w.clock + w.tick w.exchCtr ≥ deadline)`. Single-round lemmas keep
+  plain `hdl` (their one check happens before their one exchange).
+- *Deadline dual (the mutant-killer)*:
+  `FreeIO.run_ioResumeLoop_deadline_after_referral` /
+  `run_resolveWithIO_deadline_witness` — in a world whose first exchange's
+  latency crosses the deadline, the loop takes one referral round and the NEXT
+  iteration RETURNS the deadline error (`replyForResolution` maps exactly this
+  `.error` to the client-visible SERVFAIL). Deleting the deadline check, or
+  answering instead of erroring, falsifies the dual; decidable twins
+  `deadlineFiresMidResolution` / `deadlineSurvivesFastWorld`
+  (Test/AdequacyPins.lean) pin both halves on concrete worlds.
+- *`tick ≡ 0` sanity*: `TimelyWorld.of_tick0` shows the new premise collapses
+  to the old `hdl` in zero-latency worlds, and the `_tick0` capstone siblings
+  (`resolveWithIO_spine_adequate_warm_tick0`,
+  `resolveWithIO_flatMultiLabel_adequate_tick0`) restate the pre-061 theorems
+  verbatim as corollaries. `run_world_frame` frames `tick` (not `clock`);
+  `run_world_clock_frame_tick0` recovers the frozen clock for `tick ≡ 0`.
+- *Scope*: the multi-datagram serve-TRACE theorems (`serveSeq_sound` and the
+  `serveSeq_total*` family) take the zero-latency premise `∀ i, w.tick i = 0`
+  — they pin cache well-formedness and the world model at one fixed clock
+  across a whole datagram sequence; making the trace clock-monotone is a
+  cache-expiry-over-time refinement, deliberately out of 061's scope. TCP
+  per-connection read timeouts likewise remain driver-level (Main.lean),
+  outside the model (057/067).
+
+- **Proof/Adequacy.lean** — the descent machinery, independent of any oracle
+  model. `ioResumeLoop_terminates`/`resolveWithIO_terminates` (L0: per-query
+  termination in ANY world), `Delivers` (the `∃ K w', Prog.run … = some (out, w')`
+  adequacy analogue of soundness's run equation), `Delivers_referral_step` (one
+  honest referral round lifts a deeper delivery one zone up), the `DescentChain`
+  inductive + `DescentChain.delivers` (chain ⟹ delivery) + `DescentChain.of_descent`
+  (build a chain by well-founded induction on a delegation-depth metric), and the
+  entry bridges `resolveWithIO_adequate_of_chain`/`_of_descent`.
+
+- **Proof/CooperativeNetwork.lean** — the honest-oracle model feeding that
+  machinery. `mkHonestOracle{,Addr}`/`CooperativeNetwork{,Addr}` (the plan's
+  decision-2 premise: the oracle is DEFINED and honest, keyed on a responder —
+  address-keyed for delegating descents, since with QNAME minimisation off the
+  query bytes repeat and only the destination distinguishes rounds), the flat
+  `treeRespond` responder + classification/round-trip bridges, the END-TO-END flat
+  capstones `resolveWithIO_flatAuthoritative_{answer,nxdomain}_adequate`, the
+  referral responder `referralReply` + `delegatingReferralRound_node` /
+  `delegating{Answer,Nxdomain}Round_delivers` (per-round constructors), the
+  branch-2 continue-state inversion pack (`cooperativeReferral_continue_
+  terminalFacts{,_exact}`), the cache write-through engines (glue:
+  `reGlue_of_referral_glue`/`reGlue_preBoundLru_of_referral_glue`; NS-key
+  exactness: `referralWrite_nsKey_facts` with the `mem_*_inv` write inversions),
+  and `depth1Delegation_chain` (the assembled two-round delegating descent).
+
+- **Proof/NodataAdequacy.lean** — the NODATA error-reply adequacy dual (RFC 2308
+  §2.2), lemma-for-lemma twin of the CooperativeNetwork NXDOMAIN family
+  (`stepAnalyzeResponse_nodata` → `afterResume_nodata` → `run_ioResumeLoop_nodata`
+  → `honestNodataRound_delivers` → `treeRespond_nodata_classified` →
+  `flatAuthoritative_nodataRound_delivers` → capstone
+  `resolveWithIO_flatAuthoritative_nodata_adequate`). A cooperative flat-authoritative
+  network whose leaf lookup is `.nodata` drives the resolver to the definite NODATA
+  terminal — it delivers, it does not loop. The capstone threads the SOA-gate
+  hypothesis `hsoaNeg : hasSoaAuthorityFor qu.qname negAuth = true` demanded by the
+  SOA-gated NODATA classifier arm (2026-07-15 Classify/DIRECTION row): `treeRespond`
+  places `negAuth` verbatim in the reply's authority section and preserves the
+  question, so `hasSoaAuthorityFor (echoedQname resp) resp.authority` holds on the
+  received response (discharged in `treeRespond_nodata_classified` via
+  `treeRespond_question`). This closes the Rcode-scope ledger row for the NODATA
+  case; the `hrcq`/`hqsf` gates on the spine/depth-1 warm capstones are `justified_scope`
+  (client-query well-formedness, echoed by `buildSubQuery`, not reply-error doors).
+
+- **Proof/Depth1Adequacy.lean** — the concrete depth-1 instance discharging
+  `depth1Delegation_chain`'s premise set from per-instance-computable zone data
+  over a COLD entry cache: `referralReply_roundtrips` (round-1 wire round-trip),
+  `mem_reGlue_inv` + `referralWrite_reGlue_exact` (every `reGlue`-recovered glue
+  address IS the referral's own glue IP — pins the two-server responder's child
+  arm to ONE address), `twoServerRespond` + arm equations, and the capstone
+  `resolveWithIO_depth1_adequate`: entry `resolve` pause + two-server cooperative
+  network ⟹ `resolveWithIO` delivers the child zone's answer in exactly two
+  rounds — PINNED in the statement (plan decision 1): the run output is
+  `(.ok resp, cout)` with `resp.answer = rrs.map rrBytes` (the child zone's
+  records byte-exact, via `finalizeAnswer_answer`/`treeRespond_answer_eq`) and
+  `resp.question = q.question` (the client's question restored). Pairs with
+  `ioResumeLoop_sound` on the cooperative path.
+
+- **Proof/ServeAdequacy.lean** — stage L5, serving adequacy: the serve pipeline
+  itself delivers. `storeNegativeIfCacheable_runs`/`replyForResolution_runs`
+  (the serve tail is total — every arm a log and/or pure cache write),
+  `serveDatagram_delivers_of_resolve` / `serveTcpDatagram_delivers_of_resolve`
+  (per transport: ingress gates passed + the embedded `resolveWithIO` sub-run
+  delivering ⟹ the serve run completes; forward composition over
+  `serve{,Tcp}Datagram_served`, with `sendTo`/`tcpSend` effect-free under
+  `Prog`), and the end-to-end `serveDatagram_depth1_adequate`: a client
+  datagram against the depth-1 cooperative network is SERVED, with the
+  embedded (deterministic) resolution pinned to `.ok resp` carrying the child
+  zone's records. The reply CONTENT at the client boundary is deliberately not
+  re-stated: it is already pinned by `serveDatagram_verdict_sound`
+  (`deliveredResponse query resp` for this same sub-run) — adequacy contributes
+  the missing half, that the run and its positive `resp` exist.
+
+- **Proof/Failover.lean** — multi-homed failover adequacy (plan-2 Topology row;
+  finding 035). Generalises the single-NS `SlistShape` to the set-valued
+  `SlistShape'` (a delegation cut with a *set* `nsSet : Array (ByteArray × BitVec 32)`
+  of NS-name/glue-address pairs; every slist entry realises one of them). `SlistShape`
+  is kept as the singleton instance — `SlistShape.toShape'` /
+  `SlistShape'.toSingleton` are the round trip, so the spine/depth1 capstones that
+  state `SlistShape` compile unchanged (single-NS as an instance, not a migration).
+  The set-valued collapse-point primitives generalise each `SlistShape.*` lemma to a
+  per-element / member-of-set conclusion: `SlistShape'.bestWithAddress` (picks *some*
+  member of `nsSet`, via the multi-NS-ready `bestWithAddress_mem`),
+  `SlistShape'.markQueried`, `SlistShape'.addressTargets_none`,
+  `SlistShape'.of_fromNsWithGlueAll` (builds the set shape for a genuinely multi-NS
+  cut with **no** name/address collapse, only a full-glue premise), and `reGlue_owned`
+  (the per-element glue write-inverse: each `(gn, ga) ∈ reGlue` is owned by a live
+  cached glue record for `gn`). The flagship is **`run_ioResumeLoop_failoverAnswer`**
+  (axiom-clean): a multi-homed delegation is contacted, the first server picked
+  (`bestWithAddress`) TIMES OUT, and the resolver fails over to a DISTINCT second
+  server which answers — the resolver delivers, with the answer content pinned
+  (`resp'.answer = resp2.answer`). The impl mechanism is the resolver's own
+  least-tried-first rotation: `run_ioResumeLoop_timeout'` (the timeout primitive,
+  exposing the advanced world) marks the timed-out server queried (bumping its
+  transmission count), so the next `bestWithAddress` picks the failover server; the
+  theorem composes it with `run_ioResumeLoop_answer` on the second server. This is
+  the coverage the single-NS shape could not express (two servers, first dead, second
+  live). The `topology` scope gate persists only because the spine capstone's binder
+  is not yet migrated to `SlistShape'`; the 035 gap itself is closed.

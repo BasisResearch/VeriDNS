@@ -1,38 +1,9 @@
-import VeriDNS.RFC.Macro
+import Std.Tactic.BVDecide
+import Batteries
+import Pseudoprint
 import VeriDNS.Spec.Message
 import VeriDNS.Spec.NameTree
-
-/-!
-RFC 1034 §4.3.2: the name server lookup algorithm — the operational
-reading of the §3.1 name tree. The match-down sub-steps (3a/3b/3c) are
-where queries get their meaning: whole-QNAME match → answer (or CNAME
-restart), zone cut → referral, missing label → authoritative name error.
-
-The sub-step discourse rule generates the obligations as parameterized
-props over an abstract state σ; `Proof/NameTree.lean` instantiates them
-with the `treeLookup` denotation, pinning the denotation to this text:
-
-- `obligation_copyRRsMatchQTYPE` — whole-QNAME match, not the CNAME case
-  → the answer is the RRs matching QTYPE (3a);
-- `obligation_copyCNAMERRIntoAnswerSection` /
-  `obligation_changeQNAMEToCanonicalName` — CNAME at the node and QTYPE ≠
-  CNAME → the CNAME RR is served and resolution restarts at the canonical
-  name (3a);
-- `obligation_setAuthoritativeNameErrorInResponse` — a label match is
-  impossible and the name is the original QNAME → authoritative name
-  error (3c). The wildcard qualifier ("if the '*' label does not exist")
-  drops out grammatically — its sentence's guard does not parse to a
-  name, so its body is skipped — consistent with wildcards being out of
-  scope (§4.3.3 is not implemented; the model tree carries no `*` nodes).
-
-This file uses its own namespace: the algorithm-path generator also
-emits step/transition types whose names (`AlgorithmStep`,
-`ResponseAction`, `Transition`, `StepSpec`) would otherwise collide with
-the §5.3.3 resolver algorithm in `Spec/Resolver.lean`.
--/
-
-namespace VeriDNS.Spec.ServerLookup
-
+import VeriDNS.RFC.Check
 include_rfc [1034][1289:1366] {
 4.3.2. Algorithm
 
@@ -105,5 +76,67 @@ zone, and another for the cache:
    6. Using local data only, attempt to add other RRs which may be
       useful to the additional section of the query.  Exit.
 }
+def VeriDNS.Spec.ServerLookup.obligation_setAuthoritativeNameErrorInResponse : (σ : Type) → (σ → Bool) → (σ → Bool) → (σ → Prop) → Prop :=
+  fun σ matchImpossible nameOriginal setAuthoritativeNameErrorInResponse =>
+  ∀ (s : σ),
+    matchImpossible s = Bool.true →
+      nameOriginal s = Bool.true → setAuthoritativeNameErrorInResponse s
 
-end VeriDNS.Spec.ServerLookup
+def VeriDNS.Spec.ServerLookup.obligation_copyRRsMatchQTYPE : (σ : Type) → (σ → Bool) → (σ → Bool) → (σ → Bool) → (σ → Prop) → Prop :=
+  fun σ wholeOfQNAMEMatched dataAtNodeCNAME qtypeNotMatchCNAME copyRRsMatchQTYPE =>
+  ∀ (s : σ),
+    wholeOfQNAMEMatched s = Bool.true →
+      ¬(dataAtNodeCNAME s = Bool.true ∧ qtypeNotMatchCNAME s = Bool.true) → copyRRsMatchQTYPE s
+
+def VeriDNS.Spec.ServerLookup.obligation_changeQNAMEToCanonicalName : (σ : Type) → (σ → Bool) → (σ → Bool) → (σ → Bool) → (σ → Prop) → Prop :=
+  fun σ wholeOfQNAMEMatched dataAtNodeCNAME qtypeNotMatchCNAME changeQNAMEToCanonicalName =>
+  ∀ (s : σ),
+    wholeOfQNAMEMatched s = Bool.true →
+      dataAtNodeCNAME s = Bool.true →
+        qtypeNotMatchCNAME s = Bool.true → changeQNAMEToCanonicalName s
+
+@[blueprint "ServerLookup.AlgorithmStep"]
+inductive VeriDNS.Spec.ServerLookup.AlgorithmStep  where
+  | setClear : VeriDNS.Spec.ServerLookup.AlgorithmStep
+  | searchAvailable : VeriDNS.Spec.ServerLookup.AlgorithmStep
+  | startMatching : VeriDNS.Spec.ServerLookup.AlgorithmStep
+  | startMatchingCache : VeriDNS.Spec.ServerLookup.AlgorithmStep
+  | usingLocal : VeriDNS.Spec.ServerLookup.AlgorithmStep
+  | usingLocalQuery : VeriDNS.Spec.ServerLookup.AlgorithmStep
+  deriving Repr, BEq, Inhabited
+
+@[blueprint "ServerLookup.ResponseAction"]
+inductive VeriDNS.Spec.ServerLookup.ResponseAction  where
+  | whole : VeriDNS.Spec.ServerLookup.ResponseAction
+  | «match» : VeriDNS.Spec.ServerLookup.ResponseAction
+  | some : VeriDNS.Spec.ServerLookup.ResponseAction
+  deriving Repr, BEq, Inhabited
+
+@[blueprint "ServerLookup.Transition"]
+structure VeriDNS.Spec.ServerLookup.Transition  where
+  «from» : VeriDNS.Spec.ServerLookup.AlgorithmStep
+  action : VeriDNS.Spec.ServerLookup.ResponseAction
+  to : VeriDNS.Spec.ServerLookup.AlgorithmStep
+  deriving Repr, BEq, Inhabited
+
+def VeriDNS.Spec.ServerLookup.algorithm_transition_0 : VeriDNS.Spec.ServerLookup.Transition :=
+  VeriDNS.Spec.ServerLookup.Transition.mk VeriDNS.Spec.ServerLookup.AlgorithmStep.usingLocalQuery
+  VeriDNS.Spec.ServerLookup.ResponseAction.whole
+  VeriDNS.Spec.ServerLookup.AlgorithmStep.usingLocalQuery
+
+def VeriDNS.Spec.ServerLookup.algorithm_transition_1 : VeriDNS.Spec.ServerLookup.Transition :=
+  VeriDNS.Spec.ServerLookup.Transition.mk VeriDNS.Spec.ServerLookup.AlgorithmStep.usingLocalQuery
+  VeriDNS.Spec.ServerLookup.ResponseAction.match
+  VeriDNS.Spec.ServerLookup.AlgorithmStep.startMatchingCache
+
+def VeriDNS.Spec.ServerLookup.algorithm_transition_2 : VeriDNS.Spec.ServerLookup.Transition :=
+  VeriDNS.Spec.ServerLookup.Transition.mk VeriDNS.Spec.ServerLookup.AlgorithmStep.usingLocalQuery
+  VeriDNS.Spec.ServerLookup.ResponseAction.some
+  VeriDNS.Spec.ServerLookup.AlgorithmStep.usingLocalQuery
+
+def VeriDNS.Spec.ServerLookup.obligation_copyCNAMERRIntoAnswerSection : (σ : Type) → (σ → Bool) → (σ → Bool) → (σ → Bool) → (σ → Prop) → Prop :=
+  fun σ wholeOfQNAMEMatched dataAtNodeCNAME qtypeNotMatchCNAME copyCNAMERRIntoAnswerSection =>
+  ∀ (s : σ),
+    wholeOfQNAMEMatched s = Bool.true →
+      dataAtNodeCNAME s = Bool.true →
+        qtypeNotMatchCNAME s = Bool.true → copyCNAMERRIntoAnswerSection s

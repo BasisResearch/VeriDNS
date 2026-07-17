@@ -8,16 +8,6 @@ namespace VeriDNS.Impl.Header
 open VeriDNS.Impl
 open VeriDNS.Spec
 
--- ============================================================
--- Header decode: 12 fixed bytes
--- Bytes 0–1: ID
--- Bytes 2–3: flags (QR/OPCODE/AA/TC/RD/RA/Z/RCODE)
--- Bytes 4–5: QDCOUNT
--- Bytes 6–7: ANCOUNT
--- Bytes 8–9: NSCOUNT
--- Bytes 10–11: ARCOUNT
--- ============================================================
-
 def decode : DnsParser VeriDNS.Spec.Header := do
   let id ← readBV16
   let flagsRaw ← DnsParser.readUInt16BE

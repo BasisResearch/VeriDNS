@@ -3,15 +3,12 @@ import VeriDNS.Proof.Header
 import VeriDNS.Proof.Question
 import VeriDNS.Proof.ResourceRecord
 import VeriDNS.Proof.DomainName
+import VeriDNS.RFC.Check
 
 namespace VeriDNS.Proof.Message
 
 open VeriDNS.Impl
 open VeriDNS.Spec
-
--- ============================================================
--- ByteArray helpers
--- ============================================================
 
 theorem ba_append_assoc (a b c : ByteArray) : a ++ b ++ c = a ++ (b ++ c) := by
   apply ByteArray.ext; simp [ByteArray.data_append, Array.append_assoc]
@@ -26,7 +23,6 @@ theorem ba_push_eq_append (a : ByteArray) (b : UInt8) :
     a.push b = a ++ ⟨#[b]⟩ := by
   apply ByteArray.ext; simp [ByteArray.data_push, ByteArray.data_append]
 
-/-- Concatenation of a list of byte arrays. -/
 def baConcat : List ByteArray → ByteArray
   | [] => ByteArray.empty
   | b :: rest => b ++ baConcat rest
@@ -36,11 +32,6 @@ def baConcat : List ByteArray → ByteArray
 @[simp] theorem baConcat_cons (b : ByteArray) (rest : List ByteArray) :
     baConcat (b :: rest) = b ++ baConcat rest := rfl
 
--- ============================================================
--- Serializer "appends" framework: a write-only serializer run from
--- any initial buffer appends a fixed byte string.
--- ============================================================
-
 def Appends (s : DnsSerializer Unit) (bytes : ByteArray) : Prop :=
   ∀ init : ByteArray, (StateT.run s init).2 = init ++ bytes
 
@@ -49,7 +40,6 @@ theorem appends_runBytes {s : DnsSerializer Unit} {b : ByteArray}
   show (StateT.run s ByteArray.empty).2 = b
   rw [h ByteArray.empty, ba_empty_append]
 
-/-- Restate an `Appends` fact with `runBytes s` as the byte string. -/
 theorem appends_norm {s : DnsSerializer Unit} {b : ByteArray}
     (h : Appends s b) : Appends s (DnsSerializer.runBytes s) := by
   rw [appends_runBytes h]; exact h
@@ -111,8 +101,6 @@ theorem appends_encodeList {α : Type} (enc : α → DnsSerializer Unit) (f : α
     simp only [Impl.Message.encodeList, List.map_cons, baConcat_cons]
     exact appends_seq (henc x) (appends_encodeList enc f henc rest)
 
-/-- The encoder output decomposes into header bytes followed by the
-    concatenated per-item encodings of the four sections. -/
 theorem encode_eq (msg : Format) :
     Impl.Message.encode msg =
       DnsSerializer.runBytes (Header.encode msg.header) ++
@@ -131,18 +119,13 @@ theorem encode_eq (msg : Format) :
       (appends_seq (hrr msg.answer.toList)
         (appends_seq (hrr msg.authority.toList) (hrr msg.additional.toList))))
 
--- ============================================================
--- Header frame lemma: decoding from encoded-header-plus-suffix
--- ============================================================
-
 theorem header_size (h : VeriDNS.Spec.Header) :
     (DnsSerializer.runBytes (Header.encode h)).size = 12 := rfl
 
 open VeriDNS.Proof in
 set_option maxRecDepth 32768 in
 set_option maxHeartbeats 64000000 in
-/-- Header decode is insensitive to trailing bytes: decoding from an encoded
-    header followed by any suffix recovers the header and stops at byte 12. -/
+
 theorem header_frame (h : VeriDNS.Spec.Header) (suf : ByteArray) :
     DnsParser.run Header.decode (DnsSerializer.runBytes (Header.encode h) ++ suf) 0 =
       .ok (h, 12) := by
@@ -174,28 +157,22 @@ theorem header_frame (h : VeriDNS.Spec.Header) (suf : ByteArray) :
     BitPacking.unpack_pack,
     Enum.opcode_ofBV4_toBV4, Enum.rcode_ofBV4_toBV4]
 
--- ============================================================
--- Question frame lemma: decoding an encoded question at any position
--- ============================================================
-
-/-- The 4 trailing qtype/qclass bytes of an encoded question. -/
 def tcBytes (qtype qclass : BitVec 16) : ByteArray :=
   ⟨#[UInt8.ofBitVec ((qtype >>> 8).setWidth 8), UInt8.ofBitVec (qtype.setWidth 8),
      UInt8.ofBitVec ((qclass >>> 8).setWidth 8), UInt8.ofBitVec (qclass.setWidth 8)]⟩
 
 theorem tcBytes_size (qtype qclass : BitVec 16) : (tcBytes qtype qclass).size = 4 := rfl
 
-/-- The serialized question is its qname followed by the 4 type/class bytes. -/
 theorem question_bytes (q : VeriDNS.Spec.Question) :
     DnsSerializer.runBytes (Question.encode q) = q.qname ++ tcBytes q.qtype q.qclass :=
   (appends_runBytes (appends_seq (appends_writeBytes q.qname)
     (appends_seq (appends_writeBV16 q.qtype) (appends_writeBV16 q.qclass)))).trans (by rfl)
 
 set_option maxHeartbeats 3200000 in
-/-- Question decode frame lemma: decoding an encoded question embedded at any
-    position recovers the question and advances exactly past its encoding. -/
+
 theorem question_frame (q : VeriDNS.Spec.Question)
     (labels : Array ByteArray) (hv : Proof.DomainName.ValidLabels labels)
+    (hle : (Impl.DomainName.labelsToWireFormat labels).size ≤ 255)
     (hqn : Impl.DomainName.labelsToWireFormat labels = q.qname)
     (pre suf : ByteArray) :
     DnsParser.run Question.decode
@@ -213,21 +190,21 @@ theorem question_frame (q : VeriDNS.Spec.Question)
           (tcBytes qtype qclass) suf]
   rw [hassoc]
   simp only [Question.decode, Primitives.run_bind]
-  rw [Proof.DomainName.decodeName_frame_labels labels hv pre (tcBytes qtype qclass ++ suf)]
+  rw [Proof.DomainName.decodeName_frame_labels labels hv hle pre (tcBytes qtype qclass ++ suf)]
   simp only [Primitives.run_bind, Primitives.run_readBV16, Primitives.run_pure]
-  -- buffer size fact
+
   have hsz : (pre ++ Impl.DomainName.labelsToWireFormat labels ++
       (tcBytes qtype qclass ++ suf)).data.size =
       pre.size + (Impl.DomainName.labelsToWireFormat labels).size + 4 + suf.size := by
     simp [ByteArray.size_data, ByteArray.size_append, tcBytes_size]; omega
-  -- resolve the two bounds checks
+
   simp only [dif_pos (show pre.size + (Impl.DomainName.labelsToWireFormat labels).size + 1 <
     (pre ++ Impl.DomainName.labelsToWireFormat labels ++
       (tcBytes qtype qclass ++ suf)).data.size from by rw [hsz]; omega)]
   simp only [dif_pos (show pre.size + (Impl.DomainName.labelsToWireFormat labels).size + 2 + 1 <
     (pre ++ Impl.DomainName.labelsToWireFormat labels ++
       (tcBytes qtype qclass ++ suf)).data.size from by rw [hsz]; omega)]
-  -- byte accesses into the 4-byte type/class suffix
+
   have hb0 : ∀ (hlt : _), (pre ++ Impl.DomainName.labelsToWireFormat labels ++
       (tcBytes qtype qclass ++ suf)).data[pre.size +
         (Impl.DomainName.labelsToWireFormat labels).size]'hlt =
@@ -266,23 +243,17 @@ theorem question_frame (q : VeriDNS.Spec.Question)
     simp [ByteArray.data_append, tcBytes]
   simp only [hb0, hb1, hb2, hb3]
   have hqt_id : (UInt8.ofBitVec ((qtype >>> 8).setWidth 8)).toBitVec.setWidth 16 <<< 8 |||
-      (UInt8.ofBitVec (qtype.setWidth 8)).toBitVec.setWidth 16 = qtype := by bv_decide
+      (UInt8.ofBitVec (qtype.setWidth 8)).toBitVec.setWidth 16 = qtype :=
+    VeriDNS.Proof.Primitives.reassemble16 qtype
   have hqc_id : (UInt8.ofBitVec ((qclass >>> 8).setWidth 8)).toBitVec.setWidth 16 <<< 8 |||
-      (UInt8.ofBitVec (qclass.setWidth 8)).toBitVec.setWidth 16 = qclass := by bv_decide
+      (UInt8.ofBitVec (qclass.setWidth 8)).toBitVec.setWidth 16 = qclass :=
+    VeriDNS.Proof.Primitives.reassemble16 qclass
   simp only [hqt_id, hqc_id]
   have hpos : pre.size + (Impl.DomainName.labelsToWireFormat labels).size + 2 + 2 =
       pre.size + (Impl.DomainName.labelsToWireFormat labels ++ tcBytes qtype qclass).size := by
     simp [ByteArray.size_append, tcBytes_size]; omega
   rw [hpos]
 
--- ============================================================
--- Sequential parse induction: decoding n items from concatenated
--- per-item encodings, given a frame property for each item.
--- ============================================================
-
-/-- Parsing `pairs.length` items from the concatenation of their encodings
-    recovers all items and consumes exactly the concatenated bytes, provided
-    each (item, encoding) pair satisfies the frame property. -/
 theorem run_decodeMany {α : Type} (p : DnsParser α) :
     ∀ (pairs : List (α × ByteArray)),
     (∀ x ∈ pairs, ∀ (pre suf : ByteArray),
@@ -319,32 +290,21 @@ theorem run_decodeMany {α : Type} (p : DnsParser α) :
         = pre.size + (hd.2 ++ baConcat (tl.map (·.2))).size
       simp [ByteArray.size_append]; omega
 
--- ============================================================
--- Validity hypotheses and the main roundtrip theorem
--- ============================================================
-
-/-- Each question has a valid label decomposition. -/
 structure ValidQuestions (qs : Array VeriDNS.Spec.Question) where
   labels : (i : Fin qs.size) → Array ByteArray
   valid : ∀ i, DomainName.ValidLabels (labels i)
+  le255 : ∀ i, (Impl.DomainName.labelsToWireFormat (labels i)).size ≤ 255
   corresponds : ∀ i, Impl.DomainName.labelsToWireFormat (labels i) = qs[i].qname
 
-/-- Each answer/authority/additional byte sequence is canonical wire format:
-    `decodeRRCanonical` embedded at any position reproduces exactly the same
-    bytes and consumes exactly them. This is the invariant `decode` maintains
-    (it canonicalizes every RR via `decodeRRCanonical`) and what `encode`
-    (which writes RR bytes raw) needs to roundtrip. -/
 structure ValidRRBytes (rrs : Array ByteArray) where
   canonical : ∀ (i : Fin rrs.size) (pre suf : ByteArray),
     DnsParser.run Impl.Message.decodeRRCanonical (pre ++ rrs[i] ++ suf) pre.size
       = .ok (rrs[i], pre.size + rrs[i].size)
 
-/-- Questions paired with their encodings, for `run_decodeMany`. -/
 private def qpairs (qs : Array VeriDNS.Spec.Question)
     : List (VeriDNS.Spec.Question × ByteArray) :=
   qs.toList.map fun q => (q, DnsSerializer.runBytes (Question.encode q))
 
-/-- RR byte sequences paired with themselves (encoding = raw bytes). -/
 private def rrpairs (rrs : Array ByteArray) : List (ByteArray × ByteArray) :=
   rrs.toList.map fun rr => (rr, rr)
 
@@ -385,7 +345,7 @@ private theorem qpairs_frame (qs : Array VeriDNS.Spec.Question) (hvq : ValidQues
   obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hx
   obtain ⟨i, hi, rfl⟩ := Array.mem_iff_getElem.mp (Array.mem_def.mpr hq)
   exact question_frame _ (hvq.labels ⟨i, hi⟩) (hvq.valid ⟨i, hi⟩)
-    (hvq.corresponds ⟨i, hi⟩) pre suf
+    (hvq.le255 ⟨i, hi⟩) (hvq.corresponds ⟨i, hi⟩) pre suf
 
 private theorem rrpairs_frame (rrs : Array ByteArray) (hv : ValidRRBytes rrs) :
     ∀ x ∈ rrpairs rrs, ∀ (pre suf : ByteArray),
@@ -397,11 +357,8 @@ private theorem rrpairs_frame (rrs : Array ByteArray) (hv : ValidRRBytes rrs) :
   exact hv.canonical ⟨i, hi⟩ pre suf
 
 set_option maxHeartbeats 3200000 in
-/-- Full message roundtrip: decode ∘ encode = id, given count fields match
-    section sizes — each stated as its generated count predicate
-    (`format_qdcount_counts_question` etc., from the §4.1 "specifying the
-    number of entries" field descriptions) — questions have valid domain
-    names, and RR byte sequences are canonical wire format. -/
+
+@[blueprint "message_roundtrip", uses := ["header_roundtrip", "Format"]]
 theorem decode_encode (msg : Format)
     (hqd : format_qdcount_counts_question msg)
     (han : format_ancount_counts_answer msg)
@@ -416,7 +373,7 @@ theorem decode_encode (msg : Format)
   have han : msg.header.ancount.toNat = msg.answer.size := han
   have hns : msg.header.nscount.toNat = msg.authority.size := hns
   have har : msg.header.arcount.toNat = msg.additional.size := har
-  -- Section encodings
+
   have hQ : DnsParser.run
       (Impl.Message.decodeMany Question.decode msg.question.size #[])
       (DnsSerializer.runBytes (Header.encode msg.header) ++
@@ -503,7 +460,7 @@ theorem decode_encode (msg : Format)
         ByteArray.size_append, ByteArray.size_append, ByteArray.size_append,
         header_size] at h0
     simpa using h0
-  -- Assemble
+
   simp only [Impl.Message.decode]
   rw [encode_eq]
   simp only [Primitives.run_bind]
@@ -518,11 +475,7 @@ theorem decode_encode (msg : Format)
   rw [har, hD]
   simp only [Primitives.run_pure]
 
-/-- `ValidQuestions` discharges the generated `format_question_qname_valid`
-    (qname "a domain name represented as a sequence of labels", each label
-    1–63 octets), with the abstract label decomposition instantiated by the
-    wire-format decoder: every question's qname decodes to labels within
-    the RFC 1035 §2.3.1 bounds. -/
+@[blueprint "qname_valid", uses := ["Question"]]
 theorem validQuestions_qname_valid (msg : Format)
     (hvq : ValidQuestions msg.question) :
     format_question_qname_valid
@@ -538,5 +491,8 @@ theorem validQuestions_qname_valid (msg : Format)
   obtain ⟨j, hj, hjl⟩ := Array.getElem_of_mem hl
   rw [← hjl]
   exact hval j hj
+
+rfc_proves decode_encode [1035][1351:1400]
+rfc_proves validQuestions_qname_valid [1035][380:435]
 
 end VeriDNS.Proof.Message
